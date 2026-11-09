@@ -1,29 +1,48 @@
 # NXFormat 1.0.1
 
-NXFormat 1.0.1 includes the NXConvert desktop application and CLI, the Rust
-archive writer, the C API and the header-only C++17 reader.
+NXFormat 1.0.1 keeps the cart's bundled system update inside the archive, so a
+packed DXCI can be rebuilt byte for byte, and makes reads faster and more
+robust, especially when several threads read at once. It includes the NXConvert
+desktop application and CLI, the Rust archive writer, the C API and the
+header-only C++17 reader.
+
+> **Compatibility:** archives that contain firmware use NX 0.3 and only open in
+> 1.0.1 or later readers. All other archives stay NX 0.2 and still open in 1.0.0.
+> Update your emulator before sharing archives with firmware.
 
 ## What is new in 1.0.1
 
-- Native packs keep the cart's bundled system update (`partition.hfs0`) by
-  default as a Source Resource, so `rebuild` gives back the exact DXCI.
-  `--omit-firmware` (or the desktop per-game choice) leaves it out. Archives
-  with firmware are NX 0.3 and need a 1.0.1 reader; all others stay NX 0.2.
-- The reader opens NX 0.2 and 0.3. Reads return a `PartialRead`: verified
-  blocks are committed straight into the caller's buffer, and
+**Firmware preservation**
+- DXCI/DNSP packs keep the bundled system update (`partition.hfs0`) by default,
+  as a Source Resource. `rebuild` gives back the exact original package.
+- `--omit-firmware`, or the per-game choice in the desktop app, leaves it out.
+- Identical firmware shared by several packages is stored once.
+- In the desktop app, recipe and firmware options only appear for DXCI/DNSP
+  packages, and the firmware option only when the package has one.
+
+**Faster reads**
+- `read()` and `read_file()` return a `PartialRead`: verified blocks go
+  straight into the caller's buffer, with no staging copy.
   `OpenOptions::atomic_reads` keeps the 1.0.0 all-or-nothing behaviour.
-- Snapshot trees are checked without recursion, and the directory depth limit
-  is now 256 in every implementation. No archive can exhaust a thread stack.
-- A fresh `pack` publishes one generation even when it adds updates or
-  recipes, so readers open it without checking an older generation.
-- An I/O error while reading the newest generation is reported instead of
-  falling back to an older generation.
 - `Session` decodes split Zstandard reads on a small worker pool
-  (`decode_workers`, up to 4 by default) instead of one thread: 1.6x to 2.8x
-  faster sequential reads of compressed files on Switch 2 games.
-- The block cache no longer serializes concurrent readers: cache hits share a
-  lock and counters are kept per thread. With 8 threads, cached 4 KiB reads
-  have a 0.9 µs p99 instead of 17 µs, and throughput is up to 3.5x higher.
+  (`decode_workers`, up to 4 by default): 1.6x to 2.8x faster sequential reads
+  of compressed files on Switch 2 games.
+- The block cache no longer serializes concurrent readers. With 8 threads,
+  cached 4 KiB reads have a 0.9 µs p99 instead of 17 µs, with up to 3.5x the
+  throughput.
+- `Archive::lookup(directory, name)` finds a path by binary search
+  (about 0.2 µs instead of 1 to 4 µs for a scan).
+
+**More robust**
+- Snapshot trees are checked without recursion, and the directory depth limit
+  is 256 in every implementation. No archive can exhaust a thread stack.
+- An I/O error while reading the newest generation is reported, instead of a
+  silent fallback to an older generation.
+- A fresh `pack` publishes a single generation, even when it adds updates or
+  recipes.
+- `add` with recipes is atomic: the content and its recipes are published
+  together, or not at all.
+- The session worker keeps running after a user cancellation callback fires.
 
 ## Features
 
