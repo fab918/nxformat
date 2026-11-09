@@ -1403,7 +1403,15 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
             };
             let inv = inventory(&sources, &native)?;
             for issue in inv.all_issues() {
-                eprintln!("{issue:?}");
+                let level = match issue.severity {
+                    native::Severity::Info => "info",
+                    native::Severity::Warning => "warning",
+                    native::Severity::Error => "error",
+                };
+                match issue.source.and_then(|i| inv.sources.get(i)) {
+                    Some(s) => eprintln!("{level}: {}: {}", s.path.display(), issue.message),
+                    None => eprintln!("{level}: {}", issue.message),
+                }
             }
             let parent = output
                 .parent()
@@ -1419,6 +1427,9 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
             if options.cancellation.is_cancelled() {
                 return Err("conversion cancelled before publication".into());
             }
+            // The recipes were appended as a new generation of the private
+            // stage: publish it as the only one.
+            crate::writer::seal_staged_generations(&stage.path, &options)?;
             crate::writer::atomic_replace(&stage.path, output)?;
             stage.disarm();
             drop(watch);

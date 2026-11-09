@@ -258,7 +258,13 @@ private:
                 job=std::move(queue_.front()); queue_.pop_front();
             }
             Admission admitted(*this,static_cast<bool>(job.cursor));
-            if (!admitted) return;
+            if (!admitted) {
+                // Only stop() ends the worker: a user cancellation callback
+                // may clear later, so it just drops this speculative job.
+                std::lock_guard<std::mutex> lock(queue_mutex_);
+                if (stopped_) return;
+                ++cancelled_; continue;
+            }
             if (job.cursor && job.cursor->generation.load()!=job.generation) {
                 std::lock_guard<std::mutex> lock(queue_mutex_); ++cancelled_; continue;
             }

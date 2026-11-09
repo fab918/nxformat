@@ -26,7 +26,7 @@ SOFTWARE.
 #ifndef NX_READER_HPP_INCLUDED
 #define NX_READER_HPP_INCLUDED
 
-// Portable, read-only NX 0.2 reader. The distributed header is generated from
+// Portable, read-only NX 0.2/0.3 reader. The distributed header is generated from
 // this file without transformations; all wire values are decoded explicitly.
 #include <atomic>
 #include <algorithm>
@@ -91,6 +91,22 @@ SOFTWARE.
 namespace nx {
 
 namespace detail {
+// Vector allocator whose resize() leaves new bytes uninitialized. Decoded
+// block buffers are fully overwritten by an exact read or decode before any
+// byte is used, so zero-filling up to 1 MiB per cache miss is pure cost.
+template <class T> struct DefaultInitAllocator {
+    using value_type = T;
+    DefaultInitAllocator() noexcept = default;
+    template <class U> DefaultInitAllocator(const DefaultInitAllocator<U>&) noexcept {}
+    T* allocate(std::size_t n) { return std::allocator<T>{}.allocate(n); }
+    void deallocate(T* p, std::size_t n) noexcept { std::allocator<T>{}.deallocate(p, n); }
+    template <class U> void construct(U* p) noexcept(std::is_nothrow_default_constructible<U>::value) { ::new (static_cast<void*>(p)) U; }
+    template <class U, class... A> void construct(U* p, A&&... a) { ::new (static_cast<void*>(p)) U(std::forward<A>(a)...); }
+    template <class U> bool operator==(const DefaultInitAllocator<U>&) const noexcept { return true; }
+    template <class U> bool operator!=(const DefaultInitAllocator<U>&) const noexcept { return false; }
+};
+using LogicalBytes = std::vector<std::uint8_t, DefaultInitAllocator<std::uint8_t>>;
+
 using Crc32cFunction = std::uint32_t (*)(std::uint32_t, const std::uint8_t*, std::size_t);
 
 struct Crc32cTables {
@@ -854,7 +870,7 @@ struct Archive {
     Status verify_block(std::uint32_t block_id) {
         if (!mounted_) return fail_status(ErrorCode::invalid_argument, "mount() must succeed before block verification");
         try {
-            std::vector<std::uint8_t> logical;
+            detail::LogicalBytes logical;
             Status st = load_block(block_id, true, logical, nullptr);
             return st ? ok_status() : st;
         } catch (const std::bad_alloc&) { return fail_status(ErrorCode::resource_limit, "block allocation failed"); }
@@ -870,7 +886,7 @@ struct Archive {
             // Verify each stored block once, while still hashing every file view.
             std::vector<std::uint8_t> checked(static_cast<std::size_t>(block_count_), 0);
             // One decode buffer and one stored-bytes scratch for the whole pass.
-            std::vector<std::uint8_t> logical;
+            detail::LogicalBytes logical;
             ReadBuffer stored;
             for (const auto& file : files_) {
                 Sha256 hash;
@@ -895,6 +911,8 @@ struct Archive {
 
 private:
     static constexpr std::uint32_t no_index = 0xffffffffu;
+    // Normative NX limit (SECURITY.md): deeper snapshot trees reject.
+    static constexpr std::size_t max_directory_depth = 256;
     struct File { std::uint64_t size = 0; std::uint32_t first = 0, count = 0; std::uint8_t chunk_log2 = 16; std::array<std::uint8_t, 32> digest{}; };
     struct Directory { std::uint32_t first = 0, count = 0; };
     struct Entry { std::uint64_t name_offset = 0; std::uint32_t name_length = 0, target = 0; std::uint8_t kind = 0; };
@@ -923,7 +941,7 @@ private:
     // `pins` counts readers still copying: taken under the LRU lock, dropped
     // with release after the copy. A block is recycled only when it reads 0
     // with acquire, so every finished copy happens before the buffer is reused.
-    struct BlockData { std::vector<std::uint8_t> bytes; std::atomic<std::uint32_t> pins{0}; };
+    struct BlockData { detail::LogicalBytes bytes; std::atomic<std::uint32_t> pins{0}; };
     using BlockBytes = std::shared_ptr<BlockData>;
     struct CachedBlock { BlockBytes bytes; std::list<std::uint32_t>::iterator position; };
     struct BlockCache {
@@ -1051,7 +1069,7 @@ private:
     Status parse_catalog();
     Status mount_impl();
     Status parse_manifest();
-    Status validate_snapshot_identities();
+    Status validate_snapshot_identities(std::uint64_t total_nodes, std::uint64_t total_paths);
     Status validate_media();
     Result<std::vector<std::uint8_t>> read_media_impl(std::uint32_t index);
     Status decode_block_record(const std::uint8_t* row, Block& block) const;
@@ -1061,7 +1079,7 @@ private:
                          std::size_t* verified = nullptr) const;
     Status read_cached_slice(std::uint32_t id, std::size_t offset, std::size_t wanted,
                              std::uint8_t* output, std::size_t& copied, ReadBuffer& stored) const;
-    Status load_block(std::uint32_t id, bool verify, std::vector<std::uint8_t>& logical,
+    Status load_block(std::uint32_t id, bool verify, detail::LogicalBytes& logical,
                       const Block* known_record = nullptr, ReadBuffer* stored_scratch = nullptr) const;
     Status find_file(std::uint32_t snapshot_index, std::string_view path, std::uint32_t& file_id) const;
     std::uint32_t find_entry(std::uint32_t directory, std::string_view name) const;
@@ -1499,7 +1517,9 @@ inline Status Archive::open_impl() {
     // Resolve recovery before exposing Catalog indices to callers. Ordinary
     // single-generation archives still defer Manifest and index I/O to mount().
     if (st) st = check_tail_digests();
-    if (st || st.error.code == ErrorCode::unsupported ||
+    // Only damage (format/integrity/bounds) falls back: an I/O error, a limit
+    // or a cancellation says nothing about the newer generation's validity.
+    if (st || st.error.code == ErrorCode::unsupported || st.error.code == ErrorCode::io ||
         st.error.code == ErrorCode::resource_limit || st.error.code == ErrorCode::cancelled)
         return st;
 
@@ -1813,19 +1833,24 @@ inline Status Archive::mount_impl() {
             return fail(ErrorCode::format,"source resource root is a child directory");
     }
     st=validate_media(); if (!st) return st;
-    return validate_snapshot_identities();
+    return validate_snapshot_identities(resource_nodes,resource_paths);
 }
 
 // Recomputes every snapshot identity (§12) without materializing paths: a
 // first pass checks the tree and budgets and counts nodes, a second hashes
 // the nodes in full-path byte order. Directory entries are already sorted by
 // name, so that order is a per-directory merge of each child's own node (key
-// `name`) and its subtree (key `name/`).
-inline Status Archive::validate_snapshot_identities() {
+// `name`) and its subtree (key `name/`). Both passes use explicit stacks: no
+// tree depth can exhaust the caller's thread stack. `total_nodes` and
+// `total_paths` start from the Source Resource charges.
+inline Status Archive::validate_snapshot_identities(std::uint64_t total_nodes, std::uint64_t total_paths) {
     std::vector<std::uint32_t> seen_dirs(directories_.size(),0), seen_files(files_.size(),0);
-    std::uint64_t total_nodes=0,total_paths=0;
     struct Item { std::string_view name; std::uint32_t entry; bool subtree; };
+    struct CheckFrame { std::uint32_t next, end; std::uint64_t prefix; };
+    struct HashFrame { std::uint32_t depth; std::size_t next, mark; };
     std::vector<std::vector<Item>> levels;
+    std::vector<CheckFrame> checks;
+    std::vector<HashFrame> hashes;
     std::string path;
     auto name_of=[&](const Entry& e) {
         return std::string_view(reinterpret_cast<const char*>(manifest_bytes_.data()+e.name_offset),e.name_length);
@@ -1855,31 +1880,36 @@ inline Status Archive::validate_snapshot_identities() {
             if (++node_count>options_.max_snapshot_nodes || node_count>0xffffffffu) return fail(ErrorCode::resource_limit,"snapshot node count exceeds configured budget");
             return ok_status();
         };
-        std::function<Status(std::uint32_t,std::uint64_t,std::uint32_t)> check;
-        check=[&](std::uint32_t dir_id,std::uint64_t prefix,std::uint32_t depth)->Status {
+        // Enters one directory: cycle check and its own node; its entries
+        // are then visited from the new top frame. The root has depth 0.
+        auto enter=[&](std::uint32_t dir_id,std::uint64_t prefix)->Status {
             auto cancellation=check_cancelled(); if (!cancellation) return cancellation;
-            if (depth>1024) return fail(ErrorCode::resource_limit,"directory depth exceeds 1024");
+            if (checks.size()>max_directory_depth) return fail(ErrorCode::resource_limit,"directory depth exceeds 256");
             if (dir_id>=directories_.size() || seen_dirs[dir_id]==generation) return fail(ErrorCode::format,"directory cycle or repeated directory in snapshot");
             seen_dirs[dir_id]=generation;
             Status st=charge(prefix); if (!st) return st;
             const auto& dir=directories_[dir_id];
-            for (std::uint32_t i=dir.first;i<dir.first+dir.count;++i) {
-                const auto& entry=entries_[i];
-                const std::uint64_t length=prefix ? prefix+1+entry.name_length : entry.name_length;
-                if (entry.kind==1) {
-                    st=check(entry.target,length,depth+1); if (!st) return st;
-                } else {
-                    if (entry.target>=files_.size() || seen_files[entry.target]==generation) return fail(ErrorCode::format,"file record is repeated within a snapshot");
-                    seen_files[entry.target]=generation;
-                    const auto size=files_[entry.target].size;
-                    if (size>std::numeric_limits<std::uint64_t>::max()-logical_size) return fail(ErrorCode::bounds,"snapshot logical size overflows");
-                    logical_size+=size;
-                    st=charge(length); if (!st) return st;
-                }
-            }
+            checks.push_back({dir.first,dir.first+dir.count,prefix});
             return ok_status();
         };
-        Status st=check(snapshot.root_directory,0,0); if (!st) return st;
+        checks.clear();
+        Status st=enter(snapshot.root_directory,0); if (!st) return st;
+        while (!checks.empty()) {
+            auto& frame=checks.back();
+            if (frame.next==frame.end) { checks.pop_back(); continue; }
+            const auto& entry=entries_[frame.next++];
+            const std::uint64_t length=frame.prefix ? frame.prefix+1+entry.name_length : entry.name_length;
+            if (entry.kind==1) {
+                st=enter(entry.target,length); if (!st) return st;  // may invalidate `frame`
+            } else {
+                if (entry.target>=files_.size() || seen_files[entry.target]==generation) return fail(ErrorCode::format,"file record is repeated within a snapshot");
+                seen_files[entry.target]=generation;
+                const auto size=files_[entry.target].size;
+                if (size>std::numeric_limits<std::uint64_t>::max()-logical_size) return fail(ErrorCode::bounds,"snapshot logical size overflows");
+                logical_size+=size;
+                st=charge(length); if (!st) return st;
+            }
+        }
         if (logical_size!=snapshot.logical_size) return fail(ErrorCode::format,"snapshot logical size mismatch");
         Sha256 identity;
         static constexpr std::uint8_t tag[]={'N','X','-','S','N','A','P','S','H','O','T','-','I','D',0};
@@ -1897,9 +1927,8 @@ inline Status Archive::validate_snapshot_identities() {
             put_u8(kind); put_u32(static_cast<std::uint32_t>(path.size()));
             identity.update(reinterpret_cast<const std::uint8_t*>(path.data()),path.size());
         };
-        node(1);  // root, empty path
-        std::function<void(std::uint32_t,std::uint32_t)> hash;
-        hash=[&](std::uint32_t dir_id,std::uint32_t depth) {
+        // Sorted node keys of one directory, in its depth's reusable level.
+        auto fill=[&](std::uint32_t dir_id,std::uint32_t depth) {
             if (levels.size()<=depth) levels.resize(depth+1);
             auto& items=levels[depth];
             items.clear();
@@ -1909,23 +1938,34 @@ inline Status Archive::validate_snapshot_identities() {
                 if (entries_[i].kind==1) items.push_back({name_of(entries_[i]),i,true});
             }
             std::sort(items.begin(),items.end(),before);
-            for (std::size_t k=0;k<levels[depth].size();++k) {
-                // A deeper call reuses its own level, never this one.
-                const Item item=levels[depth][k];
-                const auto& entry=entries_[item.entry];
-                const auto mark=path.size();
-                if (mark) path.push_back('/');
-                path.append(item.name.data(),item.name.size());
-                if (item.subtree) hash(entry.target,depth+1);
-                else if (entry.kind==1) node(1);
-                else {
-                    node(2); put_u64(files_[entry.target].size);
-                    identity.update(files_[entry.target].digest.data(),files_[entry.target].digest.size());
-                }
-                path.resize(mark);
-            }
         };
-        hash(snapshot.root_directory,0);
+        path.clear();
+        node(1);  // root, empty path
+        fill(snapshot.root_directory,0);
+        hashes.clear();
+        hashes.push_back({0,0,0});
+        while (!hashes.empty()) {
+            auto& frame=hashes.back();
+            if (frame.next==levels[frame.depth].size()) { path.resize(frame.mark); hashes.pop_back(); continue; }
+            // Deeper frames use deeper levels only, so this copy stays valid.
+            const Item item=levels[frame.depth][frame.next++];
+            const auto depth=frame.depth;
+            const auto& entry=entries_[item.entry];
+            const auto mark=path.size();
+            if (mark) path.push_back('/');
+            path.append(item.name.data(),item.name.size());
+            if (item.subtree) {
+                fill(entry.target,depth+1);
+                hashes.push_back({depth+1,0,mark});  // invalidates `frame`
+                continue;
+            }
+            if (entry.kind==1) node(1);
+            else {
+                node(2); put_u64(files_[entry.target].size);
+                identity.update(files_[entry.target].digest.data(),files_[entry.target].digest.size());
+            }
+            path.resize(mark);
+        }
         if (identity.finish()!=snapshot.identity) return fail(ErrorCode::integrity,"snapshot identity mismatch");
     }
     return ok_status();
@@ -2014,7 +2054,7 @@ inline Status Archive::read_range(std::uint32_t file_id, std::uint64_t offset, s
     const std::uint64_t chunk_size=1ull<<file.chunk_log2;
     ReadBuffer stored;
     // Reuse decoded storage across chunks instead of allocating per block.
-    std::vector<std::uint8_t> logical;
+    detail::LogicalBytes logical;
     bool raw_single=false;  // set after a failed RAW run read
     RawPiece pieces[max_raw_run];  // built once per call, refilled per run
     while (done<length) {
@@ -2266,7 +2306,7 @@ inline Status Archive::read_cached_slice(std::uint32_t id, std::size_t offset, s
     }
     status=check_cancelled(); if (!status) return status;
     if (auto pinned=pin(true)) { loading.unlock(); return copy(pinned); }
-    std::vector<std::uint8_t> logical;
+    detail::LogicalBytes logical;
     BlockBytes reuse;
     {
         std::lock_guard<std::mutex> lock(cache.mutex);
@@ -2320,7 +2360,7 @@ inline Status Archive::read_cached_slice(std::uint32_t id, std::size_t offset, s
     return ok_status();
 }
 
-inline Status Archive::load_block(std::uint32_t id, bool verify, std::vector<std::uint8_t>& logical,
+inline Status Archive::load_block(std::uint32_t id, bool verify, detail::LogicalBytes& logical,
                                   const Block* known_record, ReadBuffer* stored_scratch) const {
     auto cancelled=check_cancelled(); if (!cancelled) return cancelled;
     Block local_block;

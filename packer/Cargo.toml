@@ -4,7 +4,7 @@ version = "1.0.1"
 edition = "2021"
 license = "MIT"
 rust-version = "1.80"
-description = "Source-independent NXFormat 1.0.0 archive writer"
+description = "Source-independent NXFormat 1.0.1 archive writer"
 
 [lib]
 name = "nxformat_packer"

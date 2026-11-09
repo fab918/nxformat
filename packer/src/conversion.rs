@@ -4,7 +4,7 @@
 use crate::native::{
     associate_with_cancellation, inspect_source, Inventory, InventoryOptions, SnapshotRef,
 };
-use crate::writer::{atomic_replace, unique_temp};
+use crate::writer::{atomic_replace, seal_staged_generations, unique_temp};
 use crate::*;
 use std::ffi::OsStr;
 use std::path::Path;
@@ -315,6 +315,11 @@ pub fn convert_inventory_profiled(
         return Err(invalid(
             "captured profiles contain a missing/incompatible native version",
         ));
+    }
+    // Updates were appended to the private stage as new generations: publish
+    // only the last one, so readers never check an older one at open.
+    if !additions.is_empty() {
+        seal_staged_generations(&stage.path, options)?;
     }
     atomic_replace(&stage.path, destination)?;
     stage.disarm();

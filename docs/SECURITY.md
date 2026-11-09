@@ -32,7 +32,7 @@ NX archives are untrusted input. A reader must validate fields before allocation
 | Block count | `2^32` |
 | One file's block-reference count | `2^32-1` |
 | File logical size | `INT64_MAX` bytes, also constrained by its block count and chunk size |
-| Directory depth | 1,024 |
+| Directory depth | 256 |
 | Zstandard window / decoded block | 1 MiB |
 
 These are format rejection limits, not suggestions. Implementations may impose lower per-mount budgets and return a resource-limit error. They must not raise the limits above these values in NX 0.2 and 0.3. The reader must budget index storage before allocation. The reference reader captures and authenticates both index tables under max_index_bytes; implementations using paging must provide equivalent stable integrity. Backing sources must remain immutable for the Archive lifetime. A default mount budget should cap concurrently decoded block buffers (recommended initial cap: 8 MiB total); this is an implementation setting, not a cache design mandate.

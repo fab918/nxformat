@@ -1,7 +1,23 @@
-# NXFormat 1.0.0
+# NXFormat 1.0.1
 
-NXFormat 1.0.0 includes the NXConvert desktop application and CLI, the Rust
+NXFormat 1.0.1 includes the NXConvert desktop application and CLI, the Rust
 archive writer, the C API and the header-only C++17 reader.
+
+## What is new in 1.0.1
+
+- Native packs keep the cart's bundled system update (`partition.hfs0`) by
+  default as a Source Resource, so `rebuild` gives back the exact DXCI.
+  `--omit-firmware` (or the desktop per-game choice) leaves it out. Archives
+  with firmware are NX 0.3 and need a 1.0.1 reader; all others stay NX 0.2.
+- The reader opens NX 0.2 and 0.3. Reads return a `PartialRead`: verified
+  blocks are committed straight into the caller's buffer, and
+  `OpenOptions::atomic_reads` keeps the 1.0.0 all-or-nothing behaviour.
+- Snapshot trees are checked without recursion, and the directory depth limit
+  is now 256 in every implementation. No archive can exhaust a thread stack.
+- A fresh `pack` publishes one generation even when it adds updates or
+  recipes, so readers open it without checking an older generation.
+- An I/O error while reading the newest generation is reported instead of
+  falling back to an older generation.
 
 ## Features
 
@@ -20,7 +36,7 @@ archive writer, the C API and the header-only C++17 reader.
 
 NXConvert does not decrypt content or provide keys or game files. Emulator
 compatibility depends on the emulator integration and the selected content.
-This release is **NXFormat / NXConvert 1.0.0**, with separate 4096-byte header
+This release is **NXFormat / NXConvert 1.0.1**, with separate 4096-byte header
 pages. The exact binary header fields are defined in the format specification.
 
 ## Packages
@@ -33,7 +49,7 @@ pages. The exact binary header fields are defined in the format specification.
 | Android arm64 | Shared/static libraries and headers, no desktop app |
 
 Release archives include CMake package configuration. `SHA256SUMS` is published
-as a separate attachment. `nxformat-xmake-1.0.0.zip` contains the xmake package
+as a separate attachment. `nxformat-xmake-1.0.1.zip` contains the xmake package
 repository populated with those archive hashes. Extract it and register the
 local directory with xmake. Publication adds no commits to the source repository.
 

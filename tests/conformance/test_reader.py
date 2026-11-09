@@ -43,9 +43,9 @@ def main() -> int:
             return build.returncode
         fuzz_object = Path(temp) / ("nx_reader_fuzz.obj" if is_msvc else "nx_reader_fuzz.o")
         if is_msvc:
-            fuzz_command = [compiler, "/nologo", "/std:c++17", "/EHsc", "/W4", "/WX", "/O2", f"/I{ROOT / 'dist'}", "/c", str(fuzz_source), f"/Fo:{fuzz_object}"]
+            fuzz_command = [compiler, "/nologo", "/std:c++17", "/EHsc", "/W4", "/WX", "/O2", f"/I{ROOT / 'dist'}", f"/I{ROOT / 'tests' / 'support'}", "/c", str(fuzz_source), f"/Fo:{fuzz_object}"]
         else:
-            fuzz_command = [compiler, "-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror", "-pedantic", f"-I{ROOT / 'dist'}", "-c", str(fuzz_source), "-o", str(fuzz_object)]
+            fuzz_command = [compiler, "-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror", "-pedantic", f"-I{ROOT / 'dist'}", f"-I{ROOT / 'tests' / 'support'}", "-c", str(fuzz_source), "-o", str(fuzz_object)]
         fuzz_build = subprocess.run(fuzz_command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if fuzz_build.returncode:
             print(fuzz_build.stdout, file=sys.stderr)

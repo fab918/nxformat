@@ -192,9 +192,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build coverage-guided sanitizer fuzzer
-        run: clang++ -std=c++17 -g -O1 -fsanitize=fuzzer,address,undefined -Idist tests/fuzz/nx_reader_fuzz.cpp -o /tmp/nx_reader_fuzz
+        run: clang++ -std=c++17 -g -O1 -fsanitize=fuzzer,address,undefined -Idist -Itests/support tests/fuzz/nx_reader_fuzz.cpp -ldl -o /tmp/nx_reader_fuzz
       - name: Fuzz copied fixture seeds for one minute
         run: |
           mkdir -p /tmp/nx-corpus
-          cp tests/fixtures/*.nx /tmp/nx-corpus/
+          cp tests/fixtures/*.nx tests/fuzz/seeds/*.nx /tmp/nx-corpus/
           /tmp/nx_reader_fuzz /tmp/nx-corpus -max_total_time=60 -timeout=10 -rss_limit_mb=1024

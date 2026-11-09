@@ -944,7 +944,7 @@ def validate_archive(data: bytes, *, verify_payloads: bool = True) -> dict:
         nodes: list[tuple[bytes, int, int | None]] = []
 
         def walk(dir_id: int, prefix: bytes, depth: int) -> int:
-            if depth > 1024:
+            if depth > 256:
                 reject("resource", "directory depth exceeds limit")
             key = (1, dir_id)
             if key in seen:

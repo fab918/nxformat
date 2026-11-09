@@ -4317,6 +4317,35 @@ fn commit_generation(file: &mut File, header: &[u8; 256], slot: usize) -> std::i
     file.sync_all()
 }
 
+/// Retire the older generations of a staged archive that no reader can have
+/// open yet: copy the selected header page into the other slot. Readers then
+/// see one generation and skip the older-generation checks at open. Bytes of
+/// retired tails stay as free space (SPEC §1, §8); nothing they hold is read.
+pub(crate) fn seal_staged_generations(
+    path: &Path,
+    options: &WriterOptions,
+) -> Result<(), WriterError> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    let header = parse_header(&mut file, options)?;
+    let mut pages = [0u8; DATA_START as usize];
+    read_exact_at(&mut file, 0, &mut pages)?;
+    let (first, second) = pages.split_at(HEADER_PAGE_SIZE);
+    let (active, other) = if header.active_slot == 0 {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    if active == other {
+        return Ok(());
+    }
+    let selected: [u8; 256] = active[..256].try_into().unwrap();
+    commit_generation(&mut file, &selected, 1 - header.active_slot)?;
+    Ok(())
+}
+
 fn collect_tree_blocks(
     archive: &SourceArchive,
     dir_id: u32,

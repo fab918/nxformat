@@ -51,6 +51,10 @@ def main():
         archive = out / "game.nx"
         original = out / "original.hfs0"
         cli("pack", source, archive)
+        # The recipe write is not published as a second generation: both
+        # header pages hold the one selected generation.
+        packed = archive.read_bytes()
+        assert packed[:4096] == packed[4096:8192], "pack published more than one generation"
         rebuilt = out / "rebuilt"
         rebuilt.mkdir()
         cli("rebuild", archive, rebuilt)

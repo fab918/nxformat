@@ -70,7 +70,7 @@ const MAX_MEDIA_REGION: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_CATALOG: u64 = 16 * 1024 * 1024;
 const MAX_MANIFEST: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_PATH_POOL: u64 = 2 * 1024 * 1024 * 1024;
-const MAX_DIRECTORY_DEPTH: usize = 1024;
+const MAX_DIRECTORY_DEPTH: usize = 256;
 const DEDUP_BUCKET_ESTIMATE: u64 = 160;
 const DEDUP_COLLISION_ESTIMATE: u64 = 32;
 
@@ -717,7 +717,7 @@ fn count_tree(
     cancelled(options)?;
     counts.maximum_depth = counts.maximum_depth.max(depth as u64 + 1);
     if depth > MAX_DIRECTORY_DEPTH {
-        return Err(limit_error("directory nesting exceeds 1024 levels"));
+        return Err(limit_error("directory nesting exceeds 256 levels"));
     }
     counts.directories = counts
         .directories
@@ -1400,7 +1400,7 @@ fn flatten_directory(
 ) -> Result<u32, WriterError> {
     cancelled(options)?;
     if depth > MAX_DIRECTORY_DEPTH {
-        return Err(limit_error("directory nesting exceeds 1024 levels"));
+        return Err(limit_error("directory nesting exceeds 256 levels"));
     }
     let local = u32::try_from(tree.directories.len())
         .map_err(|_| limit_error("directory index exceeds u32"))?;
@@ -4927,8 +4927,8 @@ pub use repack::{
     SourceFileSummary, VerificationStats, MAX_EMBEDDED_RECIPE_BYTES,
 };
 pub(crate) use repack::{
-    add_native_contents_with_recipes, inspect_archive_with_space, verify_extracted_source_files,
-    DeferredRecipes,
+    add_native_contents_with_recipes, inspect_archive_with_space, seal_staged_generations,
+    verify_extracted_source_files, DeferredRecipes,
 };
 
 #[cfg(test)]
