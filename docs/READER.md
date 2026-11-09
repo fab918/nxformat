@@ -73,7 +73,7 @@ Default `SessionOptions`:
 | `reader.atomic_reads` | false | `read()` keeps caller output unchanged on failure (staged); default commits verified blocks directly |
 | `parallel_reads` | 8 | Bound on concurrent scratch/decoder work, maximum 64 |
 | `sequential_prefetch` | true | Warms the next Zstandard block of a sequential handle; RAW blocks are never warmed |
-| `split_reads` | true | A multi-block Zstandard read hands its later blocks to the decode workers |
+| `split_reads` | true | A multi-block Zstandard read hands its later blocks to the decode workers, while concurrent readers do not outnumber them |
 | `decode_workers` | 0 (auto) | Background decode threads; auto is min(4, hardware threads / 2), at least 1; maximum 16 |
 | `sequential_reads` | 3 | Adjacent successful reads before prediction |
 | `lookahead_blocks` | 1 | Maximum 2 |

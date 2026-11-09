@@ -42,6 +42,7 @@ SOFTWARE.
 #include <memory>
 #include <unordered_map>
 #include <mutex>
+#include <shared_mutex>
 #include <new>
 #include <optional>
 #include <string>
@@ -686,10 +687,16 @@ struct Archive {
     }
     CacheStats cache_stats() const {
         if (!block_cache_) return {};
-        std::lock_guard<std::mutex> lock(block_cache_->mutex);
+        std::lock_guard<std::shared_mutex> lock(block_cache_->mutex);
         auto result = block_cache_->stats;
-        result.raw_reads += block_cache_->raw_reads.load(std::memory_order_relaxed);
-        result.stored_bytes_read += block_cache_->raw_bytes.load(std::memory_order_relaxed);
+        for (const auto& slot : block_cache_->counters) {
+            const auto get=[](const std::atomic<std::uint64_t>& v) { return v.load(std::memory_order_relaxed); };
+            result.hits+=get(slot.hits); result.misses+=get(slot.misses);
+            result.coalesced+=get(slot.coalesced); result.load_waits+=get(slot.load_waits);
+            result.raw_reads+=get(slot.raw_reads); result.decompressions+=get(slot.decompressions);
+            result.decompression_ns+=get(slot.decompression_ns);
+            result.stored_bytes_read+=get(slot.raw_bytes)+get(slot.stored_bytes_read);
+        }
         result.bytes = block_cache_->bytes;
         result.entries = block_cache_->entries.size();
         return result;
@@ -808,7 +815,7 @@ struct Archive {
         const auto block_id=block_refs_[file.first+static_cast<std::uint32_t>(offset>>file.chunk_log2)];
         Block block;
         if (!block_record(block_id,block) || block.codec==0) return false;
-        std::lock_guard<std::mutex> lock(block_cache_->mutex);
+        std::shared_lock<std::shared_mutex> lock(block_cache_->mutex);
         return block_cache_->entries.find(block_id)==block_cache_->entries.end();
     }
 
@@ -934,25 +941,55 @@ private:
             }
         }
     };
-    // Readers pin a block (shared_ptr copy under the LRU lock) and copy from it
-    // after unlocking. Eviction only drops the cache's reference, so a block
-    // being copied stays alive; at most one block per in-flight read outlives
-    // its eviction, which keeps memory bounded by the admission limit.
-    // `pins` counts readers still copying: taken under the LRU lock, dropped
+    // Readers pin a block (shared_ptr copy under the shared cache lock) and copy
+    // from it after unlocking. Eviction only drops the cache's reference, so a
+    // block being copied stays alive; at most one block per in-flight read
+    // outlives its eviction, which keeps memory bounded by the admission limit.
+    // `pins` counts readers still copying: taken under the shared lock, dropped
     // with release after the copy. A block is recycled only when it reads 0
-    // with acquire, so every finished copy happens before the buffer is reused.
-    struct BlockData { detail::LogicalBytes bytes; std::atomic<std::uint32_t> pins{0}; };
+    // with acquire under the exclusive lock, so every finished copy happens
+    // before the buffer is reused and no new pin can start meanwhile.
+    // `referenced` is the second-chance bit: a hit only sets it (no list
+    // update), so hits run concurrently under the shared lock. Eviction moves
+    // referenced blocks to the back once before it drops them (CLOCK).
+    struct BlockData {
+        detail::LogicalBytes bytes;
+        std::atomic<std::uint32_t> pins{0};
+        std::atomic<bool> referenced{false};
+    };
     using BlockBytes = std::shared_ptr<BlockData>;
-    struct CachedBlock { BlockBytes bytes; std::list<std::uint32_t>::iterator position; };
+    struct CachedBlock { BlockBytes bytes; };
+    // Hot counters are spread over per-thread slots, so concurrent hits do not
+    // share a written cache line; cache_stats() sums them. The trailing pad
+    // keeps two slots' counters out of one 64-byte line without alignas
+    // (which MSVC /W4 reports as C4324).
+    struct CounterSlot {
+        std::atomic<std::uint64_t> hits{0}, misses{0}, coalesced{0}, load_waits{0};
+        std::atomic<std::uint64_t> raw_reads{0}, raw_bytes{0}, decompressions{0}, decompression_ns{0}, stored_bytes_read{0};
+        char pad[64];
+    };
+    static std::size_t counter_slot() {
+        static std::atomic<std::size_t> next{0};
+        thread_local const std::size_t slot=next.fetch_add(1,std::memory_order_relaxed);
+        return slot;
+    }
     struct BlockCache {
-        std::mutex mutex;
+        std::shared_mutex mutex;
+        char mutex_pad[64];  // the lock word is written by every hit
+        std::array<CounterSlot, 16> counters;
+        CounterSlot& counter() { return counters[counter_slot()%counters.size()]; }
+        static void add(std::atomic<std::uint64_t>& value, std::uint64_t amount=1) {
+            value.fetch_add(amount,std::memory_order_relaxed);
+        }
         // Hashed: measured faster than an ordered map under concurrent hits.
         std::unordered_map<std::uint32_t, CachedBlock> entries;
         std::list<std::uint32_t> lru;
         // Fixed-size lock striping bounds synchronization storage. IO/decode
-        // never holds the LRU lock; the same physical block cannot decode twice
-        // concurrently. Rare stripe collisions only serialize those misses.
-        std::array<std::mutex, 32> loads;
+        // never holds the cache lock; the same physical block cannot decode
+        // twice concurrently. A stripe collision makes one miss wait for an
+        // unrelated decode; with 32 stripes 8 threads collided often enough
+        // to show in p99, 256 makes it rare.
+        std::array<std::mutex, 256> loads;
         std::uint64_t bytes = 0;
         // The last evicted block nobody still pins, kept with its shared
         // control block, map node and list node, so a steady-state miss
@@ -960,10 +997,8 @@ private:
         BlockBytes spare;
         std::unordered_map<std::uint32_t, CachedBlock>::node_type spare_node;
         std::list<std::uint32_t> spare_position;
+        // Counters not in CounterSlot; written under the exclusive lock.
         CacheStats stats;
-        // RAW reads never touch the LRU; count them without its lock.
-        std::atomic<std::uint64_t> raw_reads{0}, raw_bytes{0};
-
     };
     std::shared_ptr<BlockCache> block_cache_;
     std::vector<std::uint8_t> index_bytes_;
@@ -2036,7 +2071,7 @@ inline Status Archive::read_file_impl(std::uint32_t file_id,
 #if defined(NX_READER_DIAGNOSTICS)
     if (options_.collect_read_timing && block_cache_) {
         const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
-        std::lock_guard<std::mutex> lock(block_cache_->mutex); block_cache_->stats.copy_ns+=static_cast<std::uint64_t>(ns);
+        std::lock_guard<std::shared_mutex> lock(block_cache_->mutex); block_cache_->stats.copy_ns+=static_cast<std::uint64_t>(ns);
     }
 #endif
     return ok_status();
@@ -2116,8 +2151,8 @@ inline Status Archive::read_range(std::uint32_t file_id, std::uint64_t offset, s
                     return fail(ErrorCode::io,"failed to read RAW block slice");
                 }
                 if (block_cache_) {
-                    block_cache_->raw_reads.fetch_add(1,std::memory_order_relaxed);
-                    block_cache_->raw_bytes.fetch_add(run_bytes,std::memory_order_relaxed);
+                    auto& counter=block_cache_->counter();
+                    BlockCache::add(counter.raw_reads); BlockCache::add(counter.raw_bytes,run_bytes);
                 }
                 for (std::size_t i=0;i<count;++i) {
                     if (i) { st=check_cancelled(); if (!st) { scrub(); return st; } }
@@ -2260,7 +2295,7 @@ inline Status Archive::verify_slices(const Block& block, const std::uint8_t* byt
 #if defined(NX_READER_DIAGNOSTICS)
     if (options_.collect_read_timing && block_cache_) {
         const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-hash_start).count();
-        std::lock_guard<std::mutex> lock(block_cache_->mutex); block_cache_->stats.hash_ns+=static_cast<std::uint64_t>(ns);
+        std::lock_guard<std::shared_mutex> lock(block_cache_->mutex); block_cache_->stats.hash_ns+=static_cast<std::uint64_t>(ns);
     }
 #endif
     return ok_status();
@@ -2270,7 +2305,7 @@ inline Status Archive::read_cached_slice(std::uint32_t id, std::size_t offset, s
                                                 std::uint8_t* output, std::size_t& copied, ReadBuffer& stored) const {
     auto status=check_cancelled(); if (!status) return status;
     auto& cache=*block_cache_;
-    // Copies outside the LRU lock from a pinned block.
+    // Copies outside the cache lock from a pinned block.
     const auto copy=[&](const BlockBytes& pinned) -> Status {
         struct Unpin { BlockData& data; ~Unpin() { data.pins.fetch_sub(1,std::memory_order_release); } } unpin{*pinned};
         const auto& bytes=pinned->bytes;
@@ -2283,25 +2318,34 @@ inline Status Archive::read_cached_slice(std::uint32_t id, std::size_t offset, s
 #if defined(NX_READER_DIAGNOSTICS)
         if (options_.collect_read_timing) {
             const auto ns=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-copy_start).count());
-            std::lock_guard<std::mutex> lock(cache.mutex); cache.stats.copy_ns+=ns;
+            std::lock_guard<std::shared_mutex> lock(cache.mutex); cache.stats.copy_ns+=ns;
         }
 #endif
         return ok_status();
     };
-    // Under the lock: find, refresh the LRU position and pin.
+    // Under the shared lock: find, mark referenced and pin. Hits never write
+    // the map or the list, so they do not wait for each other.
     const auto pin=[&](bool coalesced) -> BlockBytes {
-        std::lock_guard<std::mutex> lock(cache.mutex);
-        auto hit=cache.entries.find(id);
-        if (hit==cache.entries.end()) { if (!coalesced) ++cache.stats.misses; return {}; }
-        ++cache.stats.hits; if (coalesced) ++cache.stats.coalesced;
-        cache.lru.splice(cache.lru.end(),cache.lru,hit->second.position);
-        hit->second.bytes->pins.fetch_add(1,std::memory_order_relaxed);
-        return hit->second.bytes;
+        auto& counter=cache.counter();
+        BlockBytes block;
+        {
+            std::shared_lock<std::shared_mutex> lock(cache.mutex);
+            const auto hit=cache.entries.find(id);
+            if (hit!=cache.entries.end()) {
+                block=hit->second.bytes;
+                block->pins.fetch_add(1,std::memory_order_relaxed);
+                // Skip the store when already set: keeps the line shared.
+                if (!block->referenced.load(std::memory_order_relaxed)) block->referenced.store(true,std::memory_order_relaxed);
+            }
+        }
+        if (!block) { if (!coalesced) BlockCache::add(counter.misses); return {}; }
+        BlockCache::add(counter.hits); if (coalesced) BlockCache::add(counter.coalesced);
+        return block;
     };
     if (auto pinned=pin(false)) return copy(pinned);
     std::unique_lock<std::mutex> loading(cache.loads[id%cache.loads.size()],std::defer_lock);
     if (!loading.try_lock()) {
-        { std::lock_guard<std::mutex> lock(cache.mutex); ++cache.stats.load_waits; }
+        BlockCache::add(cache.counter().load_waits);
         loading.lock();
     }
     status=check_cancelled(); if (!status) return status;
@@ -2309,7 +2353,7 @@ inline Status Archive::read_cached_slice(std::uint32_t id, std::size_t offset, s
     detail::LogicalBytes logical;
     BlockBytes reuse;
     {
-        std::lock_guard<std::mutex> lock(cache.mutex);
+        std::lock_guard<std::shared_mutex> lock(cache.mutex);
         reuse=std::move(cache.spare);
         if (reuse) logical.swap(reuse->bytes);
     }
@@ -2321,11 +2365,20 @@ inline Status Archive::read_cached_slice(std::uint32_t id, std::size_t offset, s
         if (reuse) { reuse->bytes.swap(logical); block=std::move(reuse); }
         else { block=std::make_shared<BlockData>(); block->bytes=std::move(logical); }
         block->pins.store(1,std::memory_order_relaxed);  // this reader's copy below
+        block->referenced.store(false,std::memory_order_relaxed);
         {
-            std::lock_guard<std::mutex> lock(cache.mutex);
+            std::lock_guard<std::shared_mutex> lock(cache.mutex);
+            // CLOCK: a referenced block gets one more pass; after a full lap
+            // every bit is clear, so this ends within 2 * entries steps.
             while (!cache.entries.empty() && (block->bytes.size()>options_.max_cached_block_bytes-cache.bytes ||
                                              cache.entries.size()>=options_.max_cached_blocks)) {
                 const auto victim=cache.lru.front();
+                auto& candidate=*cache.entries.find(victim)->second.bytes;
+                if (candidate.referenced.load(std::memory_order_relaxed)) {
+                    candidate.referenced.store(false,std::memory_order_relaxed);
+                    cache.lru.splice(cache.lru.end(),cache.lru,cache.lru.begin());
+                    continue;
+                }
                 auto node=cache.entries.extract(victim);
                 auto& evicted=node.mapped().bytes;
                 cache.bytes-=evicted->bytes.size();
@@ -2345,9 +2398,9 @@ inline Status Archive::read_cached_slice(std::uint32_t id, std::size_t offset, s
             try {
                 if (cache.spare_node) {
                     auto node=std::move(cache.spare_node);
-                    node.key()=id; node.mapped()=CachedBlock{block,std::prev(cache.lru.end())};
+                    node.key()=id; node.mapped()=CachedBlock{block};
                     cache.entries.insert(std::move(node));
-                } else cache.entries.emplace(id,CachedBlock{block,std::prev(cache.lru.end())});
+                } else cache.entries.emplace(id,CachedBlock{block});
             } catch (...) { cache.lru.pop_back(); throw; }
             cache.bytes+=block->bytes.size();
             cache.stats.peak_bytes=std::max(cache.stats.peak_bytes,cache.bytes);
@@ -2376,7 +2429,7 @@ inline Status Archive::load_block(std::uint32_t id, bool verify, detail::Logical
     const auto start_io=[&] { if (options_.collect_read_timing) io_start=std::chrono::steady_clock::now(); };
     auto record_io=[&] { if (options_.collect_read_timing && block_cache_) {
         const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-io_start).count();
-        std::lock_guard<std::mutex> lock(block_cache_->mutex); block_cache_->stats.io_ns+=static_cast<std::uint64_t>(ns);
+        std::lock_guard<std::shared_mutex> lock(block_cache_->mutex); block_cache_->stats.io_ns+=static_cast<std::uint64_t>(ns);
     }};
 #else
     const auto start_io=[] {};
@@ -2384,7 +2437,7 @@ inline Status Archive::load_block(std::uint32_t id, bool verify, detail::Logical
 #endif
     if (block.codec==0) {
         // RAW blocks need no intermediate compressed-data buffer or copy.
-        if (block_cache_) block_cache_->raw_reads.fetch_add(1,std::memory_order_relaxed);
+        if (block_cache_) BlockCache::add(block_cache_->counter().raw_reads);
         start_io();
         if (!read(block.offset,logical.data(),logical.size()))
             return fail(ErrorCode::io,"failed to read RAW block payload");
@@ -2403,14 +2456,13 @@ inline Status Archive::load_block(std::uint32_t id, bool verify, detail::Logical
         const bool decoded=options_.zstd(options_.zstd_context,stored.bytes.get(),block.stored,logical.data(),logical.size(),&written,&consumed);
         if (block_cache_) {
             const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-started).count();
-            std::lock_guard<std::mutex> lock(block_cache_->mutex);
-            ++block_cache_->stats.decompressions;
-            block_cache_->stats.decompression_ns+=static_cast<std::uint64_t>(ns);
+            auto& counter=block_cache_->counter();
+            BlockCache::add(counter.decompressions); BlockCache::add(counter.decompression_ns,static_cast<std::uint64_t>(ns));
         }
         if (!decoded || written!=logical.size() || consumed!=block.stored)
             return fail(ErrorCode::decompression,"Zstandard callback failed or did not consume one exact frame");
     }
-    if (block_cache_) { std::lock_guard<std::mutex> lock(block_cache_->mutex); block_cache_->stats.stored_bytes_read+=block.stored; }
+    if (block_cache_) BlockCache::add(block_cache_->counter().stored_bytes_read,block.stored);
     auto after_io=check_cancelled(); if (!after_io) return after_io;
     if (verify) {
         Status st=verify_slices(block,logical.data(),0,logical.size()); if (!st) return st;

@@ -42,7 +42,7 @@ def run_linux_wsl_sanitizers(temp: Path, fixture_dir: Path, index: dict) -> bool
             f"mkdir -p {shlex.quote(linux_dir)}",
             f"cd {shlex.quote(workspace)}",
             f"g++ -std=c++17 -O1 -g -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer -I{shlex.quote(workspace + '/dist')} -I{shlex.quote(workspace + '/tests/support')} tests/conformance/reader_smoke.cpp -pthread -ldl -o {shlex.quote(executable)}",
-            f"g++ -std=c++17 -O1 -g -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer -I{shlex.quote(workspace + '/dist')} -c tests/fuzz/nx_reader_fuzz.cpp -o {shlex.quote(fuzz_object)}",
+            f"g++ -std=c++17 -O1 -g -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer -I{shlex.quote(workspace + '/dist')} -I{shlex.quote(workspace + '/tests/support')} -c tests/fuzz/nx_reader_fuzz.cpp -o {shlex.quote(fuzz_object)}",
         ))
         compiled = subprocess.run([wsl, "--distribution", "Ubuntu", "--exec", "/bin/bash", "-lc", compile_script],
                                   text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -137,7 +137,7 @@ def main() -> int:
         else:
             fuzz_command = [compiler, "-std=c++17", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-pedantic",
                             "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
-                            f"-I{ROOT / 'dist'}", "-c", str(fuzz_source), "-o", str(fuzz_object)]
+                            f"-I{ROOT / 'dist'}", f"-I{ROOT / 'tests' / 'support'}", "-c", str(fuzz_source), "-o", str(fuzz_object)]
         fuzz_built = subprocess.run(fuzz_command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if fuzz_built.returncode:
             print(fuzz_built.stdout, file=sys.stderr)
