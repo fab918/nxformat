@@ -143,6 +143,7 @@ impl App {
         if !games.iter().any(|g| g.key == self.focused) {
             self.focused = games.first().map(|g| g.key.clone()).unwrap_or_default();
         }
+        let mut removed = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -177,28 +178,67 @@ impl App {
                             } else {
                                 theme::brand(ui, 56.0);
                             }
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(&game.name).size(18.0).strong());
-                                ui.label(
-                                    theme::muted(if game.tree {
-                                        "Extracted folder".into()
-                                    } else {
-                                        format!(
-                                            "{:016X} · {} source{}",
-                                            game.application,
-                                            game.sources.len(),
-                                            if game.sources.len() == 1 { "" } else { "s" }
-                                        )
-                                    })
-                                    .small(),
-                                );
-                            });
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
+                                    let remove = ui
+                                        .add(
+                                            egui::Button::new("")
+                                                .fill(Color32::from_rgb(168, 40, 53))
+                                                .min_size(egui::vec2(34.0, 34.0)),
+                                        )
+                                        .on_hover_text("Remove this game from the list");
+                                    remove.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::Button,
+                                            true,
+                                            "Remove this game from the list",
+                                        )
+                                    });
+                                    theme::paint_icon(
+                                        ui.painter(),
+                                        egui::Rect::from_center_size(
+                                            remove.rect.center(),
+                                            egui::Vec2::splat(18.0),
+                                        ),
+                                        Icon::Trash,
+                                        Color32::WHITE,
+                                    );
+                                    if remove.clicked() {
+                                        removed = Some(game);
+                                    }
                                     if ui.selectable_label(focused, "Configure").clicked() {
                                         self.focused = game.key.clone();
                                     }
+                                    ui.with_layout(
+                                        egui::Layout::top_down(egui::Align::Min),
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&game.name).size(18.0).strong(),
+                                                )
+                                                .truncate(),
+                                            )
+                                            .on_hover_text(&game.name);
+                                            ui.label(
+                                                theme::muted(if game.tree {
+                                                    "Extracted folder".into()
+                                                } else {
+                                                    format!(
+                                                        "{:016X} · {} source{}",
+                                                        game.application,
+                                                        game.sources.len(),
+                                                        if game.sources.len() == 1 {
+                                                            ""
+                                                        } else {
+                                                            "s"
+                                                        }
+                                                    )
+                                                })
+                                                .small(),
+                                            );
+                                        },
+                                    );
                                 },
                             );
                         });
@@ -269,6 +309,9 @@ impl App {
                     });
                 }
             });
+        if let Some(game) = removed {
+            self.remove_game(game);
+        }
     }
 
     fn configuration(&mut self, ui: &mut egui::Ui) {
@@ -287,11 +330,11 @@ impl App {
                 ui.strong("Compression");
                 theme::info(
                     ui,
-                    &["Compression", "Non: store game data without compression.", "Small / Balanced / Maximum: increasing compression effort.", "Balanced is recommended for most games."],
+                    &["Compression", "None: store game data without compression.", "Small / Balanced / Maximum: increasing compression effort.", "Balanced is recommended for most games."],
                 );
             });
-            ui.horizontal_wrapped(|ui| {
-                if ui.selectable_label(self.no_compress,"Non").clicked(){self.no_compress=true;}
+            ui.horizontal(|ui| {
+                if ui.selectable_label(self.no_compress,"None").clicked(){self.no_compress=true;}
                 for (level,label) in [(1,"Small"),(3,"Balanced"),(13,"Maximum")] {
                     if ui.selectable_label(!self.no_compress && self.level==level,label).clicked(){self.no_compress=false;self.level=level;}
                 }
@@ -301,8 +344,25 @@ impl App {
             let games=self.games();
             let has_trees=games.iter().any(|g|g.tree);
             let has_packages=games.iter().any(|g|!g.tree);
+            let has_gamecard = self.sources.iter().any(Source::selected_gamecard);
+            if has_gamecard {
+                ui.checkbox(&mut self.include_firmware, "Include bundled firmware")
+                    .on_hover_text("Keep any system update bundled in the selected gamecard files.");
+            }
             if has_packages {
-                ui.checkbox(&mut self.recipe,"Keep original rebuild data").on_hover_text("Keep a small recipe inside the NX to rebuild native package files byte for byte.");
+                let omit_firmware = has_gamecard && !self.include_firmware;
+                let mut keep_recipe = self.recipe && !omit_firmware;
+                let recipe_help = if omit_firmware {
+                    "Exact reconstruction requires the bundled firmware."
+                } else {
+                    "Keep a recipe to rebuild native package files byte for byte."
+                };
+                if ui.add_enabled(!omit_firmware, egui::Checkbox::new(&mut keep_recipe, "Keep original rebuild data"))
+                    .on_disabled_hover_text(recipe_help)
+                    .on_hover_text(recipe_help)
+                    .changed() {
+                    self.recipe = keep_recipe;
+                }
             }
             if has_trees {
                 ui.add_space(10.0);ui.strong("Extracted folder platform");
@@ -627,7 +687,7 @@ impl eframe::App for App {
         let busy = self.busy();
         if !busy && self.archive.is_none() && !self.sources.is_empty() {
             egui::Panel::right("configuration")
-                .exact_size(304.0)
+                .exact_size(356.0)
                 .resizable(false)
                 .frame(egui::Frame::NONE.fill(theme::CARD).inner_margin(20))
                 .show(ui, |ui| {

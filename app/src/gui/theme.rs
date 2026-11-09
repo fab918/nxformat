@@ -67,6 +67,7 @@ pub enum Icon {
     Image,
     Check,
     Settings,
+    Trash,
 }
 
 pub fn icon(ui: &mut egui::Ui, kind: Icon, size: f32, color: Color32) {
@@ -155,6 +156,21 @@ pub fn paint_icon(p: &egui::Painter, rect: egui::Rect, kind: Icon, color: Color3
         Icon::Check => {
             line(pt(0.18, 0.52), pt(0.4, 0.73));
             line(pt(0.4, 0.73), pt(0.83, 0.25));
+        }
+        Icon::Trash => {
+            line(pt(0.14, 0.27), pt(0.86, 0.27));
+            line(pt(0.37, 0.12), pt(0.63, 0.12));
+            p.add(egui::Shape::line(
+                vec![
+                    pt(0.24, 0.27),
+                    pt(0.30, 0.88),
+                    pt(0.70, 0.88),
+                    pt(0.76, 0.27),
+                ],
+                stroke,
+            ));
+            line(pt(0.43, 0.42), pt(0.43, 0.73));
+            line(pt(0.57, 0.42), pt(0.57, 0.73));
         }
         Icon::Settings => {
             for (y, x) in [(0.25, 0.4), (0.5, 0.65), (0.75, 0.33)] {

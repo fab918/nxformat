@@ -65,6 +65,16 @@ struct Source {
     selected: bool,
 }
 
+impl Source {
+    fn selected_gamecard(&self) -> bool {
+        !self.tree
+            && self.selected
+            && self.path.extension().is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("dxci") || ext.eq_ignore_ascii_case("xci")
+            })
+    }
+}
+
 #[derive(Clone, Default)]
 struct Snapshot {
     identity: String,
@@ -338,6 +348,7 @@ struct App {
     level: i32,
     no_compress: bool,
     recipe: bool,
+    include_firmware: bool,
     archive: Option<Archive>,
     queue: VecDeque<Job>,
     running: Option<Running>,
@@ -362,6 +373,7 @@ impl Default for App {
             level: 3,
             no_compress: false,
             recipe: true,
+            include_firmware: true,
             archive: None,
             queue: VecDeque::new(),
             running: None,
@@ -566,6 +578,17 @@ impl App {
         games
     }
 
+    fn remove_game(&mut self, game: &Game) {
+        for &index in game.sources.iter().rev() {
+            let source = self.sources.remove(index);
+            self.textures.remove(&source.path);
+        }
+        self.appearances.remove(&game.key);
+        if self.focused == game.key {
+            self.focused.clear();
+        }
+    }
+
     fn convert(&mut self) {
         for game in self.games() {
             let Some(output) = game.output else {
@@ -586,8 +609,18 @@ impl App {
                 args.push("--level".into());
                 args.push(self.level.to_string());
             }
-            if !self.recipe && !game.tree {
-                args.push("--no-recipe".into());
+            if !game.tree {
+                let omit_firmware = !self.include_firmware
+                    && game
+                        .sources
+                        .iter()
+                        .any(|&i| self.sources[i].selected_gamecard());
+                if !self.recipe || omit_firmware {
+                    args.push("--no-recipe".into());
+                }
+                if omit_firmware {
+                    args.push("--omit-firmware".into());
+                }
             }
             if game.tree && self.platform != 0 {
                 args.extend([
