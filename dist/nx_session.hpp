@@ -24,12 +24,6 @@ struct SessionOptions {
     // A read that spans several Zstandard blocks hands the later ones to the
     // worker, which decodes from the end while the caller decodes from the start.
     bool split_reads = true;
-    // false (default): read() writes each verified block straight to the
-    // output, so a failed read may leave verified bytes of earlier blocks in
-    // it; unverified bytes are zeroed before returning. true: read() stages multi-block
-    // ranges and leaves the output unchanged on failure (slower: one
-    // range-sized allocation and copy per multi-block read).
-    bool atomic_reads = false;
 };
 
 struct SessionStats {
@@ -99,21 +93,12 @@ public:
         queue_cv_.notify_all(); gate_cv_.notify_all();
     }
 
-    // Fast by default; see SessionOptions::atomic_reads. Use read_partial()
-    // to learn how many leading bytes were verified when a read fails.
-    Status read(FileId file, std::uint64_t offset, std::size_t length, std::uint8_t* output,
-                std::size_t capacity, const std::shared_ptr<ReadCursor>& cursor = {}) {
-        return demand(file,offset,length,output,capacity,cursor,!options_.atomic_reads).status;
-    }
-
-    // Faster for short-read callers such as an emulator VFS: verified blocks
-    // go straight to `output`, with no range staging. On failure, `bytes`
-    // leading bytes are verified and written; the rest holds no unverified
-    // data (untouched, or zeroed after a direct RAW read). See
-    // Archive::read_file_partial().
-    PartialRead read_partial(FileId file, std::uint64_t offset, std::size_t length, std::uint8_t* output,
-                             std::size_t capacity, const std::shared_ptr<ReadCursor>& cursor = {}) {
-        return demand(file,offset,length,output,capacity,cursor,true);
+    // Same contract as Archive::read_file(): fast by default (verified blocks
+    // go straight to `output`; on failure `bytes` leading bytes are verified),
+    // all-or-nothing with OpenOptions::atomic_reads (options.reader).
+    PartialRead read(FileId file, std::uint64_t offset, std::size_t length, std::uint8_t* output,
+                     std::size_t capacity, const std::shared_ptr<ReadCursor>& cursor = {}) {
+        return demand(file,offset,length,output,capacity,cursor);
     }
 
     // Independent verification deliberately bypasses the verified block cache.
@@ -132,8 +117,8 @@ public:
 
 private:
     PartialRead demand(FileId file, std::uint64_t offset, std::size_t length, std::uint8_t* output,
-                       std::size_t capacity, const std::shared_ptr<ReadCursor>& cursor, bool partial) {
-        const auto failure=[](ErrorCode code,const char* message) { PartialRead r; r.status=Status::failure(code,message); return r; };
+                       std::size_t capacity, const std::shared_ptr<ReadCursor>& cursor) {
+        const auto failure=[](ErrorCode code,const char* message) { return PartialRead(Status::failure(code,message),0); };
         if (cursor) {
             std::lock_guard<std::mutex> lock(cursor->mutex);
             // Invalidate old speculation when the seek is requested, before
@@ -151,9 +136,7 @@ private:
             try { split(file,offset,length); }
             catch (const std::bad_alloc&) { std::lock_guard<std::mutex> lock(queue_mutex_); ++dropped_; }
         }
-        PartialRead result;
-        if (partial) result=archive_.read_file_partial(file,offset,length,output,capacity);
-        else { result.status=archive_.read_file(file,offset,length,output,capacity); if (result.status) result.bytes=length; }
+        PartialRead result=archive_.read_file(file,offset,length,output,capacity);
         if (result && cursor && length && worker_.joinable() && options_.sequential_prefetch && options_.lookahead_blocks) {
             // Speculation is optional: allocator pressure must not fail a
             // demand read whose verified bytes have already been committed.

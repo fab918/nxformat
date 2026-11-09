@@ -3,7 +3,7 @@
 usage: python benchmarks/run_partial_read_benchmark.py <archives-dir> <out.csv>
          <name>=<benchmark-exe> [<name>=<benchmark-exe> ...]
 Each executable is partial_read_benchmark.cpp built against one reader
-version (add -DNX_NO_PARTIAL for readers without read_partial). Archives come
+version (add -DNX_NO_PARTIAL for 1.0.0 readers, whose read() returns a Status). Archives come
 from partial_read_archives.py. RAW blocks are never cached, so RAW runs warm only.
 """
 from __future__ import annotations

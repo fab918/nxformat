@@ -20,8 +20,7 @@ The implementation is in [reader/nx_reader.hpp](../reader/nx_reader.hpp). Genera
 - `Archive::root_directory(snapshot)` obtains a VFS root; `Archive::enumerate(directory, callback)` visits files and subdirectories without allocating in the reader. Directory entry names are `string_view`s into mounted Manifest storage.
 - `Archive::lookup(directory, name)` finds one child entry by binary search over the directory's sorted names (O(log n)), for VFS `GetFile` / `GetSubdirectory` without enumerating the directory.
 - `Archive::resolve_file(snapshot, path)` performs path lookup once and returns `FileInfo` with a `FileId`, type, logical size, and chunk size. `Archive::file_info(id)` obtains the same metadata for a previously resolved file.
-- `Archive::read_file(FileId, offset, length, output, capacity)` performs a random read without repeating path lookup. The path overload is also available for one-shot reads. The snapshot is explicit; the reader never guesses an update chain. By default each touched block is verified before any requested bytes are copied to the caller's output buffer. `read_file` is atomic: on any failure the output buffer is unchanged. A multi-block read is staged in a private buffer, which also receives aligned RAW slices directly. With verification disabled, an unverified RAW single-block slice reads only the requested data bytes into scratch before copying.
-- `Archive::read_file_partial(FileId, offset, length, output, capacity)` returns a `PartialRead { bytes, status }`. It succeeds only when `bytes == length`. On failure, `output[0, bytes)` holds verified bytes in file order. Bytes after them never hold unverified data: they are either untouched or, where a RAW run was read straight into the buffer, zeroed before the call returns. Blocks are committed one by one straight into the caller's buffer, without a staging copy; a RAW block with a bad slice still yields the verified slices in front of it. Unverified bytes are never exposed.
+- `Archive::read_file(FileId, offset, length, output, capacity)` performs a random read without repeating path lookup. The path overload is also available for one-shot reads. The snapshot is explicit; the reader never guesses an update chain. It returns a `PartialRead`: a `Status` (so `!read_file(...)`, `.error` and storing it in a `Status` work as in 1.0.0) plus `bytes`. It succeeds only when `bytes == length`. Each touched block (or 16 KiB RAW slice) is verified before any of its bytes reach the caller's buffer. By default blocks are committed one by one straight into the buffer, without a staging copy; after a failure `output[0, bytes)` holds verified bytes in file order and the rest is untouched or, where a RAW run was read straight into the buffer, zeroed. Unverified bytes are never exposed. `OpenOptions::atomic_reads = true` restores the 1.0.0 behaviour: a multi-block read is staged in a private buffer, the output is unchanged on any failure and `bytes` is 0. With verification disabled, an unverified RAW single-block slice reads only the requested data bytes into scratch before copying.
 - `Archive::verify_block(id)` verifies one block; `Archive::verify_all()` checks media SHA-256 and block slice CRC-32C values, then reconstructs every file SHA-256.
 
 `Result<T>` carries either a value or an `ErrorCode` and message. Catalog title/language views and directory entry names refer to bytes owned by the archive and remain valid until its destruction. `FileId`, `DirectoryHandle`, and `FileInfo.id` are numeric handles scoped to the mounted `Archive`; do not reuse them with another archive or after destruction. The enumeration callback returns `true` to continue and `false` to stop. Enumeration itself allocates no memory; callback work may allocate. The source object and its backing storage must outlive the archive and all backing bytes MUST remain immutable from open() until destruction. File adapters must prevent concurrent modification; remote adapters must pin an object generation. Cached reads may return the earlier verified bytes if callers violate this contract; full verification bypasses the decoded cache. Capturing indexes strengthens verification but does not turn NX into an authenticated format. After a successful mount, concurrent reads are safe only when the source adapter, Zstandard callback/context, and optional `BlockSha256` callback/context are thread-safe. The reader does not serialize access to caller-owned objects. Block reads are verified with per-slice CRC-32C (SSE4.2 or ARMv8 CRC selected at run time, slicing-by-8 otherwise); the `BlockSha256` callback is kept for source compatibility but is no longer called on reads. A RAW read fetches and checks only the 16 KiB slices that cover it; a Zstandard read decodes the whole frame and checks all its slices. Platform-native callback adapters are optional caller/test integrations and are not linked by `dist/nx_reader.hpp`.
@@ -56,7 +55,7 @@ Snapshot::npdm_index and Snapshot::required_firmware expose version-specific exe
 
 `dist/nx_session.hpp` owns one source and one mounted `Archive`. Catalog,
 Manifest, file references and authenticated block descriptors stay resident.
-Resolve `FileId` once, then use `Session::read()` or `Session::read_partial()`. The optional companion
+Resolve `FileId` once, then use `Session::read()`, which has the `Archive::read_file()` contract. The optional companion
 `nx_disk_source.hpp` pins an OS handle and implements positional IO: overlapped
 offset reads on Windows, `pread` on POSIX. Rename/replacement does not retarget
 an existing session. Windows denies concurrent writers; POSIX locking is
@@ -71,7 +70,7 @@ Default `SessionOptions`:
 | `reader.max_cached_block_bytes` | 64 MiB | Verified decoded payload budget |
 | `reader.max_cached_blocks` | 1,024 | Additional bound on LRU entries |
 | `reader.max_read_bytes` | 4 MiB | Largest range accepted by one call |
-| `atomic_reads` | false | `read()` keeps caller output unchanged on failure (staged); default commits verified blocks directly |
+| `reader.atomic_reads` | false | `read()` keeps caller output unchanged on failure (staged); default commits verified blocks directly |
 | `parallel_reads` | 8 | Bound on concurrent scratch/decoder work, maximum 64 |
 | `sequential_prefetch` | true | Warms the next Zstandard block of a sequential handle; RAW blocks are never warmed |
 | `split_reads` | true | A multi-block Zstandard read hands its far half to the worker |
@@ -129,13 +128,12 @@ read fetches and checks only the 16 KiB slices covering the requested bytes. No 
 unverified direct-read shortcut was added to the emulator path.
 
 By default `Session::read()` writes verified blocks straight into the caller's
-buffer: it returns success only when every byte verified, and after a failure
-the buffer may hold a verified prefix (never unverified bytes). An emulator VFS
-already reports short reads, so this is the fast default. Set `atomic_reads`
-to keep the buffer unchanged on corruption, IO failure and cancellation, at the
-cost of one staging buffer and copy per multi-block call. `read_partial()`
-always uses the direct mode and returns the exact verified byte count, which a
-VFS `Read` can return as is. An NXEmu VFS request larger than 4 MiB is split
+buffer and returns the exact verified byte count in `bytes`, which a VFS `Read`
+can return as is: it succeeds only when every byte verified, and after a
+failure the buffer may hold a verified prefix (never unverified bytes). Set
+`reader.atomic_reads` to keep the buffer unchanged on corruption, IO failure
+and cancellation, at the cost of one staging buffer and copy per multi-block
+call. An NXEmu VFS request larger than 4 MiB is split
 into bounded calls.
 
 `Session::stats()` exposes hits, misses, coalesced waits, evictions, decoded

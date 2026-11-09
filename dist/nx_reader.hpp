@@ -235,15 +235,15 @@ struct Result {
 
 using Status = Result<bool>;
 
-// Result of a partial read. `bytes` verified file bytes were written to
+// Result of a file read: a Status (so `!read(...)`, `.error` and storing it
+// in a Status keep working) plus `bytes`, the verified file bytes written to
 // output[0, bytes). output[bytes, length) never holds unverified data: it is
-// untouched, or zeroed where RAW slices were read into it directly. The status is
-// ok exactly when bytes == length, so there is no third state.
-struct PartialRead {
+// untouched, or zeroed where RAW slices were read into it directly. It is ok
+// exactly when bytes == length, so there is no third state.
+struct PartialRead : Status {
     std::size_t bytes = 0;
-    Status status;
-    explicit operator bool() const noexcept { return status.ok(); }
-    bool ok() const noexcept { return status.ok(); }
+    PartialRead() = default;
+    PartialRead(Status status, std::size_t verified) : Status(std::move(status)), bytes(verified) {}
 };
 
 // Backing bytes must remain immutable from open() until Archive destruction.
@@ -286,6 +286,13 @@ struct OpenOptions {
     bool (*is_cancelled)(void*) = nullptr;
     void* cancellation_context = nullptr;
     std::uint64_t max_read_bytes = 16ull * 1024 * 1024;
+    // false (default): read_file() writes each verified block straight to the
+    // output, so a failed read may leave verified bytes of earlier blocks in
+    // it (counted by PartialRead::bytes); unverified bytes are zeroed before
+    // returning. true: multi-block ranges are staged and the output is left
+    // unchanged on failure (slower: one range-sized allocation and copy per
+    // multi-block read).
+    bool atomic_reads = false;
     bool verify_read_blocks = true;
     ZstdDecoder zstd = nullptr;
     void* zstd_context = nullptr;
@@ -803,53 +810,45 @@ struct Archive {
         catch (const std::bad_alloc&) { return Result<std::vector<std::uint8_t>>::failure(ErrorCode::resource_limit, "media allocation failed"); }
     }
 
-    // Reads one file range into caller-owned storage. The method verifies the
-    // complete logical block before exposing any requested bytes from it.
-    Status read_file(std::uint32_t snapshot_index, std::string_view path,
-                     std::uint64_t offset, std::size_t length,
-                     std::uint8_t* output, std::size_t output_capacity) {
-        if (!mounted_) return fail_status(ErrorCode::invalid_argument, "mount() must succeed before file reads");
-        if (length > output_capacity || (length && output == nullptr) || length > options_.max_read_bytes)
-            return fail_status(ErrorCode::resource_limit, "read buffer or configured read limit is too small");
+    // Reads one file range into caller-owned storage. `ok` exactly when
+    // `bytes == length`. Every byte reaches `output` only after its block (or
+    // 16 KiB RAW slice) has verified. By default verified blocks are written
+    // straight to `output` in file order, with no range-sized staging; on any
+    // error (corruption, IO, cancellation, decoder) `bytes` leading bytes are
+    // verified and written, and the rest of `output` is untouched or zeroed:
+    // never unverified. With OpenOptions::atomic_reads a multi-block range is
+    // staged instead, `output` is unchanged on failure and `bytes` is 0.
+    PartialRead read_file(std::uint32_t snapshot_index, std::string_view path,
+                          std::uint64_t offset, std::size_t length,
+                          std::uint8_t* output, std::size_t output_capacity) {
+        if (!mounted_) return failed_read(ErrorCode::invalid_argument, "mount() must succeed before file reads");
+        std::uint32_t file_id = no_index;
         try {
-            std::uint32_t file_id = no_index;
             Status st = find_file(snapshot_index, path, file_id);
-            return st ? read_file_impl(file_id, offset, length, output) : st;
+            if (!st) return PartialRead(std::move(st), 0);
         }
-        catch (const std::bad_alloc&) { return fail_status(ErrorCode::resource_limit, "read allocation failed"); }
+        catch (const std::bad_alloc&) { return failed_read(ErrorCode::resource_limit, "read allocation failed"); }
+        return read_file(FileId{file_id}, offset, length, output, output_capacity);
     }
 
     // Resolve once with resolve_file(), then use this overload for repeated
     // random reads without repeating path-component binary searches.
-    Status read_file(FileId file_id, std::uint64_t offset, std::size_t length,
-                     std::uint8_t* output, std::size_t output_capacity) {
-        if (!mounted_) return fail_status(ErrorCode::invalid_argument, "mount() must succeed before file reads");
+    PartialRead read_file(FileId file_id, std::uint64_t offset, std::size_t length,
+                          std::uint8_t* output, std::size_t output_capacity) {
+        if (!mounted_) return failed_read(ErrorCode::invalid_argument, "mount() must succeed before file reads");
         if (length > output_capacity || (length && output == nullptr) || length > options_.max_read_bytes)
-            return fail_status(ErrorCode::resource_limit, "read buffer or configured read limit is too small");
-        try { return read_file_impl(file_id.value, offset, length, output); }
-        catch (const std::bad_alloc&) { return fail_status(ErrorCode::resource_limit, "read allocation failed"); }
-    }
-
-    // Faster variant of read_file() for callers that can use a short read,
-    // such as an emulator VFS. Blocks are verified and committed to `output`
-    // in file order, with no range-sized staging buffer. Whole RAW slices are
-    // read straight into `output` and verified there. On any error
-    // (corruption, IO, cancellation, decoder) the result says how many leading
-    // bytes are verified and written; RAW blocks may stop inside a block, at
-    // the first 16 KiB slice that fails. Bytes after that prefix are untouched
-    // or zeroed: no unverified byte is left in `output` when the call returns.
-    // Same argument checks and max_read_bytes limit as read_file().
-    PartialRead read_file_partial(FileId file_id, std::uint64_t offset, std::size_t length,
-                                  std::uint8_t* output, std::size_t output_capacity) {
-        PartialRead result;
-        if (!mounted_) { result.status = fail_status(ErrorCode::invalid_argument, "mount() must succeed before file reads"); return result; }
-        if (length > output_capacity || (length && output == nullptr) || length > options_.max_read_bytes) {
-            result.status = fail_status(ErrorCode::resource_limit, "read buffer or configured read limit is too small");
-            return result;
+            return failed_read(ErrorCode::resource_limit, "read buffer or configured read limit is too small");
+        std::size_t done = 0;
+        try {
+            if (options_.atomic_reads) {
+                Status st = read_file_impl(file_id.value, offset, length, output);
+                const bool ok = st.ok();
+                return PartialRead(std::move(st), ok ? length : 0);
+            }
+            Status st = read_range(file_id.value, offset, length, output, Sink::partial, done);
+            return PartialRead(std::move(st), done);
         }
-        try { result.status = read_range(file_id.value, offset, length, output, Sink::partial, result.bytes); }
-        catch (const std::bad_alloc&) { result.status = fail_status(ErrorCode::resource_limit, "read allocation failed"); }
-        return result;
+        catch (const std::bad_alloc&) { return PartialRead(fail_status(ErrorCode::resource_limit, "read allocation failed"), done); }
     }
 
     Status verify_block(std::uint32_t block_id) {
@@ -1068,6 +1067,9 @@ private:
     std::uint32_t find_entry(std::uint32_t directory, std::string_view name) const;
     Status read_file_impl(std::uint32_t file_id, std::uint64_t offset,
                           std::size_t length, std::uint8_t* output);
+    PartialRead failed_read(ErrorCode code, const char* message) {
+        return PartialRead(fail_status(code, message), 0);
+    }
     // Where read_range() writes. `caller`: the caller's buffer, one atomic
     // piece (single-block read_file). `staging`: private memory, so RAW
     // slices may be read and verified in place. `partial`: the caller's

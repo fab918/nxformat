@@ -8,11 +8,12 @@ Lichii approach (a896bdd): one `Session::read` per block.
 
 ## What changed in the reader
 
-- `Archive::read_file_partial` and `Session::read_partial`: verified blocks are
-  committed straight into the caller buffer and the exact verified byte count
-  is returned. `Session::read` uses this mode by default; `atomic_reads`
-  restores staging (output unchanged on failure). `Archive::read_file` stays
-  atomic.
+- `Archive::read_file` and `Session::read` return a `PartialRead` (a `Status`
+  plus `bytes`): verified blocks are committed straight into the caller buffer
+  and the exact verified byte count is returned. This is the default for both;
+  `OpenOptions::atomic_reads` restores staging (output unchanged on failure).
+  The measurements below call this mode "partial" (they were taken when it was
+  a separate `read_partial` method).
 - Atomic multi-block reads stage into a private buffer (aligned RAW slices go
   there directly) and copy once.
 - Cache: hash map index; blocks are reference-counted, so a hit pins under the

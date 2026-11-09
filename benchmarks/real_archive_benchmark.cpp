@@ -1,6 +1,6 @@
 // Reader benchmark on a real archive (for example a converted Switch 2 game).
 // One case per process. Build against an older reader with -DNX_NO_PARTIAL
-// (no read_partial / atomic_reads), and add -DNX_NO_LOOKUP without lookup().
+// (read() returns a Status, no atomic_reads), and add -DNX_NO_LOOKUP without lookup().
 //
 //   real_archive_benchmark mount  <archive.nx>
 //   real_archive_benchmark lookup <archive.nx>
@@ -191,7 +191,7 @@ struct Reader {
             if (mode=="lichii") part=static_cast<size_t>(std::min<uint64_t>(part,chunk-position%chunk));
 #if !defined(NX_NO_PARTIAL)
             if (mode=="partial") {
-                const auto r=session.read_partial(info.id,position,part,out+done,part,cursor);
+                const auto r=session.read(info.id,position,part,out+done,part,cursor);
                 done+=r.bytes;
                 if (!r) break;
                 continue;
@@ -216,7 +216,7 @@ int read_case(int argc,char** argv) {
     nx::SessionOptions options;
     options.reader.zstd=&decode;
 #if !defined(NX_NO_PARTIAL)
-    options.atomic_reads=mode=="atomic";
+    options.reader.atomic_reads=mode=="atomic";
 #endif
     if (warm) { options.reader.max_cached_block_bytes=128ull*1024*1024; options.reader.max_cached_blocks=8192; }
     auto opened=nx::Session::open(*disk.value,options); if (!opened) die("session: "+opened.error.message);

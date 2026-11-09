@@ -1,5 +1,5 @@
 // Multi-block read benchmark: atomic Session::read, Lichii-style one block
-// per call, and Session::read_partial. One case per process, so peak memory
+// per call, and Session::read with its byte count. One case per process, so peak memory
 // belongs to that case. Build against an older reader with -DNX_NO_PARTIAL.
 //
 // usage: partial_read_benchmark <archive.nx> <atomic|lichii|partial>
@@ -72,7 +72,7 @@ struct Reader {
             if (mode=="lichii") part=static_cast<size_t>(std::min<uint64_t>(part,chunk-position%chunk));
 #if !defined(NX_NO_PARTIAL)
             if (mode=="partial") {
-                const auto r=session.read_partial(info.id,position,part,out+done,part,cursor);
+                const auto r=session.read(info.id,position,part,out+done,part,cursor);
                 done+=r.bytes;
                 if (!r) break;
                 continue;
@@ -112,7 +112,7 @@ int main(int argc,char** argv) {
     nx::SessionOptions options;
     options.reader.zstd=&decode;
 #if !defined(NX_NO_PARTIAL)
-    options.atomic_reads=mode=="atomic";  // other modes use the default (fast) read()
+    options.reader.atomic_reads=mode=="atomic";  // other modes use the default (fast) read()
 #endif
     if (state=="warm") { options.reader.max_cached_block_bytes=128ull*1024*1024; options.reader.max_cached_blocks=4096; }
     else options.reader.max_cached_block_bytes=8ull*1024*1024;
