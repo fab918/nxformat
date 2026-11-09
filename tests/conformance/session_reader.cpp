@@ -345,15 +345,17 @@ void partial_corrupt(const std::filesystem::path& first_slice,const std::filesys
     std::fill(out.begin(),out.end(),uint8_t{0xee});
     result=s.session->read(s.file,block_size+8,4096,out.data(),out.size());
     check(!result && result.bytes==0 && out[0]==0xee,"bad slice exposed");
-    Decoder mid_decoder; auto m=open(mid_slice,mid_decoder,false,64*1024*1024,1,false,true);
+    Decoder mid_decoder; auto m=open(mid_slice,mid_decoder);
     std::fill(out.begin(),out.end(),uint8_t{0xee});
     result=m.session->read(m.file,100,out.size(),out.data(),out.size());
     check(!result && result.error.code==nx::ErrorCode::integrity && result.bytes==block_size-100+5*16*1024,"slice prefix count");
     check_prefix(out,100,result.bytes,"corrupt slice prefix");
-    // The atomic API keeps its guarantees on the same data, single block included.
+    // atomic_reads keeps its guarantees on the same data, single block included.
+    Decoder atomic_decoder; auto a=open(mid_slice,atomic_decoder,false,64*1024*1024,1,false,true);
     std::fill(out.begin(),out.end(),uint8_t{0xee});
-    check(!m.session->read(m.file,100,out.size(),out.data(),out.size()),"atomic corruption accepted");
-    check(!m.session->read(m.file,block_size,200*1024,out.data(),out.size()),"atomic single-block corruption accepted");
+    result=a.session->read(a.file,100,out.size(),out.data(),out.size());
+    check(!result && result.bytes==0,"atomic corruption accepted");
+    check(!a.session->read(a.file,block_size,200*1024,out.data(),out.size()),"atomic single-block corruption accepted");
     check(std::all_of(out.begin(),out.end(),[](auto b){return b==0xee;}),"atomic failure changed output");
     // VFS loop: the short count is exact and the bytes after it are untouched.
     std::vector<uint8_t> whole(4*1024*1024,0xee);

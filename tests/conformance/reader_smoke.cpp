@@ -324,8 +324,12 @@ static int sha_provider_tests(const std::string& raw_path, const std::string& co
     std::array<std::uint8_t, 16> unchanged{};
     unchanged.fill(0xa5);
     const auto corrupt_read = corrupt.read_file(0, "data.bin", 0, 4, unchanged.data(), unchanged.size());
-    if (corrupt_read || corrupt_read.error.code != nx::ErrorCode::integrity ||
-        !std::all_of(unchanged.begin(), unchanged.end(), [](std::uint8_t b) { return b == 0xa5; })) return 1;
+    // Failed bytes are untouched or zeroed by default reads, never unverified.
+    if (corrupt_read || corrupt_read.error.code != nx::ErrorCode::integrity || corrupt_read.bytes != 0 ||
+        !std::all_of(unchanged.begin(), unchanged.begin() + 4, [](std::uint8_t b) { return b == 0xa5 || b == 0; }) ||
+        !std::all_of(unchanged.begin() + 4, unchanged.end(), [](std::uint8_t b) { return b == 0xa5; })) {
+        std::cerr << "FAIL corrupted block exposed bytes or wrote past the request\n"; return 1;
+    }
     std::cout << "PASS callback SHA-256 standard digest, unused for block reads, corrupted-block CRC rejection, and synchronized concurrent reads\n";
     return 0;
 }
@@ -933,8 +937,9 @@ int main(int argc,char** argv) {
             std::array<std::uint8_t,16> output{}; output.fill(0xa5);
             const auto length=static_cast<std::size_t>(file_info.value->size);
             const auto read=archive.read_file(file_info.value->id,0,length,output.data(),output.size());
-            if (read || read.error.code!=nx::ErrorCode::integrity ||
-                !std::all_of(output.begin(),output.begin()+static_cast<std::ptrdiff_t>(length),[](std::uint8_t b){return b==0xa5;})) {
+            // Default reads leave failed bytes untouched or zeroed, never unverified.
+            if (read || read.error.code!=nx::ErrorCode::integrity || read.bytes!=0 ||
+                !std::all_of(output.begin(),output.begin()+static_cast<std::ptrdiff_t>(length),[](std::uint8_t b){return b==0xa5 || b==0;})) {
                 std::cerr << "FAIL corrupt block was not rejected before modifying read output\n"; return 1;
             }
         }
@@ -978,7 +983,7 @@ int main(int argc,char** argv) {
         const auto raw_single_read = archive.read_file(enumerated_id, 0, bytes.size(), bytes.data(), bytes.size());
         count_test_allocations.store(false, std::memory_order_relaxed);
         if (!check(raw_single_read.ok() && bytes==std::array<std::uint8_t,4>{'N','X','!','?'}, "FileId random read mismatch") ||
-            !check(test_allocations.load(std::memory_order_relaxed) == 1, "single-block RAW read allocated more than its decoded block buffer")) return 1;
+            !check(test_allocations.load(std::memory_order_relaxed) == 0, "single-block RAW read allocated (the direct read needs no buffer)")) return 1;
         std::atomic<bool> concurrent_ok{true};
         std::array<std::thread, 4> readers;
         for (auto& thread : readers) thread = std::thread([&archive, &concurrent_ok, enumerated_id]() {
