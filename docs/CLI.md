@@ -1,6 +1,6 @@
 # NXConvert commands and integration
 
-Applies to **NXFormat / NXConvert 1.1.0**.
+Applies to **NXFormat / NXConvert 1.0.1**.
 
 NXConvert is a native application and command-line tool. Start `nxconvert`
 without arguments to open the window; use `nxconvert --help` for the current
@@ -282,7 +282,7 @@ observations to manifest/native/base evidence; it is not signed or embedded in N
 `match_archive()` checks those bindings after edits. Loss of the receipt does not
 prevent the archive from serving its files and identities.
 
-## Firmware preservation (1.1.0)
+## Firmware preservation (1.0.1)
 
 Native DXCI conversion retains its original system-update HFS0 in an independent
 Source Resource. `contents` reports it with `@RESOURCE` records

@@ -1,6 +1,6 @@
 # NX Binary Specification
 
-**Release:** 1.1.0. **Wire versions:** NX 0.2 and 0.3. **Extension:** `.nx`. **Magic:** ASCII `NXAR`. This document defines both wire versions. Integers are little-endian. Offsets and byte counts are unsigned unless stated otherwise. Indexes are zero-based. No on-disk C/C++ structure may be read by casting a pointer to it; implementations decode each field from bytes with explicit bounds and endian conversion.
+**Release:** 1.0.1. **Binary header versions:** `(0,2)` and `(0,3)`. **Extension:** `.nx`. **Magic:** ASCII `NXAR`. This document defines both wire versions. Integers are little-endian. Offsets and byte counts are unsigned unless stated otherwise. Indexes are zero-based. No on-disk C/C++ structure may be read by casting a pointer to it; implementations decode each field from bytes with explicit bounds and endian conversion.
 
 Source container formats, including decrypted DNSP/DXCI/DNCA, are not NX wire types. Import-to-snapshot mapping is described in [CLI.md](CLI.md#source-import-contract); the byte layout and reader requirements here remain source-independent.
 
@@ -76,7 +76,7 @@ CRC-32C uses reflected Castagnoli polynomial `0x82f63b78`, initial state `0xffff
 
 ### Format-version compatibility policy
 
-The `major_version` and `minor_version` fields identify the **NX archive format**, independently of the game's content or update version. Current readers accept `(0,2)` and `(0,3)`; later readers may explicitly support several pairs with version-specific validation and decoding paths. Never silently reinterpret an old version as a new one.
+The `major_version` and `minor_version` fields identify the **NX archive format**, These fields are independent of the NXFormat software release and the game version. NXFormat 1.0.0 wrote `(0,2)`. NXFormat 1.0.1 writes `(0,2)` for archives without Source Resources and `(0,3)` for archives with them. Current readers accept `(0,2)` and `(0,3)`; later readers may explicitly support several pairs with version-specific validation and decoding paths. Never silently reinterpret an old version as a new one.
 
 Both versions use the same core layout: Data first, a metadata tail, two separate header pages, and slice CRCs. Header feature bit 0 is required. The profile includes the required Snapshot Native Metadata extension `0x00010005` where specified in §4.
 
