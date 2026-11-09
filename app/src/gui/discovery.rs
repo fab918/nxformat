@@ -148,6 +148,7 @@ pub fn scan(paths: Vec<PathBuf>, token: &CancellationToken) -> Result<Vec<Source
             let mut source = Source {
                 path: s.path.clone(),
                 size: s.size,
+                firmware_bytes: s.system_update_bytes.unwrap_or_default(),
                 supported,
                 selected: supported,
                 issue: s

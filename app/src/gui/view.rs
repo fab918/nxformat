@@ -128,6 +128,7 @@ impl App {
                     self.sources.clear();
                     self.textures.clear();
                     self.appearances.clear();
+                    self.omitted_firmware.clear();
                     self.focused.clear();
                 }
                 if theme::button(ui, Icon::Folder, "Folder", false).clicked() {
@@ -280,6 +281,23 @@ impl App {
                                 ui.colored_label(ui.visuals().warn_fg_color, &source.issue);
                             }
                         }
+                        let firmware_bytes = self.firmware_bytes(game);
+                        if firmware_bytes != 0 {
+                            let mut include = !self.omits_firmware(game);
+                            if ui.add_enabled(
+                                self.include_firmware,
+                                egui::Checkbox::new(&mut include, format!("Bundled firmware · {}", bytes(firmware_bytes))),
+                            )
+                            .on_disabled_hover_text("Enable bundled firmware in Configuration to include it.")
+                            .on_hover_text("Keep the system-update partition. Omitting it skips exact reconstruction for this game.")
+                            .changed() {
+                                if include {
+                                    self.omitted_firmware.remove(&game.key);
+                                } else {
+                                    self.omitted_firmware.insert(game.key.clone());
+                                }
+                            }
+                        }
                         ui.add_space(6.0);
                         if let Some(output) = &game.output {
                             ui.add(
@@ -340,28 +358,18 @@ impl App {
                 }
             });
             ui.label(theme::muted("Balanced is recommended for most games.").small());
-            egui::CollapsingHeader::new("Advanced").show(ui,|ui|{ui.add_enabled(!self.no_compress,egui::Slider::new(&mut self.level,1..=13).text("Level"));});
             let games=self.games();
             let has_trees=games.iter().any(|g|g.tree);
             let has_packages=games.iter().any(|g|!g.tree);
-            let has_gamecard = self.sources.iter().any(Source::selected_gamecard);
-            if has_gamecard {
+            if games.iter().any(|game| self.firmware_bytes(game) != 0) {
                 ui.checkbox(&mut self.include_firmware, "Include bundled firmware")
-                    .on_hover_text("Keep any system update bundled in the selected gamecard files.");
+                    .on_hover_text("Allow bundled firmware for all games. Choose which games include it in Sources.");
             }
             if has_packages {
-                let omit_firmware = has_gamecard && !self.include_firmware;
-                let mut keep_recipe = self.recipe && !omit_firmware;
-                let recipe_help = if omit_firmware {
-                    "Exact reconstruction requires the bundled firmware."
-                } else {
-                    "Keep a recipe to rebuild native package files byte for byte."
-                };
-                if ui.add_enabled(!omit_firmware, egui::Checkbox::new(&mut keep_recipe, "Keep original rebuild data"))
-                    .on_disabled_hover_text(recipe_help)
-                    .on_hover_text(recipe_help)
-                    .changed() {
-                    self.recipe = keep_recipe;
+                ui.checkbox(&mut self.recipe, "Keep original rebuild data")
+                    .on_hover_text("Keep a recipe to rebuild native package files byte for byte.");
+                if self.recipe && games.iter().any(|game| self.omits_firmware(game)) {
+                    ui.label(theme::muted("Rebuild data is skipped for games whose firmware is omitted.").small());
                 }
             }
             if has_trees {

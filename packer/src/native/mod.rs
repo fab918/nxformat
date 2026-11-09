@@ -487,6 +487,8 @@ pub struct SourceReport {
     pub units: Vec<ContentUnit>,
     pub metas: Vec<ResolvedMeta>,
     pub tree: Option<TreeSummary>,
+    /// Size of the nonempty gamecard system-update partition, including its HFS0 metadata.
+    pub system_update_bytes: Option<u64>,
     pub issues: Vec<Issue>,
     pub bytes_read: u64,
 }
@@ -568,6 +570,7 @@ fn inspect_source_inner(
         units: Vec::new(),
         metas: Vec::new(),
         tree: None,
+        system_update_bytes: None,
         issues: Vec::new(),
         bytes_read: 0,
     };
@@ -662,6 +665,7 @@ fn inspect_file(
             })?;
             if part.name == "update" {
                 if !inner.is_empty() {
+                    report.system_update_bytes = Some(part.size);
                     report.issues.push(Issue::new(
                         Severity::Info,
                         IssueCode::UnreferencedContent,

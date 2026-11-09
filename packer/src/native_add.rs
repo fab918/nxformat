@@ -371,6 +371,7 @@ fn inspect_base(
         units: Vec::new(),
         metas: Vec::new(),
         tree: None,
+        system_update_bytes: None,
         issues: Vec::new(),
         bytes_read: 0,
     };

@@ -2,7 +2,7 @@
 //! packer APIs on workers; the UI owns presentation and artwork cropping.
 use eframe::egui;
 use nxformat_packer::{cli, CancellationToken};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 mod artwork;
 mod discovery;
@@ -59,20 +59,11 @@ struct Source {
     icon: Option<Vec<u8>>,
     path: PathBuf,
     size: u64,
+    firmware_bytes: u64,
     supported: bool,
     issue: String,
     contents: Vec<Content>,
     selected: bool,
-}
-
-impl Source {
-    fn selected_gamecard(&self) -> bool {
-        !self.tree
-            && self.selected
-            && self.path.extension().is_some_and(|ext| {
-                ext.eq_ignore_ascii_case("dxci") || ext.eq_ignore_ascii_case("xci")
-            })
-    }
 }
 
 #[derive(Clone, Default)]
@@ -242,8 +233,8 @@ fn title_from_path(path: &Path) -> String {
 }
 
 #[cfg(test)]
-mod title_tests {
-    use super::title_from_path;
+mod tests {
+    use super::{title_from_path, App, Content, Source};
     use std::path::Path;
 
     #[test]
@@ -259,6 +250,49 @@ mod title_tests {
             ("[0100000000010000].nsp", ""),
         ] {
             assert_eq!(title_from_path(Path::new(name)), title);
+        }
+    }
+    #[test]
+    fn firmware_controls_only_affect_games_with_a_detected_partition() {
+        let folder = std::env::temp_dir().join(format!("nxconvert-options-{}", std::process::id()));
+        let mut app = App {
+            output_dir: Some(folder.clone()),
+            sources: [("Card", 1, 32_000), ("Digital", 2, 0)]
+                .into_iter()
+                .map(|(name, application, firmware_bytes)| Source {
+                    path: folder.join(name),
+                    firmware_bytes,
+                    selected: true,
+                    supported: true,
+                    contents: vec![Content {
+                        application,
+                        kind: "base".into(),
+                        name: name.into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let card_key = app.games()[0].key.clone();
+        for (global, game_override, expected) in [
+            (true, false, false),
+            (true, true, true),
+            (false, false, true),
+        ] {
+            app.include_firmware = global;
+            app.omitted_firmware.clear();
+            if game_override {
+                app.omitted_firmware.insert(card_key.clone());
+            }
+            app.convert();
+            assert_eq!(app.queue.len(), 2);
+            for flag in ["--omit-firmware", "--no-recipe"] {
+                assert_eq!(app.queue[0].args.iter().any(|arg| arg == flag), expected);
+                assert!(!app.queue[1].args.iter().any(|arg| arg == flag));
+            }
+            app.queue.clear();
         }
     }
 }
@@ -349,6 +383,7 @@ struct App {
     no_compress: bool,
     recipe: bool,
     include_firmware: bool,
+    omitted_firmware: HashSet<String>,
     archive: Option<Archive>,
     queue: VecDeque<Job>,
     running: Option<Running>,
@@ -374,6 +409,7 @@ impl Default for App {
             no_compress: false,
             recipe: true,
             include_firmware: true,
+            omitted_firmware: HashSet::new(),
             archive: None,
             queue: VecDeque::new(),
             running: None,
@@ -578,12 +614,28 @@ impl App {
         games
     }
 
+    fn firmware_bytes(&self, game: &Game) -> u64 {
+        game.sources
+            .iter()
+            .map(|&index| &self.sources[index])
+            .filter(|source| source.selected)
+            .fold(0u64, |bytes, source| {
+                bytes.saturating_add(source.firmware_bytes)
+            })
+    }
+
+    fn omits_firmware(&self, game: &Game) -> bool {
+        self.firmware_bytes(game) != 0
+            && (!self.include_firmware || self.omitted_firmware.contains(&game.key))
+    }
+
     fn remove_game(&mut self, game: &Game) {
         for &index in game.sources.iter().rev() {
             let source = self.sources.remove(index);
             self.textures.remove(&source.path);
         }
         self.appearances.remove(&game.key);
+        self.omitted_firmware.remove(&game.key);
         if self.focused == game.key {
             self.focused.clear();
         }
@@ -591,7 +643,7 @@ impl App {
 
     fn convert(&mut self) {
         for game in self.games() {
-            let Some(output) = game.output else {
+            let Some(output) = &game.output else {
                 continue;
             };
             let mut args = vec![if game.tree { "pack-tree" } else { "pack" }.to_string()];
@@ -602,7 +654,7 @@ impl App {
                     .filter(|s| s.selected)
                     .map(|s| text(&s.path)),
             );
-            args.push(text(&output));
+            args.push(text(output));
             if self.no_compress {
                 args.push("--no-compress".into());
             } else {
@@ -610,11 +662,7 @@ impl App {
                 args.push(self.level.to_string());
             }
             if !game.tree {
-                let omit_firmware = !self.include_firmware
-                    && game
-                        .sources
-                        .iter()
-                        .any(|&i| self.sources[i].selected_gamecard());
+                let omit_firmware = self.omits_firmware(&game);
                 if !self.recipe || omit_firmware {
                     args.push("--no-recipe".into());
                 }

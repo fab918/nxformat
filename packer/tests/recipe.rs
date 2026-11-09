@@ -324,6 +324,7 @@ fn large_source_partition_survives_native_edits_and_rebuilds_exactly() {
         ..WriterOptions::default()
     };
     let inv = inventory(std::slice::from_ref(&source), &strict()).unwrap();
+    assert!(inv.sources[0].system_update_bytes.unwrap() > 17 * 1024 * 1024);
     convert_inventory(&inv, &nx, &strict(), IntegrityPolicy::Strict, &options).unwrap();
     assert_eq!(
         u16::from_le_bytes(fs::read(&nx).unwrap()[6..8].try_into().unwrap()),
