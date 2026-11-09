@@ -72,9 +72,8 @@ and publication policies remain unchanged.
 `run_writer_compression.py` cover deterministic RAW/Zstandard construction,
 shared snapshots, small files and changed blocks. `run_repack_benchmarks.py`
 measures archive edits. Native conversion/addition drivers accept private local
-inputs; retain those sources and detailed paths outside this repository.
-Selected historical reports and settings output live in [results/](results/).
-They describe their tested revisions and settings, rather than current defaults.
+inputs; retain those sources, detailed paths and result files outside this
+repository (`results/` is ignored by git).
 
 ## NUP and native-package comparisons
 
@@ -94,11 +93,8 @@ Zstandard runtime used by `real_zstd.hpp`.
 The NUP scripts require the reference NUP Python package and its dependencies;
 these are separate from the dependency-free NX conformance scripts.
 
-The [NUP settings report](results/NUP_VS_NX.md) and
-[native-package report](results/NATIVE_VS_NX.md) retain aggregate local results
-and settings output. They do not include private source dumps or all individual
-read samples. The NUP comparison mixes Python and C++ implementations; a native
-comparison and larger repeated samples are needed for general speedup claims.
+The NUP comparison mixes Python and C++ implementations; a native comparison
+and larger repeated samples are needed for general speedup claims.
 NUP whole-file caching can make repeat reads faster at a larger memory cost.
 
 ## Integrity and tail latency

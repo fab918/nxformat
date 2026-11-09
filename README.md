@@ -92,10 +92,8 @@ For reads inside compressed files, the tested median was **1.7 ms with NUP** ver
 > **Benchmark details:** Donkey Kong Bananza, update 3.2.0 and DLC (Switch 2); Windows 11; 300 seeded random 4 KiB reads; warm operating-system cache. The comparison uses the NUP Python reference reader with libzstd and the NX C++17 reader. These are results for the tested implementations and workload, not a universal format speedup or an FPS benchmark. A native-to-native comparison and a larger sample are needed before making broader claims.
 
 The charts summarize an earlier local run whose individual read samples are not
-included. The repository now includes [NUP comparison tools](benchmarks/README.md#nup-and-native-package-comparisons),
-plus [a separate NUP settings run](benchmarks/results/NUP_VS_NX.md) and
-[a native-package comparison](benchmarks/results/NATIVE_VS_NX.md). Their settings
-and numbers differ from these charts; see each report for its scope and limits.
+included. The [NUP comparison tools](benchmarks/README.md#nup-and-native-package-comparisons)
+can repeat this kind of measurement on your own dumps.
 
 ### Faster packing
 
