@@ -1,10 +1,10 @@
 # NX Binary Specification
 
-**Release:** 1.0.0, separate-header-page profile. **Extension:** `.nx`. **Magic:** ASCII `NXAR`. This document is normative for NXFormat 1.0.0. Integers are little-endian. Offsets and byte counts are unsigned unless stated otherwise. Indexes are zero-based. No on-disk C/C++ structure may be read by casting a pointer to it; implementations decode each field from bytes with explicit bounds and endian conversion.
+**Release:** 1.1.0. **Wire versions:** NX 0.2 and 0.3. **Extension:** `.nx`. **Magic:** ASCII `NXAR`. This document defines both wire versions. Integers are little-endian. Offsets and byte counts are unsigned unless stated otherwise. Indexes are zero-based. No on-disk C/C++ structure may be read by casting a pointer to it; implementations decode each field from bytes with explicit bounds and endian conversion.
 
 Source container formats, including decrypted DNSP/DXCI/DNCA, are not NX wire types. Import-to-snapshot mapping is described in [CLI.md](CLI.md#source-import-contract); the byte layout and reader requirements here remain source-independent.
 
-The fixed field tables in this document are the only authoritative wire definitions. All reserved bytes and bits are zero in NXFormat 1.0.0 and MUST be rejected if nonzero.
+The fixed field tables in this document are the only authoritative wire definitions. All reserved bytes and bits are zero and MUST be rejected if nonzero.
 
 ## 1. File layout and offset rules
 
@@ -50,7 +50,7 @@ An implementation MUST use checked arithmetic for every range and count. The max
 | 6 | 2 | `u16` | `minor_version` | 2 without Source Resources; 3 with Source Resources |
 | 8 | 4 | `u32` | `header_size` | 256 |
 | 12 | 2 | `u16` | `required_features` | 1 in this profile. Bit 0 identifies separate header pages. Unknown required bits reject |
-| 14 | 2 | `u16` | `optional_features` | 0 in NXFormat 1.0.0; no optional feature is currently defined |
+| 14 | 2 | `u16` | `optional_features` | 0; no optional feature is currently defined |
 | 16 | 8 | `u64` | `archive_size` | End of this generation's tail; `<=` physical file size and `<= INT64_MAX` |
 | 24 | 8 | `u64` | `catalog_offset` | 16-byte aligned tail position (§1) |
 | 32 | 8 | `u64` | `catalog_size` | At least 128, at most 16 MiB |
@@ -78,7 +78,7 @@ CRC-32C uses reflected Castagnoli polynomial `0x82f63b78`, initial state `0xffff
 
 The `major_version` and `minor_version` fields identify the **NX archive format**, independently of the game's content or update version. Current readers accept `(0,2)` and `(0,3)`; later readers may explicitly support several pairs with version-specific validation and decoding paths. Never silently reinterpret an old version as a new one.
 
-NXFormat 1.0.0 uses this layout: Data first, a metadata tail, two separate header pages, and slice CRCs. Header feature bit 0 is required. The profile includes the required Snapshot Native Metadata extension `0x00010005` where specified in §4.
+Both versions use the same core layout: Data first, a metadata tail, two separate header pages, and slice CRCs. Header feature bit 0 is required. The profile includes the required Snapshot Native Metadata extension `0x00010005` where specified in §4.
 
 Changes that make existing readers reject new archives require a version or profile change, with old-version readers and test fixtures retained. Optional extensions may remain in the same profile only when older readers can safely ignore them. Feature bits do not replace format-version negotiation.
 
@@ -273,18 +273,17 @@ The payload is a 16-byte header followed immediately by `record_count` 16-byte r
 
 Rows are strictly ascending by snapshot index and unique. A row must supply NPDM, firmware, or both. A present firmware may be zero; absence requires bit 0 clear and value zero. NPDM requires a real executable Program association and cannot coexist with a Program NPDM for that same snapshot. Each NPDM Media record is referenced exactly once. Identical NPDM bytes for two versions may be stored as distinct records; values must never be silently inherited from another snapshot. The reader exposes these fields on Snapshot. NPDM and firmware are metadata excluded from snapshot identity v3, like the Build ID.
 
-Editing MUST remap row snapshot indexes and NPDM Media indexes, preserve surviving versions' exact values, drop removed versions' rows/media when unreferenced, and emit no empty table. Firmware does not imply native compatibility or verification by NX; it is preserved source metadata.
+Editing MUST remap row snapshot indexes and NPDM Media indexes, preserve surviving versions' exact values, drop removed versions' rows/media when unreferenced, and emit no empty table. The required firmware version is native metadata. It is independent of any bundled system-update partition.
 
 ### Source Resources (`0x00010008`, NX 0.3)
 
 Source Resources preserve source-container data independently of every executable
-snapshot. They use ordinary Manifest files and Data blocks. Firmware bytes MUST
-NOT be embedded in the Catalog or represented as an invented application,
-program, DLC, or snapshot. Resources do not affect snapshot identities.
+snapshot. The Catalog holds only references to ordinary Manifest files and Data
+blocks. Resources are outside the executable trees and their snapshot identities.
 
-The extension is required (`flags=1`), application-owned (`owner_kind=1`).
+The extension is required (`flags=1`) and application-owned (`owner_kind=1`).
 NX 0.3 MUST contain at least one Source Resource; NX 0.2 MUST contain none.
-Older readers and editors reject 0.3 rather than discarding its resources.
+Readers and editors that only support NX 0.2 reject NX 0.3.
 
 The payload is a 16-byte header followed by `count` 8-byte records:
 
@@ -298,23 +297,20 @@ The payload is a 16-byte header followed by `count` 8-byte records:
 | 16 + 8*n | u32 | Kind: 0 opaque source file set, 1 original system-update HFS0 |
 | 20 + 8*n | u32 | Manifest root Directory ID |
 
-Records are strictly ordered by `(kind, root_directory)`. Roots are independent,
+Records are strictly ordered by `(kind, root_directory)`. Other kinds are invalid
+in version 1. Roots are independent,
 unique across resources, not snapshot roots or child directories, and contain a
 nonempty flat set of unique File IDs. All ordinary path, file, block, count and
 integrity rules apply. Kind 1 contains exactly one file named `partition.hfs0`:
 the complete original HFS0 partition, including tables, unknown files and padding.
-Its kind declares provenance, not firmware validity or completeness; the consumer
-must validate native firmware metadata before offering installation. Resource
-file digests and block references provide the same verification and bounded,
-on-demand decoding as game files. Mounting does not decode firmware payloads.
+Kind 1 identifies the native partition layout. A firmware installer must validate
+its contents separately.
 
 An editor MUST preserve every resource of a retained application, remap its root
 and file/block references, and include those blocks in live-data accounting and
 compaction. Removing a game version does not remove the application's resources.
-Removing an entire application removes its resources. A converter MAY explicitly
-omit firmware to save space, but MUST NOT then claim byte-exact reconstruction
-of a source that contained it. Resources are self-contained; no external sidecar
-or original source is needed to read them.
+Removing an entire application removes its resources. Rebuild recipes may reference
+resource files by size and digest, as defined in [RECIPE.md](RECIPE.md).
 
 ## 5. Media region
 
@@ -470,11 +466,11 @@ The reference packer appends edits by default. Compaction is explicit unless an 
 
 An added update MUST have a complete required content set, including native base units it needs; an added DLC uses its reliable source associations. Removing a snapshot does not delete a file/block/media item still referenced by any surviving view. An update view may still contain all native base units required for its own loading, but the NX editor MUST reject removing a snapshot named by any surviving dependency record. It MUST NOT silently drop or rewrite those dependencies. Dependency identities describe provenance/selection and do not supply missing runtime bytes; a read-only archive may still contain older provenance pointing outside the archive. An editor MUST NOT claim an incomplete view is complete simply because it records a dependency.
 
-A repack rebuilds application/program ranges, remaps indexes and both metadata extensions, reselects application display metadata (using the default version rule unless the caller explicitly selects another eligible source), removes unreferenced storage from the index (compaction also from the file), and preserves surviving snapshots' canonical identities. Programs with no surviving snapshots are removed; applications with no surviving snapshots are removed or the operation rejects if that would leave an empty archive. Source units and unrelated versions are never implicitly deleted. Existing stored frames can be copied verbatim without recompression; copying does not constitute payload verification. Repack edits reject dependency targets that are absent from the resulting snapshot set, belong to another application, or violate the dependency's applicable update/base rules, even though a read-only archive may preserve provenance records referring to omitted snapshots.
+A repack rebuilds application/program ranges, remaps indexes and retained extension references, reselects application display metadata (using the default version rule unless the caller explicitly selects another eligible source), removes unreferenced storage from the index (compaction also from the file), and preserves surviving snapshots' canonical identities. Programs with no surviving snapshots are removed; applications with no surviving snapshots are removed or the operation rejects if that would leave an empty archive. Source units and unrelated versions are never implicitly deleted. Existing stored frames can be copied verbatim without recompression; copying does not constitute payload verification. Repack edits reject dependency targets that are absent from the resulting snapshot set, belong to another application, or violate the dependency's applicable update/base rules, even though a read-only archive may preserve provenance records referring to omitted snapshots.
 
 ## 9. Compression, chunking, and deduplication
 
-Only RAW and independent Zstandard frames are mandatory in NXFormat 1.0.0. A file's block size is a power of two from 64 KiB through 1 MiB, recorded by `chunk_size_log2`. The current writer accepts 64, 128, 256, 512, and 1,024 KiB. Its default base chunk size is 256 KiB; files whose first chunk retains Zstandard use 64 KiB chunks by default, as described below. These are writer policies, not additional wire-format restrictions. Different files may use different allowed sizes.
+The required codecs are RAW and independent Zstandard frames. A file's block size is a power of two from 64 KiB through 1 MiB, recorded by `chunk_size_log2`. The current writer accepts 64, 128, 256, 512, and 1,024 KiB. Its default base chunk size is 256 KiB; files whose first chunk retains Zstandard use 64 KiB chunks by default, as described below. These are writer policies, not additional wire-format restrictions. Different files may use different allowed sizes.
 
 A block represents at most one chunk and has no predecessor dependency. Deduplication hashes and compares uncompressed bytes and their lengths. A successful dedup result reuses the same block ID; data may be shared across files and snapshots. A writer MUST deduplicate before compression so an identical logical block is encoded at most once. Compression is performed independently. Compression level affects physical bytes, not logical identity or codec number.
 
@@ -497,7 +493,7 @@ Catalog table order is deterministic: applications by `(platform, application ID
 
 ## 11. Versioning, features, and extensions
 
-NXFormat 1.0.0 requires exact header major 0, minor 2, header size 256, Catalog version 1, Media version 1, and Manifest version 1. Unsupported versions reject. Draft producer changes must use explicit versioned extensions and required flags when needed; incompatible core-layout or identity changes require a version/algorithm change and regenerated fixtures. After release, a given core version never acquires a different interpretation. Unknown required extensions fail closed, including for older readers of the same core version. The separate-header-pages layout uses required feature bit 0. All other header bits must be zero. Compatible optional Catalog extensions may be added without changing the header version. A new minor version in the header requires explicit support in the reader, even if its core layout is unchanged. A major change may change core interpretation and requires a reader update.
+The supported header versions are (0,2) and (0,3), as defined in §3. Both use header size 256, Catalog version 1, Media version 1, and Manifest version 1. Unsupported versions reject. Draft producer changes must use explicit versioned extensions and required flags when needed; incompatible core-layout or identity changes require a version/algorithm change and regenerated fixtures. After release, a given core version never acquires a different interpretation. Unknown required extensions fail closed, including for older readers of the same core version. The separate-header-pages layout uses required feature bit 0. All other header bits must be zero. Compatible optional Catalog extensions may be added without changing the header version. A new minor version in the header requires explicit support in the reader, even if its core layout is unchanged. A major change may change core interpretation and requires a reader update.
 
 Unknown optional Catalog extensions may be skipped after validating their record and data ranges. Unknown required extensions reject the archive. An implementation must never infer that an unknown extension is optional from its payload. No extension may redefine core fields or alter complete-snapshot semantics.
 
@@ -531,7 +527,7 @@ Display-version text, Build ID, dependency list, title, publisher, icon, other c
 ### Verification levels
 
 1. **Catalog validation:** header CRC, exact Catalog range/hash, Catalog limits, references, strings, media-index bounds, and required extensions. When Media is present it reads its 32-byte header for the media record count, but not media records or payloads. It does not read the Manifest, blocks, or block index.
-2. **Mount structural validation:** Catalog plus Manifest hash and all Manifest tables, tree topology, snapshot identities, block references, hot block descriptors, media records, section ranges, and padding. Does not decompress game blocks. Media/block payload hashes may be checked lazily.
+2. **Mount structural validation:** Catalog plus Manifest hash and all Manifest tables, tree topology, Source Resource roots, snapshot identities, block references, hot block descriptors, media records, section ranges, and padding. Does not decompress Data blocks. Media/block payload hashes may be checked lazily.
 3. **Per-read verification:** for RAW, read the slices covering the request and compare their CRC-32C entries; for Zstandard, decode the block and compare all its slice entries, before returning verified bytes.
 4. **Full archive verification:** all structural validation, all media hashes, all block slice checks, decode every compressed block, and recompute every file SHA-256.
 

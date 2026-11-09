@@ -4895,7 +4895,7 @@ pub use repack::{
     ApplicationSummary, ArchiveSummary, IntegrityPolicy, MetadataEdit, MetadataSourceSelection,
     NativeAddRequest, NativeAddStats, ProgramSummary, RepackPlan, RepackStats,
     SnapshotBlockReference, SnapshotDisplay, SnapshotFileReference, SnapshotSummary,
-    VerificationStats, MAX_EMBEDDED_RECIPE_BYTES,
+    SourceFileSummary, VerificationStats, MAX_EMBEDDED_RECIPE_BYTES,
 };
 pub(crate) use repack::{inspect_archive_with_space, verify_extracted_source_files};
 

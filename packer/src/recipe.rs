@@ -121,14 +121,16 @@ fn archive_files(
     let summary = inspect_archive(archive, options, IntegrityPolicy::Fast)?;
     let mut files = HashMap::new();
     for application in &summary.applications {
-        for (_, resource) in crate::inspect_source_resources(
-            archive,
-            application.platform,
-            application.application_id,
-            options,
-        )? {
-            for file in resource {
-                files.entry((file.size, file.digest)).or_insert(file);
+        if !application.source_files.is_empty() {
+            for (_, resource) in crate::inspect_source_resources(
+                archive,
+                application.platform,
+                application.application_id,
+                options,
+            )? {
+                for file in resource {
+                    files.entry((file.size, file.digest)).or_insert(file);
+                }
             }
         }
         for snapshot in &application.snapshots {
@@ -850,17 +852,11 @@ fn recipe_owner(
 ) -> Result<(crate::Platform, u64), WriterError> {
     let summary = inspect_archive(archive, options, IntegrityPolicy::Fast)?;
     for application in &summary.applications {
-        let mut files = std::collections::HashSet::new();
-        for (_, resource) in crate::inspect_source_resources(
-            archive,
-            application.platform,
-            application.application_id,
-            options,
-        )? {
-            for file in resource {
-                files.insert((file.size, file.digest));
-            }
-        }
+        let mut files: std::collections::HashSet<_> = application
+            .source_files
+            .iter()
+            .map(|file| (file.size, file.digest))
+            .collect();
         for snapshot in &application.snapshots {
             for file in
                 inspect_snapshot_files(archive, snapshot.identity, options, IntegrityPolicy::Fast)?

@@ -27,7 +27,7 @@ pub use writer::{
     CompressionMode, IntegrityPolicy, MetadataEdit, MetadataSourceSelection, NativeAddRequest,
     NativeAddStats, ProgramSummary, ProgressCounter, RepackPlan, RepackStats,
     SnapshotBlockReference, SnapshotDisplay, SnapshotFileReference, SnapshotSummary,
-    VerificationStats, WriterError, WriterErrorKind, WriterOptions, WriterStats,
+    SourceFileSummary, VerificationStats, WriterError, WriterErrorKind, WriterOptions, WriterStats,
     MAX_EMBEDDED_RECIPE_BYTES,
 };
 

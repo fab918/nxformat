@@ -162,6 +162,16 @@ pub struct ApplicationSummary {
     pub snapshots: Vec<SnapshotSummary>,
     /// Rebuild recipes kept inside the archive (see `recipe`).
     pub recipes: Vec<Vec<u8>>,
+    /// Manifest metadata for files outside the executable snapshots.
+    pub source_files: Vec<SourceFileSummary>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceFileSummary {
+    pub kind: u32,
+    pub path: String,
+    pub size: u64,
+    pub digest: [u8; 32],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2591,10 +2601,8 @@ fn parse_archive(
     let mut roots = HashSet::new();
     for app in &parsed.applications {
         for &(kind, root) in &app.source_resources {
-            if !roots.insert(root) || parsed.snapshots.iter().any(|s| s.snapshot.root == root) {
-                return Err(bad(
-                    "source resource root is shared or belongs to a snapshot",
-                ));
+            if !roots.insert(root) {
+                return Err(bad("shared source resource root"));
             }
             let entries = parsed
                 .directories
@@ -2614,13 +2622,22 @@ fn parse_archive(
             }
         }
     }
-    if parsed
-        .directories
-        .iter()
-        .flatten()
-        .any(|e| e.kind == 1 && roots.contains(&e.target))
-    {
-        return Err(bad("source resource root is a child directory"));
+    if !roots.is_empty() {
+        if parsed
+            .snapshots
+            .iter()
+            .any(|s| roots.contains(&s.snapshot.root))
+        {
+            return Err(bad("source resource root belongs to a snapshot"));
+        }
+        if parsed
+            .directories
+            .iter()
+            .flatten()
+            .any(|e| e.kind == 1 && roots.contains(&e.target))
+        {
+            return Err(bad("source resource root is a child directory"));
+        }
     }
     validate_snapshot_identities(&parsed)?;
     Ok(parsed)
@@ -4449,6 +4466,22 @@ fn inspect_archive_impl(
                     .and_then(|m| archive.media.get(m.nacp as usize).map(|media| media.digest)),
             })
             .collect();
+        let mut source_files = Vec::new();
+        for &(kind, root) in &app.source_resources {
+            for entry in &archive.directories[root as usize] {
+                let file = &archive.files[entry.target as usize];
+                budget.charge(
+                    entry.name.len() as u64 + std::mem::size_of::<SourceFileSummary>() as u64,
+                    "source file summary",
+                )?;
+                source_files.push(SourceFileSummary {
+                    kind,
+                    path: entry.name.clone(),
+                    size: file.size,
+                    digest: file.digest,
+                });
+            }
+        }
         applications.push(ApplicationSummary {
             platform,
             application_id: app.key.1,
@@ -4456,6 +4489,7 @@ fn inspect_archive_impl(
             programs,
             snapshots,
             recipes: app.recipes.clone(),
+            source_files,
         });
     }
     let mut reclaimable = 0;

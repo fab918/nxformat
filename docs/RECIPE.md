@@ -14,7 +14,9 @@ file, which `nxconvert recipe` can put back inside an NX.
 `nxconvert pack` and `nxconvert add` keep the recipe of each source by
 default (`--no-recipe` skips it). The source is read for its recipe while the
 conversion reads it, so the recipe adds no second pass, and a requested recipe that cannot be made or kept fails the operation. A new
-`pack` is published only after its recipes have been stored successfully. `nxconvert contents` lists them (`@RECIPE` lines),
+`pack` is published only after its recipes have been stored successfully. On `add`,
+content groups already committed remain if recipe creation fails.
+`nxconvert contents` lists recipes (`@RECIPE` lines),
 `nxconvert rebuild ARCHIVE.nx FOLDER [RECIPE_ID...]` writes the original files
 back, and `nxconvert check-recipe ARCHIVE.nx` replays them all.
 

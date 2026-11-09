@@ -1077,17 +1077,14 @@ fn print_contents(path: &Path, options: &WriterOptions) -> Result<(), Box<dyn st
         }
     }
     for a in &summary.applications {
-        for (kind, files) in inspect_source_resources(path, a.platform, a.application_id, options)?
-        {
-            for file in files {
-                println!(
-                    "@RESOURCE\t{:016x}\t{}\t{}\t{}",
-                    a.application_id,
-                    kind,
-                    file.size,
-                    field(&file.path)
-                );
-            }
+        for file in &a.source_files {
+            println!(
+                "@RESOURCE\t{:016x}\t{}\t{}\t{}",
+                a.application_id,
+                file.kind,
+                file.size,
+                field(&file.path)
+            );
         }
         for bytes in &a.recipes {
             let info = recipe::recipe_info(bytes)?;

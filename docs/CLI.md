@@ -1,6 +1,6 @@
 # NXConvert commands and integration
 
-Applies to **NXFormat / NXConvert 1.0.0**.
+Applies to **NXFormat / NXConvert 1.1.0**.
 
 NXConvert is a native application and command-line tool. Start `nxconvert`
 without arguments to open the window; use `nxconvert --help` for the current
@@ -38,8 +38,10 @@ the full manifest-based forms and options.
 
 `pack` and `add` keep a small reconstruction recipe inside the NX by default;
 `--no-recipe` skips it. The recipe is read while the conversion runs, and a
-recipe that cannot be kept is a warning: the NX is still written. Rebuilding
-requires the recipe and all referenced content; see [RECIPE.md](RECIPE.md).
+recipe that cannot be kept causes an error. A failed recipe leaves the destination
+of `pack` unchanged. With `add`, content groups already committed remain in the
+archive. Use `nxconvert recipe ARCHIVE.nx SOURCE...` to retry storing the recipes.
+Rebuilding requires the recipe and all referenced content; see [RECIPE.md](RECIPE.md).
 
 `verify` checks physical blocks, Media hashes and logical file hashes. With
 `PACKAGE RECEIPT`, it also compares extracted source bytes and provenance.
