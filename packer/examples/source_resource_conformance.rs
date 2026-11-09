@@ -1,34 +1,32 @@
-//! Small, non-copyrighted package for independent source-resource conformance.
-use nxformat_packer::{
-    cli,
-    native::synthetic::{dxci, partition, title_entries, TitleSpec},
-};
+//! Small, non-copyrighted packages for independent source-resource conformance.
+use nxformat_packer::native::synthetic::{dxci, partition, title_entries, TitleSpec};
 use std::{fs, path::PathBuf};
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = PathBuf::from(std::env::args().nth(1).ok_or("output directory required")?);
     fs::create_dir_all(&dir)?;
+    let app = 0x0100000000010000;
     let system = vec![(
         "unknown-system.bin".to_owned(),
         (0..32000).map(|n| (n * 17) as u8).collect(),
     )];
     fs::write(dir.join("original.hfs0"), partition(&system, true))?;
-    let bytes = dxci(&[
-        ("update", system),
-        (
-            "secure",
-            title_entries(&TitleSpec::application(0x0100000000010000, 0, 4)),
-        ),
-    ]);
-    let source = dir.join("source.dxci");
-    fs::write(&source, bytes)?;
-    cli::run(
-        vec![
-            "pack".into(),
-            source.display().to_string(),
-            dir.join("game.nx").display().to_string(),
-        ],
-        None,
-        None,
+    fs::write(
+        dir.join("source.dxci"),
+        dxci(&[
+            ("update", system),
+            ("secure", title_entries(&TitleSpec::application(app, 0, 4))),
+        ]),
+    )?;
+    fs::write(
+        dir.join("patch.dxci"),
+        dxci(&[
+            (
+                "update",
+                vec![("other-system.bin".to_owned(), vec![0x55; 3000])],
+            ),
+            ("secure", title_entries(&TitleSpec::patch(app, 1, 9))),
+        ]),
     )?;
     Ok(())
 }

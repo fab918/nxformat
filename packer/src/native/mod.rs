@@ -666,7 +666,7 @@ fn inspect_file(
                         Severity::Info,
                         IssueCode::UnreferencedContent,
                         format!(
-                            "gamecard update partition holds {} system-update entries; not inventoried",
+                            "gamecard update partition holds {} system-update entries separate from game content",
                             inner.len()
                         ),
                     ));

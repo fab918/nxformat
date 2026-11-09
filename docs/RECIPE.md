@@ -18,7 +18,7 @@ conversion reads it, so the recipe adds no second pass, and a requested recipe t
 content groups already committed remain if recipe creation fails.
 `nxconvert contents` lists recipes (`@RECIPE` lines),
 `nxconvert rebuild ARCHIVE.nx FOLDER [RECIPE_ID...]` writes the original files
-back, and `nxconvert check-recipe ARCHIVE.nx` replays them all.
+back into an existing folder, and `nxconvert check-recipe ARCHIVE.nx` replays them all.
 
 Recipes belong to the application whose snapshots hold their files. Every NX
 edit (add, remove, compact) keeps a recipe only while every file it names is
@@ -44,9 +44,9 @@ A gamecard system-update partition is retained as an independent Source Resource
 by default, even with `--no-recipe`. Rebuilding references its file digest and
 places the entire partition at its original source offset. All container tables,
 unknown system files and padding remain byte-exact. `--omit-firmware --no-recipe`
-explicitly omits that resource to save space; exact reconstruction is then
-unavailable. Existing archives that lost firmware must be reconverted from their
-original DXCI; missing bytes cannot be recovered from an old recipe.
+omits that resource and skips recipe creation to save space. To restore a
+firmware partition missing from both an archive and its recipe, reconvert the
+original DXCI.
 
 ## Segments
 

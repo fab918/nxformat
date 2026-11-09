@@ -114,18 +114,19 @@ nxconvert pack-tree PACKAGE OUTPUT.nx [--platform switch1|switch2]\n\
 nxconvert pack-tree PACKAGE MANIFEST OUTPUT.nx RECEIPT [--latest] [--dlc KEY]\n\
 nxconvert pack-nup INPUT.nup OUTPUT.nx --platform switch1|switch2 [--skip-dlc]\n\
 nxconvert check-nup INPUT.nup ARCHIVE.nx [--skip-dlc] (every NUP file is in the NX: paths, NACP, and bytes read back and hashed)\n\
-nxconvert pack SOURCE.nsp|xci... OUTPUT.nx [--no-recipe] [--omit-firmware --no-recipe] (decrypted DNSP/DXCI; keeps, inside the NX, a small recipe that rebuilds each source byte for byte; --no-recipe skips it)\n\
+nxconvert pack SOURCE... OUTPUT.nx [--no-recipe [--omit-firmware]] (decrypted DNSP/DXCI; keeps exact rebuild recipes by default)\n\
 nxconvert recipe ARCHIVE.nx SOURCE|RECIPE.nxrecipe... (keep rebuild recipes inside the NX)\n\
 nxconvert rebuild ARCHIVE.nx FOLDER [RECIPE_ID...] (rebuild the original files into FOLDER)\n\
 nxconvert check-recipe ARCHIVE.nx (replay every recipe kept in the NX)\n\
 nxconvert scan SOURCE|FOLDER... (decrypted packages; @SOURCE, @CONTENT and @ISSUE lines)\n\
-nxconvert contents ARCHIVE.nx (@APP, @SNAPSHOT, @RECIPE, @RECLAIMABLE and @ALLOCATED lines)\n\
-nxconvert add ARCHIVE.nx SOURCE... [--no-recipe] (add updates and DLC in place, with their rebuild recipes unless --no-recipe)\n\
+nxconvert contents ARCHIVE.nx (@APP, @SNAPSHOT, @RESOURCE, @RECIPE, @RECLAIMABLE and @ALLOCATED lines)\n\
+nxconvert add ARCHIVE.nx SOURCE... [--no-recipe [--omit-firmware]] (add updates and DLC in place, with rebuild recipes by default)\n\
 nxconvert add-tree ARCHIVE.nx PACKAGE [--platform switch1|switch2] [--update-version N] (add extracted trees in place: updates/<version>/ and dlc/ folders, or with --update-version one update folder holding exefs/ and romfs/)\n\
 nxconvert remove ARCHIVE.nx SNAPSHOT_IDENTITY... (remove in place)\n\
 nxconvert compact ARCHIVE.nx [--no-compress] (rewrite as RAW to remove existing game-data compression)\n\
 nxconvert set-metadata ARCHIVE.nx APPLICATION_ID [title=TEXT] [publisher=TEXT] [icon=FILE.jpg|png] (in place; replaces the localized titles and icons)\n\
 --frontend (pack, pack-nup, pack-tree, add, add-tree, remove, compact, rebuild): @TOTAL and @PROGRESS lines (add the @TOTAL values); closing stdin cancels and leaves no partial file\n\
+--omit-firmware (native pack/add, requires --no-recipe): skip newly imported DXCI firmware; existing archive resources are preserved\n\
 --no-trail (pack-nup, automatic pack-tree, add-tree): write only the archive, without the .nximport, .assumptions.txt and .nxreceipt review files\n\
 nxconvert info ARCHIVE.nx\n\
 nxconvert verify ARCHIVE.nx [PACKAGE RECEIPT]\n\
@@ -1366,9 +1367,6 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
     size_budgets(None, o, &mut limits, &mut options)?;
     options.cancellation = command_token(o);
     options.preserve_firmware = !o.omit_firmware;
-    if o.omit_firmware && (o.recipe != Some(false) || !matches!(args[0].as_str(), "pack" | "add")) {
-        return Err("--omit-firmware requires --no-recipe on pack/add: the original source cannot be rebuilt without its firmware".into());
-    }
     let started = Instant::now();
     match (args[0].as_str(), args.len()) {
         ("pack", n) if n >= 3 => {
@@ -1704,9 +1702,20 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    if argv.len() == 1 && matches!(argv[0].as_str(), "--version" | "-V") {
+        println!("nxconvert {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let (mut args, o) = parse(argv)?;
-    if o.omit_firmware && !matches!(args.first().map(String::as_str), Some("pack" | "add")) {
-        return Err("--omit-firmware applies to native pack/add only".into());
+    if o.omit_firmware {
+        if !matches!(args.first().map(String::as_str), Some("pack" | "add")) {
+            return Err("--omit-firmware applies to native pack/add only".into());
+        }
+        if o.recipe != Some(false) {
+            return Err(
+                "--omit-firmware requires --no-recipe to skip exact source reconstruction".into(),
+            );
+        }
     }
     let mut limits = import::ImportLimits::default();
     let mut options = WriterOptions::default();

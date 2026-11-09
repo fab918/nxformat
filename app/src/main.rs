@@ -12,10 +12,6 @@ fn main() {
         }
         return;
     }
-    if args.len() == 1 && (args[0] == "--version" || args[0] == "-V") {
-        println!("nxconvert {}", env!("CARGO_PKG_VERSION"));
-        return;
-    }
     if let Err(e) = nxformat_packer::cli::run(args, None, None) {
         eprintln!("ERROR: {e}");
         std::process::exit(1);

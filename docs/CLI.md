@@ -11,11 +11,11 @@ and executable, and `ffi/` exposes the same commands through a C API.
 
 ```text
 nxconvert scan SOURCE|FOLDER...
-nxconvert pack SOURCE... OUTPUT.nx [--no-recipe]
+nxconvert pack SOURCE... OUTPUT.nx [--no-recipe [--omit-firmware]]
 nxconvert pack-tree PACKAGE OUTPUT.nx [--platform switch1|switch2]
 nxconvert pack-nup INPUT.nup OUTPUT.nx --platform switch1|switch2
 nxconvert contents ARCHIVE.nx
-nxconvert add ARCHIVE.nx SOURCE... [--no-recipe]
+nxconvert add ARCHIVE.nx SOURCE... [--no-recipe [--omit-firmware]]
 nxconvert add-tree ARCHIVE.nx PACKAGE [--platform switch1|switch2] [--update-version N]
 nxconvert remove ARCHIVE.nx SNAPSHOT_IDENTITY...
 nxconvert compact ARCHIVE.nx [--no-compress]
@@ -291,6 +291,7 @@ consumer's responsibility. Game snapshots and their identities are unchanged.
 
 ```sh
 nxconvert pack game.dxci game.nx
+mkdir -p rebuilt-folder
 nxconvert rebuild game.nx rebuilt-folder
 # Save space explicitly; no byte-exact source reconstruction is promised:
 nxconvert pack game.dxci smaller.nx --omit-firmware --no-recipe

@@ -1,9 +1,12 @@
 """Independent Python/C++ checks for block-backed source preservation."""
 
 import hashlib
+import json
 from pathlib import Path
+import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 
 import test_rust_writer as writer
@@ -15,18 +18,92 @@ ROOT = Path(__file__).resolve().parents[2]
 def main():
     with tempfile.TemporaryDirectory(prefix="nx-source-resources-") as temp:
         out = Path(temp)
+        cargo = writer.cargo_command()
+        manifest = ["--manifest-path", str(ROOT / "packer/Cargo.toml"), "--locked"]
         subprocess.run(
-            [
-                writer.cargo_command(), "run", "--release", "--manifest-path",
-                str(ROOT / "packer/Cargo.toml"), "--example",
-                "source_resource_conformance", "--", str(out),
-            ],
+            [cargo, "build", "--release", *manifest, "--example",
+             "source_resource_conformance", "--bin", "nxconvert"],
             check=True,
         )
-        probe = compile_reader(out, ROOT / "tests/conformance/source_resource_reader.cpp")
-        validator = writer.load_validator()
+        metadata = json.loads(subprocess.check_output(
+            [cargo, "metadata", *manifest, "--no-deps", "--format-version", "1"]
+        ))
+        release = Path(metadata["target_directory"]) / "release"
+        suffix = ".exe" if sys.platform == "win32" else ""
+        generator = release / "examples" / f"source_resource_conformance{suffix}"
+        subprocess.run([str(generator), str(out)], check=True)
+        nxconvert = release / f"nxconvert{suffix}"
+
+        def cli(*args, check=True):
+            result = subprocess.run(
+                [str(nxconvert), *map(str, args)],
+                capture_output=True, text=True,
+            )
+            if check and result.returncode:
+                raise AssertionError(f"{args}: {result.stderr}")
+            return result
+
+        assert cli("--version").stdout.strip() == f"nxconvert {metadata['packages'][0]['version']}"
+        assert "--omit-firmware" in cli("--help").stdout
+
+        source = out / "source.dxci"
+        patch = out / "patch.dxci"
         archive = out / "game.nx"
         original = out / "original.hfs0"
+        cli("pack", source, archive)
+        rebuilt = out / "rebuilt"
+        rebuilt.mkdir()
+        cli("rebuild", archive, rebuilt)
+        assert (rebuilt / source.name).read_bytes() == source.read_bytes()
+        default_contents = cli("contents", archive).stdout.splitlines()
+        assert any(line.startswith("@RESOURCE\t") for line in default_contents)
+        assert any(line.startswith("@RECIPE\t") for line in default_contents)
+
+        kept = out / "no-recipe.nx"
+        omitted = out / "no-firmware.nx"
+        cli("pack", source, kept, "--no-recipe", "--no-compress")
+        cli("pack", source, omitted, "--no-recipe", "--omit-firmware", "--no-compress")
+        kept_contents = cli("contents", kept).stdout.splitlines()
+        omitted_contents = cli("contents", omitted).stdout.splitlines()
+        assert any(line.startswith("@RESOURCE\t") for line in kept_contents)
+        assert not any(line.startswith(("@RESOURCE\t", "@RECIPE\t")) for line in omitted_contents)
+        assert [line for line in kept_contents if line.startswith("@SNAPSHOT\t")] == [
+            line for line in omitted_contents if line.startswith("@SNAPSHOT\t")
+        ]
+        assert omitted.stat().st_size < kept.stat().st_size
+        error = cli("rebuild", omitted, rebuilt, check=False)
+        assert error.returncode != 0 and "no such rebuild recipe" in error.stderr
+        cli("verify", omitted)
+
+        rejected = out / "rejected.nx"
+        error = cli("pack", source, rejected, "--omit-firmware", check=False)
+        assert error.returncode != 0 and "requires --no-recipe" in error.stderr
+        assert not rejected.exists()
+        error = cli("contents", archive, "--omit-firmware", check=False)
+        assert error.returncode != 0 and "native pack/add only" in error.stderr
+
+        updated_with_firmware = out / "updated-with-firmware.nx"
+        shutil.copyfile(archive, updated_with_firmware)
+        cli("add", updated_with_firmware, patch)
+        updated_default = cli("contents", updated_with_firmware).stdout.splitlines()
+        assert len([line for line in updated_default if line.startswith("@RESOURCE\t")]) == 2
+        cli("check-recipe", updated_with_firmware)
+
+        updated = out / "updated.nx"
+        shutil.copyfile(archive, updated)
+        cli("add", updated, patch, "--omit-firmware", "--no-recipe")
+        updated_contents = cli("contents", updated).stdout.splitlines()
+        assert [line for line in updated_contents if line.startswith("@RESOURCE\t")] == [
+            line for line in default_contents if line.startswith("@RESOURCE\t")
+        ]
+        assert len([line for line in updated_contents if line.startswith("@SNAPSHOT\t")]) == 2
+        cli("check-recipe", updated)
+        cli("verify", updated)
+        print("PASS CLI firmware defaults, omission, retained resources on add and exact rebuild")
+
+        probe = compile_reader(out, ROOT / "tests/conformance/source_resource_reader.cpp")
+        validator = writer.load_validator()
+        assert struct.unpack_from("<H", writer.current_header(omitted.read_bytes(), validator), 6)[0] == 2
         raw = archive.read_bytes()
         valid = writer.current_header(raw, validator)
         validator.validate_archive(valid, verify_payloads=True)
