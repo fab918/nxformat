@@ -35,9 +35,12 @@ struct Decoder {
     }
 };
 struct Opened { std::shared_ptr<nx::DiskSource> source; std::shared_ptr<nx::Session> session; nx::FileId file; };
-Opened open(const std::filesystem::path& path,Decoder& decoder,bool prefetch=false,uint64_t cache=64*1024*1024,unsigned ahead=1,bool timing=false,bool atomic=false) {
+// One decode worker by default: the queue/cancellation tests count jobs that
+// a single worker leaves queued. split() covers the pool.
+Opened open(const std::filesystem::path& path,Decoder& decoder,bool prefetch=false,uint64_t cache=64*1024*1024,unsigned ahead=1,bool timing=false,bool atomic=false,unsigned workers=1) {
     auto source=nx::DiskSource::open(path); check(bool(source),"disk open");
     nx::SessionOptions options; options.sequential_prefetch=prefetch; options.lookahead_blocks=ahead;
+    options.decode_workers=workers;
     options.reader.zstd=&Decoder::decode; options.reader.zstd_context=&decoder;
     options.reader.max_cached_block_bytes=cache;
     options.reader.collect_read_timing=timing; options.reader.atomic_reads=atomic;
@@ -149,6 +152,12 @@ void split(const std::filesystem::path& zstd,const std::filesystem::path& raw) {
     check(decoder.peak>1,"split read did not decode in parallel");
     read(s,100*1024,4*256*1024);
     check(s.session->stats().prefetch_submitted==2,"cached blocks resubmitted");
+    // Four workers: the caller keeps block 0, the pool decodes 1..4 at once.
+    Decoder pooled; pooled.delay=20; auto p=open(zstd,pooled,false,64*1024*1024,1,false,false,4);
+    read(p,100*1024,4*256*1024);
+    const auto pool_stats=p.session->stats();
+    check(pool_stats.prefetch_submitted==4 && pool_stats.cache.decompressions==5,"pooled split read work");
+    check(pooled.peak>2,"pooled split read did not use several workers");
     Decoder unused; auto r=open(raw,unused,true); auto rc=std::make_shared<nx::ReadCursor>();
     read(r,100*1024,4*256*1024);
     for (unsigned i=0;i<4;++i) read(r,uint64_t(i)*4096,4096,rc);

@@ -73,10 +73,11 @@ Default `SessionOptions`:
 | `reader.atomic_reads` | false | `read()` keeps caller output unchanged on failure (staged); default commits verified blocks directly |
 | `parallel_reads` | 8 | Bound on concurrent scratch/decoder work, maximum 64 |
 | `sequential_prefetch` | true | Warms the next Zstandard block of a sequential handle; RAW blocks are never warmed |
-| `split_reads` | true | A multi-block Zstandard read hands its far half to the worker |
+| `split_reads` | true | A multi-block Zstandard read hands its later blocks to the decode workers |
+| `decode_workers` | 0 (auto) | Background decode threads; auto is min(4, hardware threads / 2), at least 1; maximum 16 |
 | `sequential_reads` | 3 | Adjacent successful reads before prediction |
 | `lookahead_blocks` | 1 | Maximum 2 |
-| `prefetch_queue` | 16 | Maximum 256 jobs |
+| `prefetch_queue` | 128 | Maximum 256 jobs |
 
 These are cache/work limits, **not a total process RSS limit**. Mounted metadata,
 map/list entries, caller buffers, decoder workspace and active range buffers
@@ -103,12 +104,15 @@ not extensions. The same next-block prediction is submitted only once per
 sequential zone. A seek changes its generation: stale queued work performs no
 payload IO; already running work may finish one bounded block and populate the
 verified cache. Uncacheable and RAW blocks are not prefetched. A read that spans
-several uncached Zstandard blocks queues its far half, last block first, ahead
-of speculative jobs; the caller decodes from the start and the two meet in the
-middle. Those jobs take a demand slot, since they finish an admitted read. The worker reserves a
-demand slot when the configured parallelism exceeds one. With parallelism one,
+several uncached Zstandard blocks keeps the first 1/(W+1) of its blocks, W
+being the decode worker count, and queues the rest, last block first, ahead of
+speculative jobs; the workers decode them in parallel while the caller decodes
+from the start. A block a worker is decoding makes the caller wait for it
+rather than decode it twice. Those jobs take a demand slot, since they finish
+an admitted read. Speculative work reserves a demand slot when the configured
+parallelism exceeds one. With parallelism one,
 background work necessarily shares that slot. Disable prefetch for workloads
-where this contention is undesirable. Destruction stops and joins the worker;
+where this contention is undesirable. Destruction stops and joins the workers;
 there are no detached tasks.
 Queued foreground readers take admission priority over new speculative work.
 Admission takes a slot with one atomic compare-exchange; the gate mutex and

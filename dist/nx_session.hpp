@@ -20,10 +20,15 @@ struct SessionOptions {
     std::size_t parallel_reads = 8;
     bool sequential_prefetch = true;
     unsigned sequential_reads = 3, lookahead_blocks = 1;
-    std::size_t prefetch_queue = 16;
+    // A 4 MiB read of 64 KiB Zstandard chunks splits into up to 63 jobs.
+    std::size_t prefetch_queue = 128;
     // A read that spans several Zstandard blocks hands the later ones to the
-    // worker, which decodes from the end while the caller decodes from the start.
+    // decode workers, which decode from the end while the caller decodes from
+    // the start.
     bool split_reads = true;
+    // Background decode threads for split reads and prefetch. 0 picks
+    // min(4, hardware threads / 2), at least 1. 1 is the 1.0.0 behaviour.
+    unsigned decode_workers = 0;
 };
 
 struct SessionStats {
@@ -53,7 +58,7 @@ public:
                                                SessionOptions options = {}) {
         if (!source || !options.reader.verify_read_blocks || !options.parallel_reads ||
             options.parallel_reads > 64 || !options.sequential_reads ||
-            options.lookahead_blocks > 2 || options.prefetch_queue > 256)
+            options.lookahead_blocks > 2 || options.prefetch_queue > 256 || options.decode_workers > 16)
             return Result<std::shared_ptr<Session>>::failure(ErrorCode::invalid_argument,"invalid persistent reader options");
         try {
             auto session=std::shared_ptr<Session>(new Session(std::move(source),options));
@@ -67,8 +72,13 @@ public:
             auto mounted=session->archive_.mount();
             if (!mounted) return Result<std::shared_ptr<Session>>::failure(mounted.error.code,mounted.error.message);
             if (((options.sequential_prefetch && options.lookahead_blocks) || options.split_reads) &&
-                options.prefetch_queue && options.reader.max_cached_blocks && options.reader.max_cached_block_bytes)
-                session->worker_=std::thread([p=session.get()] { p->work(); });
+                options.prefetch_queue && options.reader.max_cached_blocks && options.reader.max_cached_block_bytes) {
+                // On failure the session destructor stops and joins the
+                // workers already started.
+                session->workers_.reserve(session->worker_count());
+                for (unsigned i=0;i<session->worker_count();++i)
+                    session->workers_.emplace_back([p=session.get()] { p->work(); });
+            }
             return Result<std::shared_ptr<Session>>::success(std::move(session));
         } catch (const std::bad_alloc&) {
             return Result<std::shared_ptr<Session>>::failure(ErrorCode::resource_limit,"persistent reader allocation failed");
@@ -77,7 +87,7 @@ public:
         }
     }
 
-    ~Session() { stop(); if (worker_.joinable()) worker_.join(); }
+    ~Session() { stop(); for (auto& worker : workers_) if (worker.joinable()) worker.join(); }
     Session(const Session&)=delete;
     Session& operator=(const Session&)=delete;
     const Archive& archive() const noexcept { return archive_; }
@@ -132,12 +142,12 @@ private:
             return failure(ErrorCode::resource_limit,"read buffer or configured read limit is too small");
         Admission admitted(*this,false);
         if (!admitted) return failure(ErrorCode::cancelled,"persistent reader stopped");
-        if (options_.split_reads && length && worker_.joinable() && length<=capacity) {
+        if (options_.split_reads && length && !workers_.empty() && length<=capacity) {
             try { split(file,offset,length); }
             catch (const std::bad_alloc&) { std::lock_guard<std::mutex> lock(queue_mutex_); ++dropped_; }
         }
         PartialRead result=archive_.read_file(file,offset,length,output,capacity);
-        if (result && cursor && length && worker_.joinable() && options_.sequential_prefetch && options_.lookahead_blocks) {
+        if (result && cursor && length && !workers_.empty() && options_.sequential_prefetch && options_.lookahead_blocks) {
             // Speculation is optional: allocator pressure must not fail a
             // demand read whose verified bytes have already been committed.
             try { predict(file,offset,length,cursor); }
@@ -148,6 +158,11 @@ private:
 
     Session(std::shared_ptr<RandomAccessSource> source, SessionOptions options)
         : source_(std::move(source)), options_(options) {}
+    unsigned worker_count() const noexcept {
+        if (options_.decode_workers) return options_.decode_workers;
+        const unsigned threads=std::thread::hardware_concurrency();
+        return std::max(1u,std::min(4u,threads/2));
+    }
     static bool cancelled(void* context) {
         auto& s=*static_cast<Session*>(context);
         return s.stopped_.load(std::memory_order_acquire) ||
@@ -225,9 +240,11 @@ private:
         cursor->has_prediction=true; cursor->predicted=next;
         queue_cv_.notify_one();
     }
-    // Queue the far half of a multi-block read, last block first, ahead of
-    // speculative jobs. The caller and the worker meet in the middle; a block
-    // the caller reaches first is a cache hit for the worker.
+    // Queue the far part of a multi-block read, last block first, ahead of
+    // speculative jobs. With W workers the caller keeps the first 1/(W+1) of
+    // the blocks, so the caller and the workers finish together; a block the
+    // caller reaches first is a cache hit for its worker, and a block a worker
+    // is decoding makes the caller wait for it instead of decoding it twice.
     void split(FileId file,std::uint64_t offset,std::size_t length) {
         const auto info=archive_.file_info(file);
         if (!info || offset>info.value->size || length>info.value->size-offset) return;
@@ -235,7 +252,7 @@ private:
         if ((1ull<<shift)>options_.reader.max_cached_block_bytes) return;
         const auto first=offset>>shift, last=(offset+length-1)>>shift;
         if (first==last) return;
-        const auto keep=(last-first+2)/2;  // the caller decodes the first half, rounded up
+        const auto keep=(last-first+1+workers_.size())/(workers_.size()+1);  // rounded up
         std::vector<std::uint64_t> wanted;
         for (auto b=last; b>=first+keep && b>first; --b)
             if (archive_.block_needs_decode(file,b<<shift)) wanted.push_back(b<<shift);
@@ -246,7 +263,7 @@ private:
             if (queue_.size()==options_.prefetch_queue) { ++dropped_; queue_.pop_back(); }
             queue_.push_front({file,*it,0,{}}); ++submitted_;
         }
-        queue_cv_.notify_one();
+        if (wanted.size()>1) queue_cv_.notify_all(); else queue_cv_.notify_one();
     }
     void work() noexcept {
         for (;;) {
@@ -287,7 +304,7 @@ private:
     mutable std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::deque<Job> queue_;
-    std::thread worker_;
+    std::vector<std::thread> workers_;
     std::uint64_t submitted_=0,completed_=0,cancelled_=0,failed_=0,dropped_=0;
 };
 } // namespace nx
