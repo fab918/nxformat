@@ -76,7 +76,7 @@ CRC-32C uses reflected Castagnoli polynomial `0x82f63b78`, initial state `0xffff
 
 ### Format-version compatibility policy
 
-The `major_version` and `minor_version` fields identify the **NX archive format**, These fields are independent of the NXFormat software release and the game version. NXFormat 1.0.0 wrote `(0,2)`. NXFormat 1.0.1 writes `(0,2)` for archives without Source Resources and `(0,3)` for archives with them. Current readers accept `(0,2)` and `(0,3)`; later readers may explicitly support several pairs with version-specific validation and decoding paths. Never silently reinterpret an old version as a new one.
+The `major_version` and `minor_version` fields identify the **NX archive format**. These fields are independent of the NXFormat software release and the game version. NXFormat 1.0.0 wrote `(0,2)`. NXFormat 1.0.1 writes `(0,2)` for archives without Source Resources and `(0,3)` for archives with them. Current readers accept `(0,2)` and `(0,3)`; later readers may explicitly support several pairs with version-specific validation and decoding paths. Never silently reinterpret an old version as a new one.
 
 Both versions use the same core layout: Data first, a metadata tail, two separate header pages, and slice CRCs. Header feature bit 0 is required. The profile includes the required Snapshot Native Metadata extension `0x00010005` where specified in §4.
 

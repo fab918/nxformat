@@ -3489,6 +3489,12 @@ pub fn write_archive(
             .ok_or_else(|| invalid("source resource owner is absent"))?;
         // Same file/block writer, separate root and ownership. No synthetic
         // program/snapshot and no change to any game's snapshot identity.
+        let marks = (
+            directories.len(),
+            files.len(),
+            block_refs.len(),
+            blocks.len(),
+        );
         let (root, _, _) = process_tree(
             resource.root,
             owner as u32,
@@ -3513,6 +3519,29 @@ pub fn write_archive(
             &mut deduplicated_blocks,
             &mut timings,
         )?;
+        // Two sources of one game (two cart revisions) can carry the same
+        // firmware. Its blocks deduplicate; drop the repeated records too when
+        // they added no block, so no directory or block is left unreferenced.
+        let content = |root: u32| -> Vec<(String, u64, [u8; 32])> {
+            directories[root as usize]
+                .entries
+                .iter()
+                .map(|e| {
+                    let file = &files[e.target as usize];
+                    (e.name.clone(), file.size, file.digest)
+                })
+                .collect()
+        };
+        let mine = content(root);
+        let repeated = resource_rows[owner]
+            .iter()
+            .any(|&(kind, other)| kind == resource.kind && content(other) == mine);
+        if repeated && blocks.len() == marks.3 {
+            directories.truncate(marks.0);
+            files.truncate(marks.1);
+            block_refs.truncate(marks.2);
+            continue;
+        }
         resource_rows[owner].push((resource.kind, root));
     }
     let resource_extensions: Vec<_> = resource_rows
@@ -4897,7 +4926,10 @@ pub use repack::{
     SnapshotBlockReference, SnapshotDisplay, SnapshotFileReference, SnapshotSummary,
     SourceFileSummary, VerificationStats, MAX_EMBEDDED_RECIPE_BYTES,
 };
-pub(crate) use repack::{inspect_archive_with_space, verify_extracted_source_files};
+pub(crate) use repack::{
+    add_native_contents_with_recipes, inspect_archive_with_space, verify_extracted_source_files,
+    DeferredRecipes,
+};
 
 #[cfg(test)]
 mod regression_tests {

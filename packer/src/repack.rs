@@ -39,11 +39,11 @@ pub const MAX_EMBEDDED_RECIPE_BYTES: u64 = 8 * 1024 * 1024;
 mod native_add;
 #[path = "reclaim.rs"]
 mod reclaim;
-pub(crate) use native_add::verify_extracted_source_files;
 pub use native_add::{
     add_native_content, add_native_contents, read_snapshot_file_range, NativeAddRequest,
     NativeAddStats,
 };
+pub(crate) use native_add::{add_native_contents_with_recipes, verify_extracted_source_files};
 
 type OptionalAppExtension = (u32, u32, u16, Vec<u8>);
 type OptionalCatalogExtension = (u32, u32, u16, u32, Vec<u8>);
@@ -5066,6 +5066,9 @@ fn repack_inner(
     }
     for (owner, app) in combined.apps.iter().enumerate() {
         let mut rows = Vec::new();
+        // An add of a cart already in the archive brings the same firmware
+        // again: keep one copy of an identical resource (kind and files).
+        let mut seen = HashSet::new();
         for archive in &archives {
             for source_app in archive
                 .applications
@@ -5073,6 +5076,16 @@ fn repack_inner(
                 .filter(|a| a.key == (app.platform, app.application_id))
             {
                 for &(kind, root) in &source_app.source_resources {
+                    let content: Vec<(String, u64, [u8; 32])> = archive.directories[root as usize]
+                        .iter()
+                        .map(|e| {
+                            let file = &archive.files[e.target as usize];
+                            (e.name.clone(), file.size, file.digest)
+                        })
+                        .collect();
+                    if !seen.insert((kind, content)) {
+                        continue;
+                    }
                     let root = append_snapshot_tree(
                         archive.archive,
                         root,
@@ -5108,6 +5121,22 @@ fn repack_inner(
     options
         .progress
         .add_done(scratch_units.saturating_sub(options.progress.done() - merged_from));
+    let with_deferred;
+    let recipes = match recipes.deferred {
+        Some(make) => {
+            let present: HashSet<(u64, [u8; 32])> =
+                files.iter().map(|f| (f.size, f.digest)).collect();
+            let mut add = recipes.add.clone();
+            add.extend(make(&present)?);
+            with_deferred = CatalogEdit {
+                add,
+                remove: recipes.remove.clone(),
+                ..CatalogEdit::default()
+            };
+            &with_deferred
+        }
+        None => recipes,
+    };
     let recipe_extensions = recipe_extensions(&combined.apps, &files, &archives[0], recipes)?;
     combined.extensions.extend(recipe_extensions);
     let final_snapshots: Vec<FinalSnapshot> =
@@ -5309,11 +5338,18 @@ fn repack_inner(
     Ok(native_stats)
 }
 
+/// Recipes made from the edited archive's `(size, SHA-256)` file set, once it
+/// is staged and before it is published: a failure publishes nothing.
+pub(crate) type DeferredRecipes<'a> =
+    &'a dyn Fn(&HashSet<(u64, [u8; 32])>) -> Result<Vec<(Platform, u64, Vec<u8>)>, WriterError>;
+
 /// Catalog-only changes made during a repack: rebuild recipes and metadata.
 #[derive(Default)]
-pub(crate) struct CatalogEdit {
+pub(crate) struct CatalogEdit<'a> {
     /// (platform, application ID, recipe bytes).
     pub add: Vec<(Platform, u64, Vec<u8>)>,
+    /// More recipes to add, made from the staged archive (see `DeferredRecipes`).
+    pub deferred: Option<DeferredRecipes<'a>>,
     /// Recipe checksums (`RecipeInfo::recipe_sha256`) to drop.
     pub remove: Vec<[u8; 32]>,
     /// Display metadata to set.
@@ -5634,7 +5670,7 @@ pub fn edit_archive_recipes(
         &CatalogEdit {
             add,
             remove,
-            metadata: Vec::new(),
+            ..CatalogEdit::default()
         },
     )
     .map(|s| s.repack)
@@ -5686,6 +5722,63 @@ mod source_resource_validation_tests {
             let crc = crc32c(&bytes[slot..slot + 252]);
             write_u32_at(bytes, slot + 252, crc);
         }
+    }
+
+    #[test]
+    fn failed_deferred_recipes_publish_nothing() {
+        let app = 0x0100_0000_0001_0000;
+        let base = image();
+        let patch = crate::native::synthetic::dxci(&[
+            ("update", vec![("other.bin".into(), vec![9; 3000])]),
+            (
+                "secure",
+                crate::native::synthetic::title_entries(
+                    &crate::native::synthetic::TitleSpec::patch(app, 1, 9),
+                ),
+            ),
+        ]);
+        let (mut file, archive) =
+            unique_temp(&std::env::temp_dir(), OsStr::new("nx-deferred-archive")).unwrap();
+        file.write_all(&base).unwrap();
+        drop(file);
+        let (mut file, source) =
+            unique_temp(&std::env::temp_dir(), OsStr::new("nx-deferred-patch")).unwrap();
+        file.write_all(&patch).unwrap();
+        drop(file);
+        let request = NativeAddRequest::new(&source.path, app | 0x800, 1);
+        let native = crate::native::InventoryOptions::default();
+        let options = WriterOptions::default();
+        let seen = std::cell::Cell::new(false);
+        let fail = |known: &HashSet<(u64, [u8; 32])>| {
+            // Called with the staged archive's files, before publication.
+            seen.set(!known.is_empty());
+            Err(invalid("recipe refused"))
+        };
+        let error = add_native_contents_with_recipes(
+            &archive.path,
+            &archive.path,
+            std::slice::from_ref(&request),
+            &native,
+            &options,
+            IntegrityPolicy::Fast,
+            Some(&fail),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("recipe refused"), "{error}");
+        assert!(seen.get());
+        assert_eq!(std::fs::read(&archive.path).unwrap(), base);
+        // Without the failing hook the same add succeeds.
+        add_native_contents_with_recipes(
+            &archive.path,
+            &archive.path,
+            std::slice::from_ref(&request),
+            &native,
+            &options,
+            IntegrityPolicy::Fast,
+            None,
+        )
+        .unwrap();
+        assert_ne!(std::fs::read(&archive.path).unwrap(), base);
     }
 
     #[test]

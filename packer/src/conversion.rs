@@ -128,21 +128,44 @@ pub fn convert_inventory_profiled(
     let mut input = ArchiveInput::new(input);
     if options.preserve_firmware {
         for source in &fresh.sources {
+            let resources = crate::native::source_resources(
+                &source.path,
+                crate::Platform::Switch1,
+                0,
+                inventory_options,
+            )
+            .map_err(|e| invalid(&e.to_string()))?;
+            if resources.is_empty() {
+                continue;
+            }
+            // The firmware belongs to a game this archive holds: the cart's
+            // base game first, then any game one of its metas names. The first
+            // meta can be a DLC or an update of a game that is not packed.
+            let packed = |id: u64| {
+                input
+                    .applications
+                    .iter()
+                    .any(|a| a.platform == crate::Platform::Switch1 && a.application_id == id)
+            };
             let owner = source
                 .metas
-                .first()
-                .ok_or_else(|| invalid("source has no application owner"))?
-                .meta
-                .application_id;
-            input.source_resources.extend(
-                crate::native::source_resources(
-                    &source.path,
-                    crate::Platform::Switch1,
-                    owner,
-                    inventory_options,
-                )
-                .map_err(|e| invalid(&e.to_string()))?,
-            );
+                .iter()
+                .filter(|m| m.meta.meta_type == crate::native::ContentMetaType::Application)
+                .chain(source.metas.iter())
+                .map(|m| m.meta.application_id)
+                .find(|&id| packed(id))
+                .ok_or_else(|| {
+                    invalid(&format!(
+                        "{}: the cart firmware belongs to no game in this archive; use --omit-firmware --no-recipe",
+                        source.path.display()
+                    ))
+                })?;
+            input
+                .source_resources
+                .extend(resources.into_iter().map(|mut r| {
+                    r.application_id = owner;
+                    r
+                }));
         }
     }
     if let Some(profiles) = profiles {

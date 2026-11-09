@@ -300,3 +300,13 @@ nxconvert pack game.dxci smaller.nx --omit-firmware --no-recipe
 Firmware preservation and rebuild recipes are separate: `--no-recipe` alone
 keeps firmware. `--omit-firmware` requires `--no-recipe`, applies only to newly
 imported content, and does not silently strip resources already in an NX.
+
+**Reader compatibility.** An archive that holds a Source Resource is written as
+NX 0.3; every other archive stays NX 0.2. Readers from NXFormat 1.0.0, and the
+emulators built with them, reject NX 0.3, so a DXCI packed with default options
+opens only in readers from 1.0.1 or later. Update the emulator before sharing
+such archives, or pack with `--omit-firmware --no-recipe` to keep NX 0.2. The
+resource is mandatory (`flags=1`) on purpose: a 1.0.0 editor copies unknown
+optional extensions verbatim and would leave its directory index pointing at
+the wrong tree after a repack. One identical resource (same kind and files) is
+kept once per game, even when several sources carry it.

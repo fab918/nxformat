@@ -11,6 +11,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (0..32000).map(|n| (n * 17) as u8).collect(),
     )];
     fs::write(dir.join("original.hfs0"), partition(&system, true))?;
+    // A later cart revision that carries the very same firmware.
+    fs::write(
+        dir.join("patch-same.dxci"),
+        dxci(&[
+            ("update", system.clone()),
+            ("secure", title_entries(&TitleSpec::patch(app, 2, 9))),
+        ]),
+    )?;
     fs::write(
         dir.join("source.dxci"),
         dxci(&[

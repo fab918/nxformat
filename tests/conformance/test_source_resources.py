@@ -89,6 +89,28 @@ def main():
         assert len([line for line in updated_default if line.startswith("@RESOURCE\t")]) == 2
         cli("check-recipe", updated_with_firmware)
 
+        # The same firmware twice is kept once: on add, and within one pack.
+        same = out / "patch-same.dxci"
+        added_same = out / "added-same.nx"
+        shutil.copyfile(archive, added_same)
+        cli("add", added_same, same)
+        lines = cli("contents", added_same).stdout.splitlines()
+        assert len([line for line in lines if line.startswith("@RESOURCE	")]) == 1
+        assert len([line for line in lines if line.startswith("@RECIPE	")]) == 2
+        cli("check-recipe", added_same)
+        cli("verify", added_same)
+        packed_same = out / "packed-same.nx"
+        cli("pack", source, same, packed_same)
+        lines = cli("contents", packed_same).stdout.splitlines()
+        assert len([line for line in lines if line.startswith("@RESOURCE	")]) == 1
+        cli("check-recipe", packed_same)
+        cli("verify", packed_same)
+        both = out / "both"
+        both.mkdir()
+        cli("rebuild", packed_same, both)
+        assert (both / source.name).read_bytes() == source.read_bytes()
+        assert (both / same.name).read_bytes() == same.read_bytes()
+
         updated = out / "updated.nx"
         shutil.copyfile(archive, updated)
         cli("add", updated, patch, "--omit-firmware", "--no-recipe")

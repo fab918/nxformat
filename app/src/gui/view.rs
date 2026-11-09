@@ -297,6 +297,18 @@ impl App {
                                     self.omitted_firmware.insert(game.key.clone());
                                 }
                             }
+                            ui.label(
+                                theme::muted(if self.omits_firmware(game) {
+                                    if self.recipe {
+                                        "Without firmware this game gets no rebuild data."
+                                    } else {
+                                        "Firmware omitted."
+                                    }
+                                } else {
+                                    "With firmware the NX needs an emulator built with NXFormat 1.0.1 or later."
+                                })
+                                .small(),
+                            );
                         }
                         ui.add_space(6.0);
                         if let Some(output) = &game.output {
@@ -360,7 +372,8 @@ impl App {
             ui.label(theme::muted("Balanced is recommended for most games.").small());
             let games=self.games();
             let has_trees=games.iter().any(|g|g.tree);
-            let has_packages=games.iter().any(|g|!g.tree);
+            // Rebuild data and firmware exist only for DNSP/DXCI packages.
+            let has_packages=games.iter().any(|g|self.native_package(g));
             if games.iter().any(|game| self.firmware_bytes(game) != 0) {
                 ui.checkbox(&mut self.include_firmware, "Include bundled firmware")
                     .on_hover_text("Allow bundled firmware for all games. Choose which games include it in Sources.");

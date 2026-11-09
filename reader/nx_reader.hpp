@@ -635,13 +635,10 @@ struct Archive {
     Result<FileInfo> source_resource_file(std::uint32_t index, std::string_view name) const {
         if (!mounted_) return Result<FileInfo>::failure(ErrorCode::invalid_argument,"mount() must succeed before resource access");
         if (index>=source_resources_.size()) return Result<FileInfo>::failure(ErrorCode::bounds,"source resource index out of range");
-        const auto& dir=directories_[source_resources_[index].root_directory];
-        for (std::uint32_t i=dir.first;i<dir.first+dir.count;++i) {
-            const auto& entry=entries_[i];
-            const auto actual=std::string_view(reinterpret_cast<const char*>(manifest_bytes_.data()+entry.name_offset),entry.name_length);
-            if (actual==name) return file_info({entry.target});
-        }
-        return Result<FileInfo>::failure(ErrorCode::bounds,"source resource file not found");
+        // Resource roots are flat file sets validated at mount: one sorted lookup.
+        const auto found=find_entry(source_resources_[index].root_directory,name);
+        if (found==no_index) return Result<FileInfo>::failure(ErrorCode::not_found,"source resource file not found");
+        return file_info({entries_[found].target});
     }
     std::string_view snapshot_display_version(std::uint32_t index) const noexcept {
         if (index>=snapshots_.size()) return {};
@@ -1332,9 +1329,9 @@ inline Status Archive::parse_catalog() {
             std::pair<std::uint32_t,std::uint32_t> prior{};
             for (std::uint32_t j=0;j<count;++j) {
                 const auto kind=u32(p+16+j*8), root=u32(p+20+j*8);
-                const auto key=std::make_pair(kind,root);
-                if (kind>1 || (j && !(prior<key))) return fail(ErrorCode::format,"invalid or unsorted source resource");
-                source_resources_.push_back({owner_index,kind,root}); prior=key;
+                const auto row=std::make_pair(kind,root);
+                if (kind>1 || (j && !(prior<row))) return fail(ErrorCode::format,"invalid or unsorted source resource");
+                source_resources_.push_back({owner_index,kind,root}); prior=row;
             }
         }
         if (type==0x00010005) {

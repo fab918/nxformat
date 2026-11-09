@@ -294,6 +294,12 @@ mod tests {
             }
             app.queue.clear();
         }
+        // Only a selected native package counts; a deselected cart has no firmware.
+        let games = app.games();
+        assert!(app.native_package(&games[0]) && app.firmware_bytes(&games[0]) != 0);
+        app.sources[0].selected = false;
+        let games = app.games();
+        assert!(!app.native_package(&games[0]) && app.firmware_bytes(&games[0]) == 0);
     }
 }
 
@@ -614,11 +620,21 @@ impl App {
         games
     }
 
+    /// Selected, supported native packages (decrypted NSP or XCI): the only
+    /// sources with rebuild data and bundled firmware. Extracted trees have none.
+    fn native_package(&self, game: &Game) -> bool {
+        !game.tree
+            && game.sources.iter().any(|&index| {
+                let source = &self.sources[index];
+                source.selected && source.supported && !source.tree
+            })
+    }
+
     fn firmware_bytes(&self, game: &Game) -> u64 {
         game.sources
             .iter()
             .map(|&index| &self.sources[index])
-            .filter(|source| source.selected)
+            .filter(|source| source.selected && source.supported && !source.tree)
             .fold(0u64, |bytes, source| {
                 bytes.saturating_add(source.firmware_bytes)
             })

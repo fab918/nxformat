@@ -17,6 +17,12 @@ int main(int argc,char** argv) {
     if (reject) return 1;
     if (archive.source_resources().size()!=1 || archive.source_resources()[0].kind!=1) return 1;
     auto file=archive.source_resource_file(0,"partition.hfs0");if (!file) return 1;
+    {
+        auto missing=archive.source_resource_file(0,"other.bin");
+        if (missing || missing.error.code!=nx::ErrorCode::not_found) return 1;
+        auto out=archive.source_resource_file(1,"partition.hfs0");
+        if (out || out.error.code!=nx::ErrorCode::bounds) return 1;
+    }
     std::ifstream expected(argv[2],std::ios::binary);
     std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(expected),{}};
     std::vector<std::uint8_t> actual(bytes.size());

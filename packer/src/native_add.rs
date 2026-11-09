@@ -170,18 +170,43 @@ pub fn add_native_contents(
     options: &WriterOptions,
     policy: IntegrityPolicy,
 ) -> Result<NativeAddStats, WriterError> {
+    add_native_contents_with_recipes(
+        source.as_ref(),
+        destination.as_ref(),
+        requests,
+        native_options,
+        options,
+        policy,
+        None,
+    )
+}
+
+/// `add_native_contents` that also keeps the recipes `recipes` makes from
+/// the staged archive, in the same generation: both are published or neither.
+pub(crate) fn add_native_contents_with_recipes(
+    source: &Path,
+    destination: &Path,
+    requests: &[NativeAddRequest],
+    native_options: &InventoryOptions,
+    options: &WriterOptions,
+    policy: IntegrityPolicy,
+    recipes: Option<DeferredRecipes<'_>>,
+) -> Result<NativeAddStats, WriterError> {
     if requests.is_empty() {
         return Err(invalid("native addition batch is empty"));
     }
     repack_inner(
-        source.as_ref(),
-        destination.as_ref(),
+        source,
+        destination,
         RepackPlan::new(),
         options,
         policy,
         Some((requests, native_options)),
         false,
-        &CatalogEdit::default(),
+        &CatalogEdit {
+            deferred: recipes,
+            ..CatalogEdit::default()
+        },
     )
 }
 

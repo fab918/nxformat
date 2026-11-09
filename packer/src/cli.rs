@@ -1170,6 +1170,19 @@ impl RecipeScans {
         };
         Self { token, jobs }
     }
+    /// Wait for every scan. A failed scan fails the command before it writes.
+    fn join(&mut self) -> Result<Vec<(PathBuf, recipe::SourceScan)>, Box<dyn std::error::Error>> {
+        let mut scans = Vec::with_capacity(self.jobs.len());
+        for (source, job) in &mut self.jobs {
+            let scan = job
+                .take()
+                .ok_or("missing recipe scan")?
+                .join()
+                .map_err(|_| "recipe scan panicked")??;
+            scans.push((source.clone(), scan));
+        }
+        Ok(scans)
+    }
     /// Requested reversibility is a contract: never warn and drop a recipe.
     fn keep(
         mut self,
@@ -1179,29 +1192,37 @@ impl RecipeScans {
         if self.jobs.is_empty() {
             return Ok(());
         }
+        let scans = self.join()?;
         let known = recipe::archive_digests(archive, options)?;
         let mut recipes = Vec::new();
-        let mut total = 0u64;
-        for (source, job) in &mut self.jobs {
-            let scan = job
-                .take()
-                .ok_or("missing recipe scan")?
-                .join()
-                .map_err(|_| "recipe scan panicked")??;
-            let (bytes, stats) = recipe::finish_recipe(&scan, &known, options)?;
-            if total + bytes.len() as u64 > crate::MAX_EMBEDDED_RECIPE_BYTES / 2 {
-                return Err(
-                    "rebuild data too large: exact source reconstruction cannot be guaranteed"
-                        .into(),
-                );
-            }
-            print_recipe(source, &stats);
-            total += bytes.len() as u64;
+        for (source, bytes, stats) in finish_recipes(&scans, &known, options)? {
+            print_recipe(&source, &stats);
             recipes.push(bytes);
         }
         recipe::embed_recipes(archive, recipes, options)?;
         Ok(())
     }
+}
+/// One recipe per scan against the archive's file set; all of them or an error.
+fn finish_recipes(
+    scans: &[(PathBuf, recipe::SourceScan)],
+    known: &std::collections::HashSet<(u64, [u8; 32])>,
+    options: &WriterOptions,
+) -> Result<Vec<(PathBuf, Vec<u8>, recipe::RecipeStats)>, crate::WriterError> {
+    let mut made = Vec::with_capacity(scans.len());
+    let mut total = 0u64;
+    for (source, scan) in scans {
+        let (bytes, stats) = recipe::finish_recipe(scan, known, options)?;
+        total += bytes.len() as u64;
+        if total > crate::MAX_EMBEDDED_RECIPE_BYTES / 2 {
+            return Err(crate::WriterError::new(
+                crate::WriterErrorKind::ResourceLimit,
+                "rebuild data too large: exact source reconstruction cannot be guaranteed",
+            ));
+        }
+        made.push((source.clone(), bytes, stats));
+    }
+    Ok(made)
 }
 impl Drop for RecipeScans {
     fn drop(&mut self) {
@@ -1472,7 +1493,7 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
         ("add", n) if n >= 3 => {
             let archive = Path::new(&args[1]);
             let sources: Vec<PathBuf> = args[2..].iter().map(PathBuf::from).collect();
-            let recipes = RecipeScans::start(&sources, o.recipe != Some(false), &options);
+            let mut recipes = RecipeScans::start(&sources, o.recipe != Some(false), &options);
             let native = InventoryOptions {
                 mode: InventoryMode::Strict,
                 ..InventoryOptions::default()
@@ -1598,18 +1619,51 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
                 }
                 writes[usize::from(later)].push(item);
             }
+            // Recipes are made inside the last write, from its staged files,
+            // so that write publishes its content and its recipes, or neither.
+            let scans = recipes.join()?;
+            let owners: std::collections::HashMap<&Path, u64> = inv
+                .sources
+                .iter()
+                .filter_map(|s| {
+                    s.metas
+                        .iter()
+                        .find(|m| meta_kind(m.meta.meta_type).is_some())
+                        .map(|m| (s.path.as_path(), m.meta.application_id))
+                })
+                .collect();
+            let made = std::cell::RefCell::new(Vec::new());
+            let make = |known: &std::collections::HashSet<(u64, [u8; 32])>| {
+                let finished = finish_recipes(&scans, known, &options)?;
+                let mut out = Vec::with_capacity(finished.len());
+                for (source, bytes, _) in &finished {
+                    let owner = owners.get(source.as_path()).ok_or_else(|| {
+                        crate::WriterError::new(
+                            crate::WriterErrorKind::InvalidInput,
+                            "a rebuild recipe source names no game",
+                        )
+                    })?;
+                    out.push((Platform::Switch1, *owner, bytes.clone()));
+                }
+                *made.borrow_mut() = finished;
+                Ok(out)
+            };
+            let last = writes.iter().rposition(|w| !w.is_empty());
             // Each write adds its whole group in one new archive generation,
             // or nothing if any member fails.
-            for write in writes.iter().filter(|w| !w.is_empty()) {
+            for (index, write) in writes.iter().enumerate().filter(|(_, w)| !w.is_empty()) {
                 let requests: Vec<NativeAddRequest> =
                     write.iter().map(|(r, _, _)| r.clone()).collect();
-                add_native_contents(
+                let deferred: Option<crate::writer::DeferredRecipes> =
+                    (Some(index) == last && !scans.is_empty()).then_some(&make);
+                crate::writer::add_native_contents_with_recipes(
                     archive,
                     archive,
                     &requests,
                     &native,
                     &options,
                     IntegrityPolicy::Fast,
+                    deferred,
                 )?;
                 for (request, (kind, _, version), _) in write {
                     let title = request.title_id;
@@ -1617,8 +1671,8 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
                     added += 1;
                 }
             }
-            if added != 0 {
-                recipes.keep(archive, &options)?;
+            for (source, _, stats) in made.borrow().iter() {
+                print_recipe(source, stats);
             }
             if added == 0
                 && !inv.sources.iter().any(|s| {
