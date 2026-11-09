@@ -1,6 +1,6 @@
 # Rebuild recipes
 
-Applies to **NXFormat / NXConvert 1.0.0**.
+Applies to **NXFormat / NXConvert 1.1.0** (reads existing recipes unchanged).
 
 A recipe rebuilds an original package (supported decrypted DNSP or DXCI) byte for byte from the NX it was converted into. Recipes are
 kept **inside the NX**, in the optional Catalog extension `0x00010006`
@@ -13,9 +13,8 @@ file, which `nxconvert recipe` can put back inside an NX.
 
 `nxconvert pack` and `nxconvert add` keep the recipe of each source by
 default (`--no-recipe` skips it). The source is read for its recipe while the
-conversion reads it, so the recipe adds no second pass, and a recipe that
-cannot be made or kept is reported as a warning without failing the
-conversion. `nxconvert contents` lists them (`@RECIPE` lines),
+conversion reads it, so the recipe adds no second pass, and a requested recipe that cannot be made or kept fails the operation. A new
+`pack` is published only after its recipes have been stored successfully. `nxconvert contents` lists them (`@RECIPE` lines),
 `nxconvert rebuild ARCHIVE.nx FOLDER [RECIPE_ID...]` writes the original files
 back, and `nxconvert check-recipe ARCHIVE.nx` replays them all.
 
@@ -23,9 +22,10 @@ Recipes belong to the application whose snapshots hold their files. Every NX
 edit (add, remove, compact) keeps a recipe only while every file it names is
 still in the archive, so removing an update also removes the recipe of its
 package, and adding it again brings it back. Adding the same
-recipe twice keeps one copy. All recipes of one archive together are limited
-to 8 MiB; a package with a large gamecard system update partition, whose
-bytes are not in the NX, is reported and its recipe is not kept.
+recipe twice keeps one copy. All recipes of one archive together are limited to 8 MiB. Firmware is stored
+in block-backed Source Resources, outside the Catalog. The recipe contains a
+file reference to the whole original system partition, so its size is independent
+of the firmware payload. An oversized recipe fails explicitly.
 
 ## Why it is small
 
@@ -38,11 +38,13 @@ tickets, certificates and `.cnmt.xml`. The recipe keeps only that, compressed.
 | 20XX base + update gamecard (DXCI) | 1,428,312,064 B | 1,878 B | 4.9 s, SHA-256 identical |
 | 20XX 1.1.1 update (DNSP, with ticket) | 141,346,066 B | 2,890 B | 0.5 s, SHA-256 identical |
 
-A gamecard system update partition is not stored in the NX; its bytes stay
-literal in the recipe, which then grows by their compressed size. `nxconvert`
-prints a note above 16 MiB for a built recipe, but that exceeds the 8 MiB
-aggregate embedded-recipe limit: automatic embedding reports a warning and
-keeps the converted NX without that recipe.
+A gamecard system-update partition is retained as an independent Source Resource
+by default, even with `--no-recipe`. Rebuilding references its file digest and
+places the entire partition at its original source offset. All container tables,
+unknown system files and padding remain byte-exact. `--omit-firmware --no-recipe`
+explicitly omits that resource to save space; exact reconstruction is then
+unavailable. Existing archives that lost firmware must be reconverted from their
+original DXCI; missing bytes cannot be recovered from an old recipe.
 
 ## Segments
 
@@ -50,13 +52,14 @@ The recipe describes the original file as consecutive segments from byte 0 to
 its end:
 
 - **file** (kind 2): the whole content of one file stored in the NX, found by
-  its size and SHA-256 in any snapshot;
+  its size and SHA-256 in any snapshot or Source Resource;
 - **fill** (kind 1): a run of one byte value of 64 KiB or more outside the
   package entries (for example 0xFF up to the card size);
 - **literal** (kind 0): every other byte, read in order from one Zstd frame.
 
 Package entries are the ones the native inventory lists (all PFS0 entries, and
-the HFS0 entries outside the gamecard update partition). An entry whose bytes
+the HFS0 entries outside the gamecard update partition, plus the complete
+update partition itself). An entry whose bytes
 are not in the NX is literal.
 
 ## Layout, version 1 (little-endian)

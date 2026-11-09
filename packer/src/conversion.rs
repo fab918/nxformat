@@ -126,6 +126,25 @@ pub fn convert_inventory_profiled(
         .collect::<Result<Vec<_>, _>>()?;
     let mut matched = std::collections::BTreeSet::new();
     let mut input = ArchiveInput::new(input);
+    if options.preserve_firmware {
+        for source in &fresh.sources {
+            let owner = source
+                .metas
+                .first()
+                .ok_or_else(|| invalid("source has no application owner"))?
+                .meta
+                .application_id;
+            input.source_resources.extend(
+                crate::native::source_resources(
+                    &source.path,
+                    crate::Platform::Switch1,
+                    owner,
+                    inventory_options,
+                )
+                .map_err(|e| invalid(&e.to_string()))?,
+            );
+        }
+    }
     if let Some(profiles) = profiles {
         matched.extend(profiles.attach(&mut input, false)?);
     }

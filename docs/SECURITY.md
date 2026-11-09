@@ -84,3 +84,14 @@ Historical producers that shifted these IDs by one can yield incorrect display
 titles, publishers or versions; `check-nup` checks paths, NACP and file bytes,
 not every display TLV. Review display metadata when migrating such archives.
 These display values do not establish execution identity.
+
+## Independent source resources (NX 0.3)
+
+Source Resource descriptors are authenticated by the Catalog digest and contain
+only bounded Manifest directory references. Total resources are limited to 4096.
+Roots are independent flat file sets; invalid kinds, duplicate roots, repeated
+file IDs, references into game directory trees and out-of-range targets reject
+before exposing files. Kind 1 has exactly one `partition.hfs0` file. All files use
+the ordinary block decoder limits, slice checks and full-file SHA-256 validation.
+A resource kind is not evidence that native firmware is valid or installable.
+Source preservation never interprets unknown source bytes as game content.

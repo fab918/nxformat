@@ -47,7 +47,7 @@ An implementation MUST use checked arithmetic for every range and count. The max
 |---:|---:|---|---|---|
 | 0 | 4 | `byte[4]` | `magic` | ASCII `NXAR` |
 | 4 | 2 | `u16` | `major_version` | 0 |
-| 6 | 2 | `u16` | `minor_version` | 2 |
+| 6 | 2 | `u16` | `minor_version` | 2 without Source Resources; 3 with Source Resources |
 | 8 | 4 | `u32` | `header_size` | 256 |
 | 12 | 2 | `u16` | `required_features` | 1 in this profile. Bit 0 identifies separate header pages. Unknown required bits reject |
 | 14 | 2 | `u16` | `optional_features` | 0 in NXFormat 1.0.0; no optional feature is currently defined |
@@ -76,7 +76,7 @@ CRC-32C uses reflected Castagnoli polynomial `0x82f63b78`, initial state `0xffff
 
 ### Format-version compatibility policy
 
-The `major_version` and `minor_version` fields identify the **NX archive format**, independently of the game's content or update version. Current readers accept exactly `(0,2)`; later readers may explicitly support several pairs with version-specific validation and decoding paths. Never silently reinterpret an old version as a new one.
+The `major_version` and `minor_version` fields identify the **NX archive format**, independently of the game's content or update version. Current readers accept `(0,2)` and `(0,3)`; later readers may explicitly support several pairs with version-specific validation and decoding paths. Never silently reinterpret an old version as a new one.
 
 NXFormat 1.0.0 uses this layout: Data first, a metadata tail, two separate header pages, and slice CRCs. Header feature bit 0 is required. The profile includes the required Snapshot Native Metadata extension `0x00010005` where specified in §4.
 
@@ -274,6 +274,47 @@ The payload is a 16-byte header followed immediately by `record_count` 16-byte r
 Rows are strictly ascending by snapshot index and unique. A row must supply NPDM, firmware, or both. A present firmware may be zero; absence requires bit 0 clear and value zero. NPDM requires a real executable Program association and cannot coexist with a Program NPDM for that same snapshot. Each NPDM Media record is referenced exactly once. Identical NPDM bytes for two versions may be stored as distinct records; values must never be silently inherited from another snapshot. The reader exposes these fields on Snapshot. NPDM and firmware are metadata excluded from snapshot identity v3, like the Build ID.
 
 Editing MUST remap row snapshot indexes and NPDM Media indexes, preserve surviving versions' exact values, drop removed versions' rows/media when unreferenced, and emit no empty table. Firmware does not imply native compatibility or verification by NX; it is preserved source metadata.
+
+### Source Resources (`0x00010008`, NX 0.3)
+
+Source Resources preserve source-container data independently of every executable
+snapshot. They use ordinary Manifest files and Data blocks. Firmware bytes MUST
+NOT be embedded in the Catalog or represented as an invented application,
+program, DLC, or snapshot. Resources do not affect snapshot identities.
+
+The extension is required (`flags=1`), application-owned (`owner_kind=1`).
+NX 0.3 MUST contain at least one Source Resource; NX 0.2 MUST contain none.
+Older readers and editors reject 0.3 rather than discarding its resources.
+
+The payload is a 16-byte header followed by `count` 8-byte records:
+
+| Offset | Type | Value |
+|---:|---|---|
+| 0 | byte[4] | ASCII `NXSR` |
+| 4 | u16 | Version 1 |
+| 6 | u16 | Header size 16 |
+| 8 | u32 | Count, 1..4096; at most 4096 resources across the archive |
+| 12 | u32 | Reserved, zero |
+| 16 + 8*n | u32 | Kind: 0 opaque source file set, 1 original system-update HFS0 |
+| 20 + 8*n | u32 | Manifest root Directory ID |
+
+Records are strictly ordered by `(kind, root_directory)`. Roots are independent,
+unique across resources, not snapshot roots or child directories, and contain a
+nonempty flat set of unique File IDs. All ordinary path, file, block, count and
+integrity rules apply. Kind 1 contains exactly one file named `partition.hfs0`:
+the complete original HFS0 partition, including tables, unknown files and padding.
+Its kind declares provenance, not firmware validity or completeness; the consumer
+must validate native firmware metadata before offering installation. Resource
+file digests and block references provide the same verification and bounded,
+on-demand decoding as game files. Mounting does not decode firmware payloads.
+
+An editor MUST preserve every resource of a retained application, remap its root
+and file/block references, and include those blocks in live-data accounting and
+compaction. Removing a game version does not remove the application's resources.
+Removing an entire application removes its resources. A converter MAY explicitly
+omit firmware to save space, but MUST NOT then claim byte-exact reconstruction
+of a source that contained it. Resources are self-contained; no external sidecar
+or original source is needed to read them.
 
 ## 5. Media region
 

@@ -12,6 +12,8 @@
 //! dependency identities that only exist after the base has been packed.
 
 pub(crate) mod container;
+mod source_partition;
+pub(crate) use source_partition::{source_resources, update_partition};
 mod json;
 mod nca;
 pub(crate) use nca::parse_nacp_text;

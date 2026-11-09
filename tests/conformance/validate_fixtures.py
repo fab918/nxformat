@@ -244,7 +244,7 @@ def validate_archive(data: bytes, *, verify_payloads: bool = True) -> dict:
     magic, major, minor, header_size, required, optional = values[:6]
     q = values[6:19]
     catalog_hash, manifest_hash, index_hash, generation, check_size, reserved, _ = values[19:26]
-    if major != 0 or minor != 2 or header_size != 256:
+    if major != 0 or minor not in (2, 3) or header_size != 256:
         reject("version", "unsupported header identity/version")
     if required != 1:
         reject("feature", "unsupported header layout or required feature")
@@ -549,6 +549,7 @@ def validate_archive(data: bytes, *, verify_payloads: bool = True) -> dict:
     extension_ranges: list[tuple[int, int]] = []
     extension_keys: set[tuple[int, int, int]] = set()
     metadata_history: dict[int, list[int]] = {}
+    source_resources: list[tuple[int, int]] = []
     for type_id, flags, owner_kind, reserved0, owner_index, payload_off, payload_size in extensions:
         if flags & ~1 or owner_kind not in (0, 1, 2, 3) or reserved0:
             reject("catalog", "invalid extension descriptor")
@@ -677,6 +678,20 @@ def validate_archive(data: bytes, *, verify_payloads: bool = True) -> dict:
                         reject("catalog", "ambiguous snapshot NPDM")
                     expected_media_refs.append((npdm, (3,)))
                 previous = si
+        elif type_id == 0x00010008:
+            if owner_kind != 1 or flags != 1 or payload_size < 16:
+                reject("catalog", "invalid source resource descriptor")
+            payload = catalog[lo:hi]
+            magic, version, header_size, count, reserved = struct.unpack_from("<4sHHII", payload)
+            if (magic, version, header_size, reserved) != (b"NXSR", 1, 16, 0) or not 1 <= count <= 4096 or payload_size != 16 + count * 8:
+                reject("catalog", "invalid source resource header")
+            prior = None
+            for i in range(count):
+                item = struct.unpack_from("<II", payload, 16 + i * 8)
+                if item[0] > 1 or (prior is not None and prior >= item):
+                    reject("catalog", "invalid or unsorted source resource")
+                source_resources.append(item)
+                prior = item
         elif type_id == 0x00010006:
             # Optional rebuild recipes: an older reader may skip them.
             if owner_kind != 1 or flags != 0 or payload_size < 16:
@@ -705,8 +720,10 @@ def validate_archive(data: bytes, *, verify_payloads: bool = True) -> dict:
                 at = padded
             if at != payload_size:
                 reject("catalog", "rebuild recipe extension has trailing bytes")
-        if type_id not in (0x00010001, 0x00010002, 0x00010003, 0x00010004, 0x00010005) and flags & 1:
+        if type_id not in (0x00010001, 0x00010002, 0x00010003, 0x00010004, 0x00010005, 0x00010008) and flags & 1:
             reject("feature", "unknown required Catalog extension")
+    if len(source_resources) > 4096 or (minor == 3) != bool(source_resources):
+        reject("catalog", "format version disagrees with source resources")
     if catalog_cursor != catalog_size:
         reject("catalog", "Catalog has unaccounted trailing bytes")
     for app_i, history_indices in metadata_history.items():
@@ -900,6 +917,20 @@ def validate_archive(data: bytes, *, verify_payloads: bool = True) -> dict:
                 reject("manifest", "file block references do not cover logical size")
             if sha(content) != file["digest"]:
                 reject("file_hash", "file content digest mismatch")
+
+    resource_roots = set()
+    child_roots = {e["target"] for e in entries if e["kind"] == 1}
+    snapshot_roots = {row[5] for row in snapshots}
+    for kind, root in source_resources:
+        if root >= directory_count or root in resource_roots or root in child_roots or root in snapshot_roots:
+            reject("manifest", "invalid source resource root")
+        resource_roots.add(root)
+        first, count, _, _ = directories[root]
+        members = entries[first:first+count]
+        if not members or any(e["kind"] != 2 for e in members) or len({e["target"] for e in members}) != len(members):
+            reject("manifest", "source resource is not a flat unique file set")
+        if kind == 1 and (count != 1 or members[0]["name"] != b"partition.hfs0"):
+            reject("manifest", "system update resource lacks partition.hfs0")
 
     for snapshot_i, row in enumerate(snapshots):
         program_index, kind, _, _, _, root, logical_size, _, _, _, _, _, expected_identity, _ = row

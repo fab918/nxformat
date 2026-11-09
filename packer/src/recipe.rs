@@ -121,6 +121,16 @@ fn archive_files(
     let summary = inspect_archive(archive, options, IntegrityPolicy::Fast)?;
     let mut files = HashMap::new();
     for application in &summary.applications {
+        for (_, resource) in crate::inspect_source_resources(
+            archive,
+            application.platform,
+            application.application_id,
+            options,
+        )? {
+            for file in resource {
+                files.entry((file.size, file.digest)).or_insert(file);
+            }
+        }
         for snapshot in &application.snapshots {
             for file in
                 inspect_snapshot_files(archive, snapshot.identity, options, IntegrityPolicy::Fast)?
@@ -284,6 +294,15 @@ pub fn scan_source(source: &Path, options: &WriterOptions) -> Result<SourceScan,
         .filter(|u| u.size != 0)
         .map(|u| (u.offset, u.size, u.name.clone()))
         .collect();
+    if let Some(part) = crate::native::update_partition(source, &InventoryOptions::default())
+        .map_err(|e| invalid(e.to_string()))?
+    {
+        units.push((
+            part.offset,
+            part.size,
+            "system-update-partition.hfs0".to_owned(),
+        ));
+    }
     if units.is_empty() {
         return Err(invalid("source has no recognised package entries"));
     }
@@ -291,8 +310,8 @@ pub fn scan_source(source: &Path, options: &WriterOptions) -> Result<SourceScan,
     if units.windows(2).any(|w| w[0].0 + w[0].1 > w[1].0) {
         return Err(invalid("source package entries overlap"));
     }
-    let mut file = File::open(source)?;
-    let size = file.metadata()?.len();
+    let mut file = crate::source_file::open(source)?;
+    let size = file.len()?;
     if units.last().is_some_and(|u| u.0 + u.1 > size) {
         return Err(invalid("source package entry extends past the file"));
     }
@@ -411,8 +430,8 @@ pub fn finish_recipe(
     if segments.len() > MAX_SEGMENTS as usize {
         return Err(invalid("recipe needs too many segments"));
     }
-    let mut file = File::open(&scan.source)?;
-    if file.metadata()?.len() != size {
+    let mut file = crate::source_file::open(&scan.source)?;
+    if file.len()? != size {
         return Err(integrity("source changed while writing the recipe"));
     }
 
@@ -832,6 +851,16 @@ fn recipe_owner(
     let summary = inspect_archive(archive, options, IntegrityPolicy::Fast)?;
     for application in &summary.applications {
         let mut files = std::collections::HashSet::new();
+        for (_, resource) in crate::inspect_source_resources(
+            archive,
+            application.platform,
+            application.application_id,
+            options,
+        )? {
+            for file in resource {
+                files.insert((file.size, file.digest));
+            }
+        }
         for snapshot in &application.snapshots {
             for file in
                 inspect_snapshot_files(archive, snapshot.identity, options, IntegrityPolicy::Fast)?

@@ -232,12 +232,21 @@ pub fn inspect_snapshot_files(
         .iter()
         .find(|s| s.snapshot.identity == identity)
         .ok_or_else(|| invalid("snapshot identity not present"))?;
+    reference_files(&archive, snapshot.snapshot.root, options, &mut budget)
+}
+
+fn reference_files(
+    archive: &SourceArchive,
+    root: u32,
+    _options: &WriterOptions,
+    budget: &mut MemoryBudget,
+) -> Result<Vec<SnapshotFileReference>, WriterError> {
     let mut nodes = Vec::new();
     visit_identity_tree(
-        snapshot.snapshot.root,
+        root,
         &[],
         0,
-        &archive,
+        archive,
         &mut HashSet::new(),
         &mut nodes,
         &mut 0,
@@ -271,6 +280,34 @@ pub fn inspect_snapshot_files(
                 chunk_size_bytes: f.chunk_size_bytes,
                 blocks,
             });
+        }
+    }
+    Ok(result)
+}
+
+/// Independent source files, owned by an application rather than a game snapshot.
+pub fn inspect_source_resources(
+    path: impl AsRef<Path>,
+    platform: Platform,
+    application_id: u64,
+    options: &WriterOptions,
+) -> Result<Vec<(u32, Vec<SnapshotFileReference>)>, WriterError> {
+    validate_options(options)?;
+    let mut file = File::open(path)?;
+    let mut budget = MemoryBudget {
+        current: 0,
+        peak: 0,
+        limit: options.max_memory_bytes,
+    };
+    let archive = parse_archive(&mut file, 0, options, &mut budget)?;
+    let mut result = Vec::new();
+    for app in archive
+        .applications
+        .iter()
+        .filter(|a| a.key == (platform as u8, application_id))
+    {
+        for &(kind, root) in &app.source_resources {
+            result.push((kind, reference_files(&archive, root, options, &mut budget)?));
         }
     }
     Ok(result)
@@ -365,6 +402,7 @@ struct SourceApplication {
     key: (u8, u64),
     selected_identity: Option<[u8; 32]>,
     optional_extensions: Vec<OptionalAppExtension>,
+    source_resources: Vec<(u32, u32)>,
     recipes: Vec<Vec<u8>>,
 }
 
@@ -485,6 +523,7 @@ fn hash_range(
 
 #[derive(Clone, Copy)]
 struct SourceHeader {
+    minor: u16,
     archive_size: u64,
     catalog_offset: u64,
     catalog_size: u64,
@@ -522,7 +561,7 @@ fn zero_range(file: &mut File, offset: u64, size: u64) -> Result<(), WriterError
 fn decode_slot(bytes: &[u8]) -> Result<Option<SourceHeader>, WriterError> {
     if &bytes[..4] != b"NXAR"
         || read_u16(bytes, 4)? != 0
-        || read_u16(bytes, 6)? != 2
+        || !matches!(read_u16(bytes, 6)?, 2 | 3)
         || read_u32(bytes, 8)? != 256
         || read_u16(bytes, 12)? != PAGED_HEADERS
         || read_u16(bytes, 14)? != 0
@@ -533,6 +572,7 @@ fn decode_slot(bytes: &[u8]) -> Result<Option<SourceHeader>, WriterError> {
         return Ok(None);
     }
     Ok(Some(SourceHeader {
+        minor: read_u16(bytes, 6)?,
         archive_size: read_u64(bytes, 16)?,
         catalog_offset: read_u64(bytes, 24)?,
         catalog_size: read_u64(bytes, 32)?,
@@ -1562,6 +1602,7 @@ fn parse_catalog(
             key,
             selected_identity: None,
             optional_extensions: Vec::new(),
+            source_resources: Vec::new(),
             recipes: Vec::new(),
         });
         prior_app = Some(key);
@@ -1864,6 +1905,32 @@ fn parse_catalog(
                     owner_kind,
                     payload.to_vec(),
                 ));
+            }
+            SOURCE_RESOURCES => {
+                if flags != 1
+                    || owner_kind != 1
+                    || payload.len() < 16
+                    || &payload[..4] != b"NXSR"
+                    || read_u16(payload, 4)? != 1
+                    || read_u16(payload, 6)? != 16
+                    || read_u32(payload, 12)? != 0
+                {
+                    return Err(bad("invalid source resource descriptor"));
+                }
+                let count = read_u32(payload, 8)? as usize;
+                if count == 0 || count > 4096 || payload.len() != 16 + count * 8 {
+                    return Err(bad("invalid source resource count"));
+                }
+                budget.charge(count as u64 * 16, "source resource descriptors")?;
+                let mut prior = None;
+                for row in payload[16..].chunks_exact(8) {
+                    let item = (read_u32(row, 0)?, read_u32(row, 4)?);
+                    if item.0 > 1 || prior.is_some_and(|p| p >= item) {
+                        return Err(bad("invalid or unsorted source resource"));
+                    }
+                    prior = Some(item);
+                    apps[owner_index as usize].source_resources.push(item);
+                }
             }
             RECIPE_EXTENSION => {
                 if flags != 0 || owner_kind != 1 {
@@ -2513,6 +2580,48 @@ fn parse_archive(
         optional_global_extensions,
         inherited_files: HashMap::new(),
     };
+    let resource_count: usize = parsed
+        .applications
+        .iter()
+        .map(|a| a.source_resources.len())
+        .sum();
+    if resource_count > 4096 || (header.minor == 3) != (resource_count != 0) {
+        return Err(bad("format version disagrees with source resources"));
+    }
+    let mut roots = HashSet::new();
+    for app in &parsed.applications {
+        for &(kind, root) in &app.source_resources {
+            if !roots.insert(root) || parsed.snapshots.iter().any(|s| s.snapshot.root == root) {
+                return Err(bad(
+                    "source resource root is shared or belongs to a snapshot",
+                ));
+            }
+            let entries = parsed
+                .directories
+                .get(root as usize)
+                .ok_or_else(|| bad("source resource root out of range"))?;
+            if entries.is_empty() || entries.iter().any(|e| e.kind != 2) {
+                return Err(bad("source resource must be a nonempty flat file set"));
+            }
+            if kind == 1 && (entries.len() != 1 || entries[0].name != "partition.hfs0") {
+                return Err(bad("system update resource must contain partition.hfs0"));
+            }
+            let mut seen = HashSet::new();
+            for e in entries {
+                if !seen.insert(e.target) {
+                    return Err(bad("repeated file in source resource"));
+                }
+            }
+        }
+    }
+    if parsed
+        .directories
+        .iter()
+        .flatten()
+        .any(|e| e.kind == 1 && roots.contains(&e.target))
+    {
+        return Err(bad("source resource root is a child directory"));
+    }
     validate_snapshot_identities(&parsed)?;
     Ok(parsed)
 }
@@ -4129,7 +4238,14 @@ fn write_repacked_archive(
     if archive_size > MAX_ARCHIVE_SIZE || archive_size > options.max_archive_size {
         return Err(limit_error("repacked archive exceeds supported size"));
     }
+    let extension_count = u32::from_le_bytes(catalog[40..44].try_into().unwrap());
+    let extension_offset = u64::from_le_bytes(catalog[88..96].try_into().unwrap());
+    let has_resources = (0..extension_count).any(|i| {
+        let at = extension_offset as usize + i as usize * 32;
+        u32::from_le_bytes(catalog[at..at + 4].try_into().unwrap()) == SOURCE_RESOURCES
+    });
     let header = encode_header(&HeaderFields {
+        source_resources: has_resources,
         archive_size,
         catalog_offset,
         catalog_size: catalog.len() as u64,
@@ -4580,6 +4696,7 @@ pub fn compact_archive(
 /// Combine independently validated native selections before staging, while
 /// keeping one canonical Application/Program row per logical identity.
 fn merge_native_input(output: &mut ArchiveInput, input: ArchiveInput) -> Result<(), WriterError> {
+    output.source_resources.extend(input.source_resources);
     for mut addition in input.applications {
         if let Some(existing) = output.applications.iter_mut().find(|app| {
             app.platform == addition.platform && app.application_id == addition.application_id
@@ -4849,6 +4966,17 @@ fn repack_inner(
     for snapshot in combined.snapshots.iter().filter(|s| s.source_archive == 0) {
         collect_tree_blocks(&archives[0], snapshot.data.root, &mut retained_block_ids, 0)?;
     }
+    for app in &archives[0].applications {
+        if combined
+            .apps
+            .iter()
+            .any(|a| (a.platform, a.application_id) == app.key)
+        {
+            for &(_, root) in &app.source_resources {
+                collect_tree_blocks(&archives[0], root, &mut retained_block_ids, 0)?;
+            }
+        }
+    }
     let mut block_encoder = None;
     // HashSet iteration is randomized. Canonical block order is part of
     // deterministic output, so sort the live set before assigning new IDs.
@@ -4902,7 +5030,47 @@ fn repack_inner(
         )?;
         snapshot.data.root = root;
     }
-    // Blocks no snapshot uses are not merged.
+    for (owner, app) in combined.apps.iter().enumerate() {
+        let mut rows = Vec::new();
+        for archive in &archives {
+            for source_app in archive
+                .applications
+                .iter()
+                .filter(|a| a.key == (app.platform, app.application_id))
+            {
+                for &(kind, root) in &source_app.source_resources {
+                    let root = append_snapshot_tree(
+                        archive.archive,
+                        root,
+                        archive,
+                        &mut files,
+                        &mut directories,
+                        &mut block_refs,
+                        &archives,
+                        &mut input_files,
+                        &mut block_maps,
+                        &mut output_blocks,
+                        &mut candidates,
+                        &mut stats,
+                        options,
+                        0,
+                        &mut block_encoder,
+                        &mut encoded_spool,
+                        scratch_bytes,
+                        &mut budget,
+                    )?;
+                    rows.push((kind, root));
+                }
+            }
+        }
+        if !rows.is_empty() {
+            rows.sort_unstable();
+            combined
+                .extensions
+                .push(source_resource_extension(owner as u32, &rows));
+        }
+    }
+    // Blocks no snapshot or resource uses are not merged.
     options
         .progress
         .add_done(scratch_units.saturating_sub(options.progress.done() - merged_from));
@@ -5436,4 +5604,98 @@ pub fn edit_archive_recipes(
         },
     )
     .map(|s| s.repack)
+}
+
+#[cfg(test)]
+mod source_resource_validation_tests {
+    use super::*;
+
+    fn image() -> Vec<u8> {
+        let app = 0x0100_0000_0001_0000;
+        let bytes = crate::native::synthetic::dxci(&[
+            ("update", vec![("unknown.bin".into(), vec![7; 5000])]),
+            (
+                "secure",
+                crate::native::synthetic::title_entries(
+                    &crate::native::synthetic::TitleSpec::application(app, 0, 4),
+                ),
+            ),
+        ]);
+        let (mut source, source_guard) =
+            unique_temp(&std::env::temp_dir(), OsStr::new("nx-resource-source")).unwrap();
+        source.write_all(&bytes).unwrap();
+        drop(source);
+        let (output, output_guard) =
+            unique_temp(&std::env::temp_dir(), OsStr::new("nx-resource-output")).unwrap();
+        drop(output);
+        let native = crate::native::InventoryOptions::default();
+        let inventory =
+            crate::native::inventory(std::slice::from_ref(&source_guard.path), &native).unwrap();
+        crate::conversion::convert_inventory(
+            &inventory,
+            &output_guard.path,
+            &native,
+            IntegrityPolicy::Strict,
+            &WriterOptions::default(),
+        )
+        .unwrap();
+        std::fs::read(output_guard.path.clone()).unwrap()
+    }
+
+    // Re-sign metadata so rejection tests structure/ownership, not just hashes.
+    fn resign(bytes: &mut [u8]) {
+        let cat = read_u64(bytes, 24).unwrap() as usize;
+        let len = read_u64(bytes, 32).unwrap() as usize;
+        let digest = sha256(&bytes[cat..cat + len]);
+        for slot in [0, 4096] {
+            bytes[slot + 120..slot + 152].copy_from_slice(&digest);
+            let crc = crc32c(&bytes[slot..slot + 252]);
+            write_u32_at(bytes, slot + 252, crc);
+        }
+    }
+
+    #[test]
+    fn authenticated_invalid_resource_descriptors_reject() {
+        let valid = image();
+        let cat = read_u64(&valid, 24).unwrap() as usize;
+        let table = cat + read_u64(&valid, cat + 88).unwrap() as usize;
+        let count = read_u32(&valid, cat + 40).unwrap() as usize;
+        let descriptor = (0..count)
+            .map(|i| table + i * 32)
+            .find(|&at| read_u32(&valid, at).unwrap() == SOURCE_RESOURCES)
+            .unwrap();
+        let payload = cat + read_u64(&valid, descriptor + 16).unwrap() as usize;
+        let snapshot_table = cat + read_u64(&valid, cat + 64).unwrap() as usize;
+        let snapshot_root = read_u32(&valid, snapshot_table + 12).unwrap();
+        for case in 0..7 {
+            let mut bytes = valid.clone();
+            match case {
+                0 => write_u32_at(&mut bytes, payload + 20, u32::MAX),
+                1 => write_u32_at(&mut bytes, payload + 16, 2),
+                2 => write_u32_at(&mut bytes, descriptor + 4, 0),
+                3 => write_u32_at(&mut bytes, descriptor + 12, u32::MAX),
+                4 => write_u32_at(&mut bytes, payload + 8, 4097),
+                5 => write_u32_at(&mut bytes, payload + 20, snapshot_root),
+                _ => {
+                    for slot in [0, 4096] {
+                        write_u16_at(&mut bytes, slot + 6, 2);
+                    }
+                }
+            }
+            resign(&mut bytes);
+            let (mut file, guard) =
+                unique_temp(&std::env::temp_dir(), OsStr::new("nx-resource-invalid")).unwrap();
+            file.write_all(&bytes).unwrap();
+            drop(file);
+            assert!(
+                inspect_archive(
+                    &guard.path,
+                    &WriterOptions::default(),
+                    IntegrityPolicy::Fast
+                )
+                .is_err(),
+                "case {case}"
+            );
+        }
+    }
 }

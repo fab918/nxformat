@@ -12,11 +12,11 @@ import test_rust_writer as writer
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def compile_reader(directory: Path) -> Path:
+def compile_reader(directory: Path, source: Path | None = None) -> Path:
     compiler = shutil.which(os.environ.get("CXX", "")) or shutil.which("c++") or shutil.which("g++") or shutil.which("cl")
     if not compiler:
         raise RuntimeError("C++17 compiler is required")
-    source = ROOT / "tests/conformance/native_output_reader.cpp"
+    source = source or ROOT / "tests/conformance/native_output_reader.cpp"
     msvc = Path(compiler).name.lower() in {"cl", "cl.exe"}
     output = directory / ("native_reader.exe" if msvc else "native_reader")
     if msvc:

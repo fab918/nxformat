@@ -135,8 +135,9 @@ fn dxci_padding_becomes_fill_and_rebuilds() {
         "recipe is {} bytes",
         stats.recipe_bytes
     );
-    // The system update partition is not inventoried: its bytes stay literal.
-    assert!(stats.literal_bytes >= 5000, "{stats:?}");
+    // The system partition is a block-backed source resource, not a literal.
+    assert!(stats.literal_bytes < 5000, "{stats:?}");
+    assert!(stats.unmatched_entries.is_empty());
     let rebuilt = temp.join("rebuilt.xci");
     rebuild_from_recipe(&nx, &recipe, &rebuilt, &options).unwrap();
     assert_eq!(fs::read(&rebuilt).unwrap(), image);
@@ -287,4 +288,175 @@ fn recipes_kept_inside_the_nx_follow_edits() {
     convert(std::slice::from_ref(&foreign), &other_nx);
     let other = build_recipe(&foreign, &other_nx, &options).unwrap().0;
     assert!(embed_recipes(&nx, vec![other], &options).is_err());
+}
+
+/// A firmware larger than the entire Catalog must stay out of metadata,
+/// survive native edits/compaction, and rebuild in its original byte position.
+#[test]
+fn large_source_partition_survives_native_edits_and_rebuilds_exactly() {
+    use nxformat_packer::recipe::{
+        build_recipe, check_embedded, embed_recipes, embedded_recipes, rebuild_embedded,
+    };
+    use nxformat_packer::{
+        add_native_content, compact_archive, inspect_snapshot_files, inspect_source_resources,
+        CompressionMode, NativeAddRequest, Platform,
+    };
+    let temp = TempDir::new();
+    let mut state = 0x12345678u32;
+    let payload: Vec<u8> = (0..(17 * 1024 * 1024))
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    let image = dxci(&[
+        ("update", vec![("unknown-system.bin".into(), payload)]),
+        ("secure", title_entries(&TitleSpec::application(APP, 0, 4))),
+    ]);
+    let source = temp.write("src/base.dxci", &image);
+    let nx = temp.join("game.nx");
+    let options = WriterOptions {
+        compression_mode: CompressionMode::RawOnly,
+        compression_workers: 1,
+        max_memory_bytes: 160 * 1024 * 1024,
+        ..WriterOptions::default()
+    };
+    let inv = inventory(std::slice::from_ref(&source), &strict()).unwrap();
+    convert_inventory(&inv, &nx, &strict(), IntegrityPolicy::Strict, &options).unwrap();
+    assert_eq!(
+        u16::from_le_bytes(fs::read(&nx).unwrap()[6..8].try_into().unwrap()),
+        3
+    );
+    let resources = inspect_source_resources(&nx, Platform::Switch1, APP, &options).unwrap();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0].0, 1);
+    assert!(resources[0].1[0].size > 17 * 1024 * 1024);
+    let summary = inspect_archive(&nx, &options, IntegrityPolicy::Strict).unwrap();
+    let base = summary.applications[0].snapshots[0].identity;
+    assert!(
+        inspect_snapshot_files(&nx, base, &options, IntegrityPolicy::Fast)
+            .unwrap()
+            .iter()
+            .all(|f| f.path.ends_with(".nca"))
+    );
+    let (recipe, stats) = build_recipe(&source, &nx, &options).unwrap();
+    assert!(stats.recipe_bytes < 8192, "{stats:?}");
+    assert!(stats.unmatched_entries.is_empty());
+    embed_recipes(&nx, vec![recipe], &options).unwrap();
+    let update = temp.write(
+        "src/update.dxci",
+        &dxci(&[
+            (
+                "update",
+                vec![("another-system.bin".into(), vec![0x55; 3000])],
+            ),
+            ("secure", title_entries(&TitleSpec::patch(APP, 1, 9))),
+        ]),
+    );
+    add_native_content(
+        &nx,
+        &nx,
+        &NativeAddRequest::new(&update, APP | 0x800, 1),
+        &strict(),
+        &options,
+        IntegrityPolicy::Strict,
+    )
+    .unwrap();
+    let summary = inspect_archive(&nx, &options, IntegrityPolicy::Strict).unwrap();
+    assert!(summary.applications[0]
+        .snapshots
+        .iter()
+        .any(|s| s.identity == base));
+    assert_eq!(
+        inspect_source_resources(&nx, Platform::Switch1, APP, &options)
+            .unwrap()
+            .len(),
+        2,
+        "native batch must retain newly imported resources"
+    );
+    let mut remove = RepackPlan::new();
+    remove.remove_snapshots.push(
+        summary.applications[0]
+            .snapshots
+            .iter()
+            .find(|s| s.snapshot_type == SnapshotType::Update)
+            .unwrap()
+            .identity,
+    );
+    repack_archive(&nx, &nx, remove, &options, IntegrityPolicy::Strict).unwrap();
+    compact_archive(&nx, &options, IntegrityPolicy::Strict).unwrap();
+    let recipes = embedded_recipes(&nx, &options).unwrap();
+    assert_eq!(recipes.len(), 1);
+    check_embedded(&nx, &recipes[0].bytes, &options).unwrap();
+    let rebuilt = temp.join("rebuilt.dxci");
+    rebuild_embedded(&nx, &recipes[0].bytes, &rebuilt, &options).unwrap();
+    assert_eq!(fs::read(rebuilt).unwrap(), image);
+    // Exclusion is explicit and leaves game identities unchanged.
+    let stripped = temp.join("no-firmware.nx");
+    let omitted = WriterOptions {
+        preserve_firmware: false,
+        ..options
+    };
+    convert_inventory(
+        &inv,
+        &stripped,
+        &strict(),
+        IntegrityPolicy::Strict,
+        &omitted,
+    )
+    .unwrap();
+    assert!(
+        inspect_source_resources(&stripped, Platform::Switch1, APP, &omitted)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        inspect_archive(&stripped, &omitted, IntegrityPolicy::Fast)
+            .unwrap()
+            .applications[0]
+            .snapshots[0]
+            .identity,
+        base
+    );
+    assert!(
+        fs::metadata(&nx).unwrap().len() > fs::metadata(stripped).unwrap().len() + 16 * 1024 * 1024
+    );
+}
+
+#[test]
+fn requested_recipe_failure_never_publishes_a_pack() {
+    use nxformat_packer::cli;
+    let temp = TempDir::new();
+    let mut state = 0x12345678u32;
+    let payload: Vec<_> = (0..6 * 1024 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    let mut entries = title_entries(&TitleSpec::application(APP, 0, 4));
+    entries.push(("unmatched.ticket".to_owned(), payload));
+    let source = temp.write("source.dnsp", &dnsp(&entries));
+    let out = temp.join("must-not-exist.nx");
+    let sink: cli::Sink = std::sync::Arc::new(|_, _| {});
+    let result = cli::run(
+        vec![
+            "pack".into(),
+            source.display().to_string(),
+            out.display().to_string(),
+        ],
+        Some(sink),
+        None,
+    );
+    assert!(result.is_err());
+    assert!(!out.exists());
+    assert_eq!(
+        fs::read_dir(&temp.0).unwrap().count(),
+        1,
+        "temporary outputs must be removed"
+    );
 }

@@ -41,6 +41,28 @@ const MAX_ARCHIVE_SIZE: u64 = i64::MAX as u64;
 // to a <=1 MiB window and levels 1..=13. Charged once when that context is made.
 const ZSTD_CONTEXT_MEMORY_ESTIMATE: u64 = 32 * 1024 * 1024;
 const ZSTD_DECODER_MEMORY_ESTIMATE: u64 = 8 * 1024 * 1024;
+pub(crate) const SOURCE_RESOURCES: u32 = 0x0001_0008;
+
+fn source_resource_extension(owner: u32, rows: &[(u32, u32)]) -> CatalogExtension {
+    let mut bytes = Vec::with_capacity(16 + rows.len() * 8);
+    bytes.extend_from_slice(b"NXSR");
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(&(rows.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    for &(kind, root) in rows {
+        bytes.extend_from_slice(&kind.to_le_bytes());
+        bytes.extend_from_slice(&root.to_le_bytes());
+    }
+    CatalogExtension {
+        type_id: SOURCE_RESOURCES,
+        flags: 1,
+        owner_kind: 1,
+        owner,
+        bytes,
+    }
+}
+
 const SNAPSHOT_NATIVE_METADATA: u32 = 0x0001_0005;
 const SNAPSHOT_METADATA_HISTORY: u32 = 0x0001_0004;
 const MAX_MEDIA_PAYLOAD: u64 = 64 * 1024 * 1024;
@@ -309,6 +331,8 @@ impl ProgressCounter {
 /// in one of the five normative block sizes from 64 KiB through 1 MiB.
 #[derive(Clone)]
 pub struct WriterOptions {
+    /// Native imports retain source-system partitions independently of recipes.
+    pub preserve_firmware: bool,
     /// Display-only fallback for missing titles and artwork; never changes NACP.
     pub display_fallback: Option<DisplayFallback>,
     pub max_memory_bytes: u64,
@@ -379,6 +403,7 @@ pub struct WriterOptions {
 impl Default for WriterOptions {
     fn default() -> Self {
         Self {
+            preserve_firmware: true,
             display_fallback: None,
             max_memory_bytes: 512 * 1024 * 1024,
             max_dedup_index_bytes: 256 * 1024 * 1024,
@@ -3173,7 +3198,7 @@ fn replace_file(source: &Path, destination: &Path, durable: bool) -> Result<(), 
 /// publish it atomically. Validation and cancellation happen before publication.
 /// A directory sync error is reported after the new file has been published.
 pub fn write_archive(
-    input: ArchiveInput,
+    mut input: ArchiveInput,
     destination: impl AsRef<Path>,
     options: &WriterOptions,
 ) -> Result<WriterStats, WriterError> {
@@ -3184,8 +3209,59 @@ pub fn write_archive(
         peak: 0,
         limit: options.max_memory_bytes,
     };
-    let (mut apps, mut programs, mut work, input_counts) =
+    let mut resource_counts = InputCounts::default();
+    if input.source_resources.len() > 4096 {
+        return Err(limit_error("too many source resources"));
+    }
+    for resource in &mut input.source_resources {
+        if resource.kind > 1
+            || resource.root.entries.is_empty()
+            || resource
+                .root
+                .entries
+                .iter()
+                .any(|e| !matches!(e.node, NodeInput::File(_)))
+        {
+            return Err(invalid(
+                "source resources must be nonempty flat file sets of a known kind",
+            ));
+        }
+        if resource.kind == 1
+            && (resource.root.entries.len() != 1
+                || resource.root.entries[0].name != "partition.hfs0")
+        {
+            return Err(invalid(
+                "system update resource must contain partition.hfs0",
+            ));
+        }
+        if !input
+            .applications
+            .iter()
+            .any(|a| a.platform == resource.platform && a.application_id == resource.application_id)
+        {
+            return Err(invalid("source resource application is absent"));
+        }
+        count_tree(&mut resource.root, 0, options, &mut resource_counts)?;
+    }
+    budget.charge(resource_counts.estimated, "source resource input metadata")?;
+    let resources = std::mem::take(&mut input.source_resources);
+    let (mut apps, mut programs, mut work, mut input_counts) =
         plan_inputs(input, options, &mut budget)?;
+    input_counts.input_bytes = input_counts
+        .input_bytes
+        .checked_add(resource_counts.input_bytes)
+        .ok_or_else(|| limit_error("source resource input size overflow"))?;
+    input_counts.file_entries += resource_counts.file_entries;
+    input_counts.directories += resource_counts.directories;
+    input_counts.entries += resource_counts.entries;
+    if input_counts.file_entries > options.max_files as u64
+        || input_counts.directories > options.max_directories as u64
+        || input_counts.entries > options.max_entries as u64
+    {
+        return Err(limit_error(
+            "game and source resource records exceed configured limits",
+        ));
+    }
     // Progress counts the file bytes read below; NPDM and media are not
     // counted. The output readback at the end is counted too, as two thirds
     // of the input (measured: a 52 GB NUP reads in 110 s, its 25 GB archive
@@ -3403,6 +3479,50 @@ pub fn write_archive(
             required_firmware: source.native.required_firmware,
         });
     }
+    let mut resource_rows = vec![Vec::new(); apps.len()];
+    for resource in resources {
+        let owner = apps
+            .iter()
+            .position(|a| {
+                a.platform == resource.platform as u8 && a.application_id == resource.application_id
+            })
+            .ok_or_else(|| invalid("source resource owner is absent"))?;
+        // Same file/block writer, separate root and ownership. No synthetic
+        // program/snapshot and no change to any game's snapshot identity.
+        let (root, _, _) = process_tree(
+            resource.root,
+            owner as u32,
+            NO_INDEX,
+            resource.platform as u8,
+            resource.application_id,
+            None,
+            SnapshotType::Unknown as u8,
+            0,
+            [0; 16],
+            &mut directories,
+            &mut files,
+            &mut block_refs,
+            &mut blocks,
+            &mut block_dedup,
+            &mut block_buffer,
+            &mut block_encoder,
+            &mut HashMap::new(),
+            &mut data_spool,
+            options,
+            &mut budget,
+            &mut deduplicated_blocks,
+            &mut timings,
+        )?;
+        resource_rows[owner].push((resource.kind, root));
+    }
+    let resource_extensions: Vec<_> = resource_rows
+        .iter_mut()
+        .enumerate()
+        .filter_map(|(owner, rows)| {
+            rows.sort_unstable();
+            (!rows.is_empty()).then(|| source_resource_extension(owner as u32, rows))
+        })
+        .collect();
     data_spool.finish(&mut blocks, options, &mut timings)?;
     let data_spool_len = data_spool.out.position;
     let staged_logical_block_bytes = blocks.iter().try_fold(0u64, |sum, block| {
@@ -3466,7 +3586,13 @@ pub fn write_archive(
             }
         }
     }
-    let catalog = build_catalog(&apps, &programs, &snapshots, &[], &mut budget)?;
+    let catalog = build_catalog(
+        &apps,
+        &programs,
+        &snapshots,
+        &resource_extensions,
+        &mut budget,
+    )?;
     let manifest = build_manifest(&directories, &files, &block_refs, options, &mut budget)?;
     let (media_header_records, media_payload_start, media_size) = media_layout(&mut media_stage)?;
     let media_present = !media_stage.records.is_empty();
@@ -3580,6 +3706,7 @@ pub fn write_archive(
             .ok_or_else(|| limit_error("temporary disk estimate overflow"))?,
     );
     let header = encode_header(&HeaderFields {
+        source_resources: !resource_extensions.is_empty(),
         archive_size,
         catalog_offset,
         catalog_size: catalog.len() as u64,
@@ -3705,6 +3832,7 @@ pub(crate) const PAGED_HEADERS: u16 = 1;
 pub(crate) const HEADER_SLOTS: [u64; 2] = [0, HEADER_PAGE_SIZE as u64];
 
 pub(crate) struct HeaderFields {
+    pub source_resources: bool,
     pub archive_size: u64,
     pub catalog_offset: u64,
     pub catalog_size: u64,
@@ -3728,7 +3856,7 @@ pub(crate) fn encode_header(h: &HeaderFields) -> [u8; 256] {
     let mut header = [0u8; 256];
     header[..4].copy_from_slice(b"NXAR");
     write_u16_at(&mut header, 4, 0);
-    write_u16_at(&mut header, 6, 2);
+    write_u16_at(&mut header, 6, if h.source_resources { 3 } else { 2 });
     write_u32_at(&mut header, 8, 256);
     write_u16_at(&mut header, 12, PAGED_HEADERS);
     write_u64_at(&mut header, 16, h.archive_size);
@@ -4762,12 +4890,12 @@ fn plan_inputs(
 mod repack;
 pub use repack::{
     add_native_content, add_native_contents, compact_archive, edit_archive_metadata,
-    edit_archive_recipes, inspect_archive, inspect_snapshot_files, read_snapshot_display,
-    read_snapshot_file_range, read_snapshot_nacp, repack_archive, ApplicationSummary,
-    ArchiveSummary, IntegrityPolicy, MetadataEdit, MetadataSourceSelection, NativeAddRequest,
-    NativeAddStats, ProgramSummary, RepackPlan, RepackStats, SnapshotBlockReference,
-    SnapshotDisplay, SnapshotFileReference, SnapshotSummary, VerificationStats,
-    MAX_EMBEDDED_RECIPE_BYTES,
+    edit_archive_recipes, inspect_archive, inspect_snapshot_files, inspect_source_resources,
+    read_snapshot_display, read_snapshot_file_range, read_snapshot_nacp, repack_archive,
+    ApplicationSummary, ArchiveSummary, IntegrityPolicy, MetadataEdit, MetadataSourceSelection,
+    NativeAddRequest, NativeAddStats, ProgramSummary, RepackPlan, RepackStats,
+    SnapshotBlockReference, SnapshotDisplay, SnapshotFileReference, SnapshotSummary,
+    VerificationStats, MAX_EMBEDDED_RECIPE_BYTES,
 };
 pub(crate) use repack::{inspect_archive_with_space, verify_extracted_source_files};
 

@@ -17,17 +17,18 @@ pub use model::{
     ApplicationInput, ArchiveInput, DependencyInput, DependencyKind, DirectoryInput,
     DisplayFallback, EntryInput, FileInput, FileReadProfile, LocalizedMetadata, MediaInput,
     MediaType, NodeInput, Platform, ProgramInput, ProgramKind, SnapshotInput, SnapshotMetadata,
-    SnapshotNativeMetadata, SnapshotType,
+    SnapshotNativeMetadata, SnapshotType, SourceResourceInput,
 };
 pub use writer::{
     add_native_content, add_native_contents, compact_archive, edit_archive_metadata,
-    edit_archive_recipes, inspect_archive, inspect_snapshot_files, read_snapshot_display,
-    read_snapshot_file_range, read_snapshot_nacp, repack_archive, write_archive,
-    ApplicationSummary, ArchiveSummary, BlockSizing, CancellationToken, CompressionMode,
-    IntegrityPolicy, MetadataEdit, MetadataSourceSelection, NativeAddRequest, NativeAddStats,
-    ProgramSummary, ProgressCounter, RepackPlan, RepackStats, SnapshotBlockReference,
-    SnapshotDisplay, SnapshotFileReference, SnapshotSummary, VerificationStats, WriterError,
-    WriterErrorKind, WriterOptions, WriterStats, MAX_EMBEDDED_RECIPE_BYTES,
+    edit_archive_recipes, inspect_archive, inspect_snapshot_files, inspect_source_resources,
+    read_snapshot_display, read_snapshot_file_range, read_snapshot_nacp, repack_archive,
+    write_archive, ApplicationSummary, ArchiveSummary, BlockSizing, CancellationToken,
+    CompressionMode, IntegrityPolicy, MetadataEdit, MetadataSourceSelection, NativeAddRequest,
+    NativeAddStats, ProgramSummary, ProgressCounter, RepackPlan, RepackStats,
+    SnapshotBlockReference, SnapshotDisplay, SnapshotFileReference, SnapshotSummary,
+    VerificationStats, WriterError, WriterErrorKind, WriterOptions, WriterStats,
+    MAX_EMBEDDED_RECIPE_BYTES,
 };
 
 pub mod cli;

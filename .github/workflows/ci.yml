@@ -45,6 +45,8 @@ jobs:
         run: cargo clippy --all-targets --locked --manifest-path packer/Cargo.toml -- -D warnings
       - name: Independently validate Rust writer output in Python and C++17
         run: python tests/conformance/test_rust_writer.py
+      - name: Validate source resources and exact reconstruction
+        run: python tests/conformance/test_source_resources.py
       - name: Independently validate native conversion and original content
         run: python tests/conformance/test_native_conversion.py
       - name: Independently validate native additions from existing NX

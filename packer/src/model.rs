@@ -317,12 +317,25 @@ pub struct ApplicationInput {
     pub snapshots: Vec<SnapshotInput>,
 }
 
+/// Block-backed source data, explicitly outside executable snapshots.
+/// Kind 1 is a complete original system-update HFS0 in `partition.hfs0`.
+pub struct SourceResourceInput {
+    pub platform: Platform,
+    pub application_id: u64,
+    pub kind: u32,
+    pub root: DirectoryInput,
+}
+
 pub struct ArchiveInput {
     pub applications: Vec<ApplicationInput>,
+    pub source_resources: Vec<SourceResourceInput>,
 }
 
 impl ArchiveInput {
     pub fn new(applications: Vec<ApplicationInput>) -> Self {
-        Self { applications }
+        Self {
+            applications,
+            source_resources: Vec::new(),
+        }
     }
 }

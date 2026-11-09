@@ -279,3 +279,21 @@ Origins are `unknown`, `declared`, `native-structure` or `derived`. The receipt 
 observations to manifest/native/base evidence; it is not signed or embedded in NX.
 `match_archive()` checks those bindings after edits. Loss of the receipt does not
 prevent the archive from serving its files and identities.
+
+## Firmware preservation (1.1.0)
+
+Native DXCI conversion retains its original system-update HFS0 in an independent
+Source Resource. `contents` reports it with `@RESOURCE` records
+(`application_id`, `kind`, `file_size`, `path`). Native firmware validity is the
+consumer's responsibility. Game snapshots and their identities are unchanged.
+
+```sh
+nxconvert pack game.dxci game.nx
+nxconvert rebuild game.nx rebuilt-folder
+# Save space explicitly; no byte-exact source reconstruction is promised:
+nxconvert pack game.dxci smaller.nx --omit-firmware --no-recipe
+```
+
+Firmware preservation and rebuild recipes are separate: `--no-recipe` alone
+keeps firmware. `--omit-firmware` requires `--no-recipe`, applies only to newly
+imported content, and does not silently strip resources already in an NX.
