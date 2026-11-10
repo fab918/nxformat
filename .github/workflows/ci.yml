@@ -134,7 +134,8 @@ jobs:
           python-version: "3.14"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          # llvm-tools: llvm-ar makes the static library without Zstandard.
+          components: rustfmt, clippy, llvm-tools
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
       - name: Check formatting

@@ -91,6 +91,8 @@ jobs:
           python-version: "3.14"
       - uses: dtolnay/rust-toolchain@stable
         with:
+          # llvm-tools: llvm-ar makes the static library without Zstandard.
+          components: llvm-tools
           targets: ${{ matrix.target }}${{ matrix.target2 && format(',{0}', matrix.target2) || '' }}
       - name: Version
         shell: bash

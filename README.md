@@ -146,7 +146,7 @@ With CMake, unpack an archive and point `nxformat_DIR` at its
 
 ```cmake
 find_package(nxformat 1.0 REQUIRED CONFIG)
-target_link_libraries(app PRIVATE nxformat::nxformat) # or nxformat::static
+target_link_libraries(app PRIVATE nxformat::nxformat) # or nxformat::static, or nxformat::static_nozstd with your own libzstd
 # Copy ${NXFORMAT_RUNTIME} next to the program.
 ```
 

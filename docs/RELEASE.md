@@ -17,6 +17,9 @@ readers when they hold no firmware.
 **Smaller C library**
 - The C API is built for size: about a third smaller. Zstandard and SHA-256
   keep full optimization, so conversion runs at the same speed.
+- Release archives add `nxformat_static_nozstd` (CMake `nxformat::static_nozstd`):
+  the static library without Zstandard, for programs that already link
+  libzstd 1.5.7 or later. The program then holds a single copy of zstd.
 
 ## Changes in 1.0.1
 

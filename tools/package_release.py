@@ -7,14 +7,19 @@
 Layout of nxformat-<version>-<platform>.zip|.tar.gz:
     include/   nxformat.h (C API) and the header-only C++17 NX reader
     lib/       shared library (Unix) or import library (Windows), plus
-               nxformat_static.a|.lib; lib/cmake/nxformat for find_package
+               nxformat_static.a|.lib, nxformat_static_nozstd.a|.lib (the same
+               without Zstandard, for programs that link their own libzstd);
+               lib/cmake/nxformat for find_package
     bin/       nxformat.dll (Windows) and the nxconvert app (desktop);
                macOS also bin/NXConvert.app, Linux share/ (desktop entry, icon)
 """
 import argparse
 import hashlib
+import re
 import shutil
+import subprocess
 import sys
+import tempfile
 import tarfile
 import zipfile
 from pathlib import Path
@@ -29,10 +34,20 @@ STATIC_LIBS = {
     'android': ['dl', 'm', 'log'],
 }
 
+# The Zstandard C files zstd-sys compiles into the static library.
+ZSTD_SOURCES = {
+    'debug', 'entropy_common', 'error_private', 'fse_decompress', 'pool', 'threading', 'xxhash',
+    'zstd_common', 'fse_compress', 'hist', 'huf_compress', 'zstd_compress', 'zstd_compress_literals',
+    'zstd_compress_sequences', 'zstd_compress_superblock', 'zstd_double_fast', 'zstd_fast',
+    'zstd_lazy', 'zstd_ldm', 'zstd_opt', 'zstd_preSplit', 'zstdmt_compress', 'huf_decompress',
+    'huf_decompress_amd64', 'zstd_ddict', 'zstd_decompress', 'zstd_decompress_block',
+}
+
 CMAKE_CONFIG = '''# nxformat {version} ({platform}).
-#   nxformat::nxformat  the C API, shared library
-#   nxformat::static    the C API, static library
-#   nxformat::reader    the header-only C++17 NX reader (needs a zstd decoder)
+#   nxformat::nxformat       the C API, shared library
+#   nxformat::static         the C API, static library
+#   nxformat::static_nozstd  the same without Zstandard: link your own libzstd 1.5.7 or later
+#   nxformat::reader         the header-only C++17 NX reader (needs a zstd decoder)
 get_filename_component(_nxformat_root "${{CMAKE_CURRENT_LIST_DIR}}/../../.." ABSOLUTE)
 set(nxformat_VERSION {version})
 if(NOT TARGET nxformat::nxformat)
@@ -46,6 +61,12 @@ if(NOT TARGET nxformat::nxformat)
     INTERFACE_COMPILE_DEFINITIONS NXFORMAT_STATIC
     INTERFACE_LINK_LIBRARIES "{static_libs}"
     IMPORTED_LOCATION "${{_nxformat_root}}/lib/{static}")
+  add_library(nxformat::static_nozstd STATIC IMPORTED)
+  set_target_properties(nxformat::static_nozstd PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${{_nxformat_root}}/include"
+    INTERFACE_COMPILE_DEFINITIONS NXFORMAT_STATIC
+    INTERFACE_LINK_LIBRARIES "{static_libs}"
+    IMPORTED_LOCATION "${{_nxformat_root}}/lib/{static_nozstd}")
   add_library(nxformat::reader INTERFACE IMPORTED)
   target_compile_features(nxformat::reader INTERFACE cxx_std_17)
   set_target_properties(nxformat::reader PROPERTIES
@@ -119,6 +140,51 @@ def add_app_icon(stage: Path, app: Path, system: str, version: str) -> None:
         (stage / 'share/applications/nxconvert.desktop').write_text(DESKTOP_ENTRY, newline='\n')
 
 
+def llvm_ar() -> Path:
+    """llvm-ar from the llvm-tools rustup component: it rewrites the symbol
+    table of COFF, ELF and Mach-O archives alike."""
+    sysroot = subprocess.run(['rustc', '--print', 'sysroot'], check=True, capture_output=True, text=True).stdout.strip()
+    host = next(line.split()[1] for line in subprocess.run(['rustc', '-vV'], check=True, capture_output=True,
+                                                            text=True).stdout.splitlines() if line.startswith('host:'))
+    tool = Path(sysroot) / 'lib/rustlib' / host / 'bin' / ('llvm-ar.exe' if sys.platform == 'win32' else 'llvm-ar')
+    if not tool.exists():
+        raise SystemExit(f'{tool} is missing: run rustup component add llvm-tools')
+    return tool
+
+
+def strip_zstd(archive: Path, ar: Path) -> None:
+    """Removes the Zstandard objects from one single-architecture archive."""
+    members = subprocess.run([ar, 't', archive], check=True, capture_output=True, text=True).stdout.splitlines()
+    zstd = [m for m in members
+            if (match := re.fullmatch(r'[0-9a-f]{16}-(\w+)\.o', m))
+            and match.group(1) in ZSTD_SOURCES]
+    if len(zstd) < 20:
+        raise SystemExit(f'{archive}: found only {len(zstd)} Zstandard objects')
+    subprocess.run([ar, 'd', archive, *zstd], check=True)
+
+
+def without_zstd(source: Path, target: Path, system: str) -> None:
+    """Copies the static library without its Zstandard objects."""
+    ar = llvm_ar()
+    if system != 'macos':
+        shutil.copy(source, target)
+        strip_zstd(target, ar)
+        return
+    # A universal archive: each architecture is stripped on its own.
+    archs = subprocess.run(['lipo', '-archs', source], check=True, capture_output=True, text=True).stdout.split()
+    with tempfile.TemporaryDirectory() as tmp:
+        thin = []
+        for arch in archs:
+            part = Path(tmp) / f'{arch}.a'
+            if len(archs) == 1:
+                shutil.copy(source, part)
+            else:
+                subprocess.run(['lipo', source, '-thin', arch, '-output', part], check=True)
+            strip_zstd(part, ar)
+            thin.append(part)
+        subprocess.run(['lipo', '-create', *thin, '-output', target], check=True)
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument('--platform', required=True, help='windows-x64, linux-x64, linux-arm64, macos-universal, android-arm64')
@@ -160,6 +226,8 @@ def main() -> int:
         shutil.copy(lib / 'libnxformat.a', stage / 'lib/libnxformat_static.a')
         shared, static = 'lib/libnxformat.so', 'libnxformat_static.a'
         implib = '\n    IMPORTED_SONAME "libnxformat.so"'
+    static_nozstd = static.replace('_static', '_static_nozstd')
+    without_zstd(stage / 'lib' / static, stage / 'lib' / static_nozstd, system)
     if a.app:
         shutil.copy(a.app, stage / 'bin')
         add_app_icon(stage, a.app, system, a.version)
@@ -168,7 +236,8 @@ def main() -> int:
 
     (stage / 'lib/cmake/nxformat/nxformatConfig.cmake').write_text(
         CMAKE_CONFIG.format(version=a.version, platform=a.platform, shared=shared, implib=implib,
-                            static=static, static_libs=';'.join(STATIC_LIBS[system])), newline='\n')
+                            static=static, static_nozstd=static_nozstd,
+                            static_libs=';'.join(STATIC_LIBS[system])), newline='\n')
     (stage / 'lib/cmake/nxformat/nxformatConfigVersion.cmake').write_text(
         CMAKE_VERSION.format(version=a.version, major=a.version.split(".")[0]), newline='\n')
     (stage / 'README.txt').write_text(
@@ -184,7 +253,9 @@ def main() -> int:
            if system == 'linux' and a.app else '')
         + '\n'
         'Static linking: define NXFORMAT_STATIC and link nxformat_static with: '
-        + (' '.join(STATIC_LIBS[system]) or 'nothing else') + '\n', newline='\n')
+        + (' '.join(STATIC_LIBS[system]) or 'nothing else') + '\n'
+        'nxformat_static_nozstd is the same without Zstandard, for programs that\n'
+        'link their own libzstd (1.5.7 or later) and want a single copy of it.\n', newline='\n')
 
     if system == 'windows':
         archive = a.out / f'{name}.zip'
