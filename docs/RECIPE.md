@@ -1,6 +1,6 @@
 # Rebuild recipes
 
-Applies to **NXFormat / NXConvert 1.0.1** (reads existing recipes unchanged).
+Applies to **NXFormat / NXConvert 1.0.2** (reads existing recipes unchanged).
 
 A recipe rebuilds an original package (supported decrypted DNSP or DXCI) byte for byte from the NX it was converted into. Recipes are
 kept **inside the NX**, in the optional Catalog extension `0x00010006`

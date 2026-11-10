@@ -1,10 +1,10 @@
 [package]
 name = "nxformat-packer"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 license = "MIT"
 rust-version = "1.80"
-description = "Source-independent NXFormat 1.0.1 archive writer"
+description = "Source-independent NXFormat 1.0.2 archive writer"
 
 [lib]
 name = "nxformat_packer"

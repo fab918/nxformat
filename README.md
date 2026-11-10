@@ -5,7 +5,7 @@
 <p align="center">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/github/license/fab918/nxformat" height="20" align="top"></a>
   <a href="https://github.com/fab918/nxformat/actions/workflows/ci.yml"><img alt="Tests and conformance" src="https://github.com/fab918/nxformat/actions/workflows/ci.yml/badge.svg?branch=main" height="20" align="top"></a>
-  <a href="https://github.com/fab918/nxformat/releases/tag/V1.0.1"><img alt="NXFormat v1.0.1" src="https://img.shields.io/badge/release-v1.0.1-blue" height="20" align="top"></a>
+  <a href="https://github.com/fab918/nxformat/releases/tag/V1.0.2"><img alt="NXFormat v1.0.2" src="https://img.shields.io/badge/release-v1.0.2-blue" height="20" align="top"></a>
   <img alt="Switch 1 and Switch 2" src="https://img.shields.io/badge/Switch-1%20%26%202-337ab7" height="20" align="top">
   <img alt="C++17 reader" src="https://img.shields.io/badge/reader-C%2B%2B17-00599C" height="20" align="top">
 </p>
@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/fab918/nxformat/releases/tag/V1.0.1"><strong>Download NXConvert 1.0.1</strong></a>
+  <a href="https://github.com/fab918/nxformat/releases/tag/V1.0.2"><strong>Download NXConvert 1.0.2</strong></a>
   &nbsp;·&nbsp;
   <a href="#performance-nx-vs-nup">NX vs NUP</a>
   &nbsp;·&nbsp;
@@ -40,8 +40,8 @@
 
 ## Quick start
 
-**NXConvert 1.0.1** creates NXFormat 1.0.1 archives with separate header pages.
-Download the [V1.0.1 release](https://github.com/fab918/nxformat/releases/tag/V1.0.1),
+**NXConvert 1.0.2** creates NXFormat 1.0.2 archives with separate header pages.
+Download the [V1.0.2 release](https://github.com/fab918/nxformat/releases/tag/V1.0.2),
 or build from source below. Desktop apps are available for Windows, Linux and
 macOS; Android packages provide libraries only.
 
@@ -130,7 +130,7 @@ platform (Windows x64, Linux x64 and arm64, macOS universal, Android arm64):
 `bin/` (the Windows DLL and desktop NXConvert app). Android archives contain
 libraries and headers only. `SHA256SUMS` is a separate release attachment.
 
-For xmake, download `nxformat-xmake-1.0.1.zip` from the release and extract it.
+For xmake, download `nxformat-xmake-1.0.2.zip` from the release and extract it.
 It contains the package recipe with the published archive hashes. Point xmake
 at that extracted directory:
 
@@ -196,7 +196,7 @@ links the reader for play, and the nxformat library for every change.
 
 ## Documentation and development
 
-- [RELEASE.md](docs/RELEASE.md): V1.0.1 release notes and platform packages.
+- [RELEASE.md](docs/RELEASE.md): V1.0.2 release notes and platform packages.
 - [SPEC.md](docs/SPEC.md): wire format and versioning.
 - [CLI.md](docs/CLI.md): commands, native/NUP imports, extracted-tree declarations and resource limits.
 - [READER.md](docs/READER.md): C++ API, persistent sessions, emulator integration and access profiles.

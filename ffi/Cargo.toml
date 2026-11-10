@@ -1,6 +1,6 @@
 [package]
 name = "nxformat-ffi"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 license = "MIT"
 rust-version = "1.80"
@@ -16,7 +16,17 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 nxformat-packer = { path = "../packer" }
 
+# Built for size: conversion time goes to disk I/O, Zstandard and SHA-256, so
+# only those two keep full optimization. The library is about a third smaller
+# and converts at the same speed.
 [profile.release]
 panic = "unwind"
 codegen-units = 1
-lto = "thin"
+lto = "fat"
+opt-level = "z"
+
+[profile.release.package.zstd-sys]
+opt-level = 3
+
+[profile.release.package.sha2]
+opt-level = 3

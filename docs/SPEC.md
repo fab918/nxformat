@@ -1,6 +1,6 @@
 # NX Binary Specification
 
-**Release:** 1.0.1. **Binary header versions:** `(0,2)` and `(0,3)`. **Extension:** `.nx`. **Magic:** ASCII `NXAR`. This document defines both wire versions. Integers are little-endian. Offsets and byte counts are unsigned unless stated otherwise. Indexes are zero-based. No on-disk C/C++ structure may be read by casting a pointer to it; implementations decode each field from bytes with explicit bounds and endian conversion.
+**Release:** 1.0.2. **Binary header versions:** `(0,2)` and `(0,3)`. **Extension:** `.nx`. **Magic:** ASCII `NXAR`. This document defines both wire versions. Integers are little-endian. Offsets and byte counts are unsigned unless stated otherwise. Indexes are zero-based. No on-disk C/C++ structure may be read by casting a pointer to it; implementations decode each field from bytes with explicit bounds and endian conversion.
 
 Source container formats, including decrypted DNSP/DXCI/DNCA, are not NX wire types. Import-to-snapshot mapping is described in [CLI.md](CLI.md#source-import-contract); the byte layout and reader requirements here remain source-independent.
 

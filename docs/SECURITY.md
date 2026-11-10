@@ -1,6 +1,6 @@
 # Parser and extraction security
 
-Applies to **NXFormat / NXConvert 1.0.1**.
+Applies to **NXFormat / NXConvert 1.0.2**.
 
 NX archives are untrusted input. A reader must validate fields before allocation, mapping, indexing, decompression, or extraction. Failure returns a bounded error; it must not continue with partial or guessed structures.
 
