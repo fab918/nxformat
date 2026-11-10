@@ -621,6 +621,7 @@ fn overlay(base: &Tree, update: &Tree) -> Result<Tree, WriterError> {
 /// Marks a file inherited from the base tree, to be hard-linked.
 const BASE_BIT: usize = 1 << (usize::BITS - 1);
 
+#[derive(Default)]
 struct Meta {
     nacp: Option<Vec<u8>>,
     icon: Option<Vec<u8>>,
@@ -702,15 +703,7 @@ impl Meta {
 }
 
 fn read_meta(file: &mut File, p: &Package, physical: u64) -> Result<Meta, WriterError> {
-    let mut meta = Meta {
-        nacp: None,
-        icon: None,
-        localized_icons: Vec::new(),
-        title: None,
-        publisher: None,
-        display_version: None,
-        localized_titles: Vec::new(),
-    };
+    let meta = Meta::default();
     if p.meta_offset == 0 && p.meta_size == 0 {
         return Ok(meta);
     }
@@ -724,13 +717,46 @@ fn read_meta(file: &mut File, p: &Package, physical: u64) -> Result<Meta, Writer
     let mut block = vec![0; p.meta_size as usize];
     file.seek(SeekFrom::Start(p.meta_offset))?;
     file.read_exact(&mut block)?;
+    parse_meta(&block, meta)
+}
+
+/// Meta TLV records as stored: (type, payload).
+fn meta_records(block: &[u8]) -> Result<Vec<(u16, &[u8])>, WriterError> {
+    let mut records = Vec::new();
     let mut at = 0usize;
     while at + 8 <= block.len() {
-        let kind = u16_at(&block, at);
-        let size = u32_at(&block, at + 4) as usize;
+        let kind = u16_at(block, at);
+        let size = u32_at(block, at + 4) as usize;
         let body = block
             .get(at + 8..at + 8 + size)
             .ok_or_else(|| bad("meta record overruns its block"))?;
+        records.push((kind, body));
+        at += 8 + size;
+    }
+    Ok(records)
+}
+
+/// Upstream nup PR #20 wrote every meta TLV type one too low (NPDM = 0).
+/// Same rule as nup PR #32: a type 0 record, or a first 0x0007 record that
+/// is not the 32-byte build ID, marks such a block. Types up to 0x0009
+/// are then read one higher.
+fn shifted_meta(records: &[(u16, &[u8])]) -> bool {
+    records.iter().any(|&(kind, _)| kind == 0)
+        || records
+            .iter()
+            .find(|&&(kind, _)| kind == 0x0007)
+            .is_some_and(|&(_, body)| body.len() != 32)
+}
+
+fn parse_meta(block: &[u8], mut meta: Meta) -> Result<Meta, WriterError> {
+    let records = meta_records(block)?;
+    let shifted = shifted_meta(&records);
+    for (kind, body) in records {
+        let kind = if shifted && kind <= 0x0009 {
+            kind + 1
+        } else {
+            kind
+        };
         match kind {
             0x0002 if body.len() == 0x4000 => meta.nacp = Some(body.to_vec()),
             0x0002 => return Err(bad("NACP record is not 0x4000 bytes")),
@@ -747,7 +773,6 @@ fn read_meta(file: &mut File, p: &Package, physical: u64) -> Result<Meta, Writer
             0x000a => meta.localized_icons = localized_records(body, "icon")?,
             _ => {}
         }
-        at += 8 + size;
     }
     Ok(meta)
 }

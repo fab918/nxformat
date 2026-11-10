@@ -563,3 +563,47 @@ fn streamed_conversion_rejects_a_damaged_romfs_file() {
     assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
     let _ = fs::remove_dir_all(&dir);
 }
+
+fn meta_block(records: &[(u16, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (kind, body) in records {
+        out.extend_from_slice(&kind.to_le_bytes());
+        out.extend_from_slice(&[0, 0]);
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(body);
+    }
+    out
+}
+
+/// Blocks written by upstream nup after its PR #20 carry every type one
+/// too low; they must read like spec blocks (nup PR #32 rule).
+#[test]
+fn shifted_meta_types_read_like_spec_types() {
+    let nacp = vec![0u8; 0x4000];
+    let build_id = [0xaa; 32];
+    let spec = [
+        (0x0001, &b"npdm"[..]),
+        (0x0002, &nacp[..]),
+        (0x0004, &b"1.0.0"[..]),
+        (0x0005, &b"Game"[..]),
+        (0x0006, &b"Publisher"[..]),
+        (0x0007, &build_id[..]),
+    ];
+    let check = |records: &[(u16, &[u8])]| {
+        let meta = parse_meta(&meta_block(records), Meta::default()).unwrap();
+        assert_eq!(meta.title.as_deref(), Some("Game"));
+        assert_eq!(meta.publisher.as_deref(), Some("Publisher"));
+        assert_eq!(meta.display_version.as_deref(), Some("1.0.0"));
+        assert!(meta.nacp.is_some());
+    };
+    check(&spec);
+    // Shifted with an NPDM: type 0 is present.
+    let shifted: Vec<_> = spec.iter().map(|&(k, b)| (k - 1, b)).collect();
+    check(&shifted);
+    // Shifted without an NPDM (DLC): 0x0007 holds the dump name, not 32 bytes.
+    let mut no_npdm: Vec<_> = shifted[1..].to_vec();
+    no_npdm.push((0x0007, b"game.nsp"));
+    check(&no_npdm);
+    // A spec block with a 32-byte build ID and no NPDM stays as is.
+    check(&spec[1..]);
+}
