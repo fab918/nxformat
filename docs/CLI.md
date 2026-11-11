@@ -1,6 +1,6 @@
 # NXConvert commands and integration
 
-Applies to **NXFormat / NXConvert 1.0.2**.
+Applies to **NXFormat / NXConvert 1.0.3**.
 
 NXConvert is a native application and command-line tool. Start `nxconvert`
 without arguments to open the window; use `nxconvert --help` for the current
@@ -310,3 +310,12 @@ resource is mandatory (`flags=1`) on purpose: a 1.0.0 editor copies unknown
 optional extensions verbatim and would leave its directory index pointing at
 the wrong tree after a repack. One identical resource (same kind and files) is
 kept once per game, even when several sources carry it.
+
+
+### macOS filesystem metadata
+
+Extracted-tree imports ignore well-formed AppleDouble `._name` sidecars when
+`name` exists beside them, and `.DS_Store` files with a Finder database header.
+These host metadata files are excluded from discovery, content snapshots and
+source verification. Similarly named game files without the matching metadata
+structure remain part of the import. Original source files are never removed.

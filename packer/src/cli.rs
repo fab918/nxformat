@@ -89,6 +89,7 @@ pub fn run_with_display(
     cancel: Option<CancellationToken>,
     display: Option<DisplayFallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    raise_open_file_limit();
     // In process, --frontend never reads stdin: the caller's token cancels,
     // or nothing does.
     let cancel = cancel.or_else(|| sink.as_ref().map(|_| CancellationToken::default()));
@@ -99,6 +100,32 @@ pub fn run_with_display(
     );
     let _scope = Scope(previous.0, previous.1, previous.2);
     run_command(args)
+}
+/// macOS starts processes with a soft limit of 256 descriptors; a large dump
+/// or package can hold more files open than that. Raise it toward the hard
+/// limit (best effort, once per process).
+fn raise_open_file_limit() {
+    #[cfg(unix)]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| unsafe {
+            let mut lim: libc::rlimit = std::mem::zeroed();
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+                return;
+            }
+            // macOS refuses a soft limit above OPEN_MAX (10240).
+            let ceiling: libc::rlim_t = if cfg!(target_os = "macos") {
+                10_240
+            } else {
+                65_536
+            };
+            let want = lim.rlim_max.min(ceiling);
+            if want > lim.rlim_cur {
+                lim.rlim_cur = want;
+                let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+            }
+        });
+    }
 }
 const MIB: u64 = 1024 * 1024;
 /// Hard ceilings accepted by `ImportLimits::validate`.
@@ -254,36 +281,27 @@ fn walk(tree: &Path, cap: usize) -> Result<Walk, Box<dyn std::error::Error>> {
         listings: Vec::new(),
         bytes: 0,
     };
-    let mut pending = vec![tree.to_path_buf()];
+    // Use the importer's capability-safe listing and host-metadata policy so
+    // progress totals and memory estimates describe exactly the imported tree.
+    let root = import::SourceRoot::open(tree)?;
+    let mut pending = vec![String::new()];
     while let Some(dir) = pending.pop() {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
+        for entry in root.list(&dir, cap.saturating_sub(out.nodes))? {
             out.nodes += 1;
-            if out.nodes > cap {
-                return Err(format!(
-                    "tree has more than {cap} entries; outside the supported import ceiling"
-                )
-                .into());
-            }
-            let ty = entry.file_type()?;
-            if ty.is_symlink() {
-                return Err("source symlinks unsupported".into());
-            }
-            let path = entry.path();
-            let relative = path
-                .strip_prefix(tree)?
-                .to_str()
-                .ok_or("non-UTF8 source path")?
-                .replace('\\', "/");
+            let relative = if dir.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{dir}/{}", entry.name)
+            };
             // Mirrors tree inventory: listing scratch + per-node charge
             // (1024 + 4*logical + 2*source path), with room for the package prefix.
             out.inventory_estimate += 2048 + 6 * relative.len() as u64 + 2 * 256;
-            if ty.is_dir() {
-                pending.push(path);
-            } else if ty.is_file() && entry.file_name() == ".listing" {
+            if entry.dir {
+                pending.push(relative);
+            } else if entry.name == ".listing" {
                 out.listings.push(relative);
-            } else if ty.is_file() {
-                out.bytes += entry.metadata()?.len();
+            } else {
+                out.bytes += entry.size;
             }
         }
     }

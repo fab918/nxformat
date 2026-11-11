@@ -1,12 +1,29 @@
-# NXFormat 1.0.2
+# NXFormat 1.0.3
 
-NXFormat 1.0.2 fixes the titles of games converted from recent NUP files,
-improves NXConvert, adds full NX extraction and makes the C library smaller. It includes the NXConvert desktop application and
-CLI, the Rust archive writer, the C API and the header-only C++17 reader. The
-NX format is unchanged: archives stay readable by 1.0.1 readers, and by 1.0.0
-readers when they hold no firmware.
+NXFormat 1.0.3 fixes importing extracted game folders copied through macOS and
+large conversions that failed with "Too many open files" on macOS.
+The fix applies to NXConvert's desktop application, command-line tool and C API.
+The NX wire formats and C/C++ reader API are unchanged.
 
-## What is new in 1.0.2
+## What is new in 1.0.3
+
+- Raise the process's open-file limit at startup (macOS defaults to 256), close
+  each NUP or source file as soon as it is read, and bound the pinned directory
+  handles of extracted-tree imports on Unix. Large packages and dumps, such as
+  a NUP of over 150000 files, no longer fail with `os error 24`.
+- Recognize bounded AppleDouble `._name` sidecars when the corresponding
+  `name` exists beside them, and Finder `.DS_Store` database headers. These
+  host metadata files no longer block root-folder imports or become game files
+  inside RomFS. Original source files remain untouched.
+- Preserve similarly named ordinary game files, orphan sidecars, directories
+  and malformed metadata instead of excluding files by name alone.
+- Apply the same secure directory listing to CLI discovery, progress totals,
+  memory estimates, content import and source verification.
+- Add regression tests that compare the complete archive bytes and progress
+  totals with a clean source tree, check source verification and preserve
+  actual game files whose names start with `._`.
+
+## Changes in 1.0.2
 
 **NUP metadata**
 - `pack-nup` reads the metadata of NUP files made by `nup` versions whose
@@ -59,7 +76,7 @@ readers when they hold no firmware.
 
 NXConvert does not decrypt content or provide keys or game files. Emulator
 compatibility depends on the emulator integration and the selected content.
-This release is **NXFormat / NXConvert 1.0.2**, with separate 4096-byte header
+This release is **NXFormat / NXConvert 1.0.3**, with separate 4096-byte header
 pages. The exact binary header fields are defined in the format specification.
 
 ## Packages
@@ -72,7 +89,7 @@ pages. The exact binary header fields are defined in the format specification.
 | Android arm64 | Shared/static libraries and headers, no desktop app |
 
 Release archives include CMake package configuration. `SHA256SUMS` is published
-as a separate attachment. `nxformat-xmake-1.0.2.zip` contains the xmake package
+as a separate attachment. `nxformat-xmake-1.0.3.zip` contains the xmake package
 repository populated with those archive hashes. Extract it and register the
 local directory with xmake. Publication adds no commits to the source repository.
 

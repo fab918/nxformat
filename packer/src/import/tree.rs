@@ -332,10 +332,14 @@ impl SourceFile {
         struct Lazy {
             source: SourceFile,
             reader: Option<Box<dyn Read>>,
+            done: bool,
             token: crate::CancellationToken,
         }
         impl Read for Lazy {
             fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+                if self.done {
+                    return Ok(0);
+                }
                 if self.reader.is_none() {
                     self.reader = Some(match &self.source.nup {
                         Some(n) => n.reader(&self.token).map_err(io::Error::other)?,
@@ -346,7 +350,14 @@ impl SourceFile {
                         ),
                     });
                 }
-                self.reader.as_mut().unwrap().read(b)
+                let n = self.reader.as_mut().unwrap().read(b)?;
+                if n == 0 && !b.is_empty() {
+                    // End of file: release the descriptor now, not when the
+                    // writer drops this input.
+                    self.reader = None;
+                    self.done = true;
+                }
+                Ok(n)
             }
         }
         let warm = self.clone();
@@ -355,6 +366,7 @@ impl SourceFile {
             Lazy {
                 source: self.clone(),
                 reader: None,
+                done: false,
                 token: token.clone(),
             },
         )
