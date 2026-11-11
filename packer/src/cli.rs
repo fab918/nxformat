@@ -89,6 +89,7 @@ pub fn run_with_display(
     cancel: Option<CancellationToken>,
     display: Option<DisplayFallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    raise_open_file_limit();
     // In process, --frontend never reads stdin: the caller's token cancels,
     // or nothing does.
     let cancel = cancel.or_else(|| sink.as_ref().map(|_| CancellationToken::default()));
@@ -99,6 +100,30 @@ pub fn run_with_display(
     );
     let _scope = Scope(previous.0, previous.1, previous.2);
     run_command(args)
+}
+/// macOS starts processes with a soft limit of 256 descriptors; a large dump
+/// or package can hold more files open than that. Raise it toward the hard
+/// limit (best effort, once per process).
+fn raise_open_file_limit() {
+    #[cfg(unix)]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| unsafe {
+            let mut lim: libc::rlimit = std::mem::zeroed();
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+                return;
+            }
+            let mut want = lim.rlim_max.min(65_536);
+            #[cfg(target_os = "macos")]
+            {
+                want = want.min(10_240); // OPEN_MAX: above it setrlimit fails
+            }
+            if want > lim.rlim_cur {
+                lim.rlim_cur = want;
+                let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+            }
+        });
+    }
 }
 const MIB: u64 = 1024 * 1024;
 /// Hard ceilings accepted by `ImportLimits::validate`.

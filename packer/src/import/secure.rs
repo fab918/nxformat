@@ -329,6 +329,8 @@ impl Root {
             Err(unsupported("host capability filesystem"))
         }
     }
+    #[cfg(unix)]
+    const MAX_CACHED_DIRS: usize = 64;
     /// Pinned handle of a directory below the root, opened once relative to
     /// its parent's pinned handle and then reused.
     fn dir(&self, path: &str) -> Result<Arc<File>, WriterError> {
@@ -359,10 +361,18 @@ impl Root {
             return Err(invalid("source ancestor is not a directory"));
         }
         let file = Arc::new(file);
-        self.dirs
+        let mut dirs = self
+            .dirs
             .lock()
-            .map_err(|_| invalid("directory cache poisoned"))?
-            .insert(path.to_owned(), file.clone());
+            .map_err(|_| invalid("directory cache poisoned"))?;
+        // Unix cannot pin a directory by holding it open (rename still works),
+        // so the cache only saves lookups: bound it so a tree with thousands
+        // of directories cannot exhaust the process's descriptors.
+        #[cfg(unix)]
+        if dirs.len() >= Self::MAX_CACHED_DIRS {
+            return Ok(file);
+        }
+        dirs.insert(path.to_owned(), file.clone());
         Ok(file)
     }
     pub fn open_relative(&self, path: &str) -> Result<File, WriterError> {
@@ -650,6 +660,27 @@ mod metadata_tests {
         let names = root.names("", 32).unwrap();
         assert!(names.contains(&"._romfs".to_string()));
         assert!(names.contains(&".DS_Store".to_string()));
+        drop(root);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn directory_handles_stay_bounded() {
+        let path = std::env::temp_dir().join(format!(
+            "nx-dir-cache-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        for i in 0..(Root::MAX_CACHED_DIRS * 3) {
+            std::fs::create_dir(path.join(format!("d{i}"))).unwrap();
+            std::fs::write(path.join(format!("d{i}/f")), b"x").unwrap();
+        }
+        let root = Root::open(&path).unwrap();
+        for i in 0..(Root::MAX_CACHED_DIRS * 3) {
+            root.open_relative(&format!("d{i}/f")).unwrap();
+        }
+        assert!(root.dirs.lock().unwrap().len() <= Root::MAX_CACHED_DIRS);
         drop(root);
         std::fs::remove_dir_all(path).unwrap();
     }

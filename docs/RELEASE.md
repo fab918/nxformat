@@ -1,11 +1,16 @@
 # NXFormat 1.0.3
 
-NXFormat 1.0.3 fixes importing extracted game folders copied through macOS.
+NXFormat 1.0.3 fixes importing extracted game folders copied through macOS and
+large conversions that failed with "Too many open files" on macOS.
 The fix applies to NXConvert's desktop application, command-line tool and C API.
 The NX wire formats and C/C++ reader API are unchanged.
 
 ## What is new in 1.0.3
 
+- Raise the process's open-file limit at startup (macOS defaults to 256), close
+  each NUP or source file as soon as it is read, and bound the pinned directory
+  handles of extracted-tree imports on Unix. Large packages and dumps, such as
+  a NUP of over 150000 files, no longer fail with `os error 24`.
 - Recognize bounded AppleDouble `._name` sidecars when the corresponding
   `name` exists beside them, and Finder `.DS_Store` database headers. These
   host metadata files no longer block root-folder imports or become game files
