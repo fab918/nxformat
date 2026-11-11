@@ -8,7 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 #[derive(Debug)]
-pub(super) struct Root {
+pub(crate) struct Root {
     pub path: PathBuf,
     file: Arc<File>,
     #[cfg(windows)]
@@ -20,7 +20,7 @@ pub(super) struct Root {
 }
 /// One directory entry as reported by the listing itself (no per-entry open).
 #[derive(Clone, Debug)]
-pub(super) struct Entry {
+pub(crate) struct Entry {
     pub name: String,
     pub dir: bool,
     pub size: u64,
@@ -400,7 +400,7 @@ impl Root {
         let dir = self.dir(path)?;
         let mut out = Vec::new();
         let check_name = |name: &str, len: usize| -> Result<(), WriterError> {
-            if name.len() > 240 {
+            if name.len() > 240 && !name.starts_with("._") {
                 return Err(unsupported("long/nonportable source name"));
             }
             if len == max {
@@ -533,6 +533,124 @@ impl Root {
             return Err(unsupported("host capability filesystem"));
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
+        // Host metadata is outside the game namespace. Keep similarly named
+        // game files unless their contents identify real macOS metadata.
+        let mut ignored = vec![false; out.len()];
+        for (index, entry) in out.iter().enumerate() {
+            if entry.dir {
+                continue;
+            }
+            let apple_double = entry.name.strip_prefix("._").is_some_and(|name| {
+                !name.is_empty()
+                    && out
+                        .binary_search_by(|other| other.name.as_str().cmp(name))
+                        .is_ok()
+            });
+            if !apple_double && entry.name != ".DS_Store" {
+                continue;
+            }
+            let relative = if path.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{path}/{}", entry.name)
+            };
+            let mut file = self.open_relative(&relative)?;
+            ignored[index] = macos_metadata(&mut file, entry.size, apple_double)?;
+        }
+        let mut index = 0;
+        out.retain(|_| {
+            let keep = !ignored[index];
+            index += 1;
+            keep
+        });
+        if out.iter().any(|entry| entry.name.len() > 240) {
+            return Err(unsupported("long/nonportable source name"));
+        }
         Ok(out)
+    }
+}
+
+/// Recognize bounded AppleDouble tables or the Finder DS_Store header. A name
+/// alone never permits dropping bytes from an imported game.
+fn macos_metadata(file: &mut File, size: u64, apple_double: bool) -> io::Result<bool> {
+    use std::io::Read;
+    if size < 8 {
+        return Ok(false);
+    }
+    let mut header = [0u8; 26];
+    file.read_exact(&mut header[..8])?;
+    if !apple_double {
+        return Ok(header[..8] == [0, 0, 0, 1, b'B', b'u', b'd', b'1']);
+    }
+    if size < 26 || header[..8] != [0, 5, 22, 7, 0, 2, 0, 0] {
+        return Ok(false);
+    }
+    file.read_exact(&mut header[8..])?;
+    let count = u16::from_be_bytes([header[24], header[25]]) as usize;
+    if count == 0 || count > 16 || 26 + count as u64 * 12 > size {
+        return Ok(false);
+    }
+    let mut table = [0u8; 16 * 12];
+    file.read_exact(&mut table[..count * 12])?;
+    for row in table[..count * 12].chunks_exact(12) {
+        let offset = u32::from_be_bytes(row[4..8].try_into().unwrap()) as u64;
+        let length = u32::from_be_bytes(row[8..12].try_into().unwrap()) as u64;
+        if offset < 26 + count as u64 * 12 || offset + length > size {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    fn apple_double() -> Vec<u8> {
+        let mut bytes = vec![0; 42];
+        bytes[..8].copy_from_slice(&[0, 5, 22, 7, 0, 2, 0, 0]);
+        bytes[24..26].copy_from_slice(&1u16.to_be_bytes());
+        bytes[26..30].copy_from_slice(&9u32.to_be_bytes());
+        bytes[30..34].copy_from_slice(&38u32.to_be_bytes());
+        bytes[34..38].copy_from_slice(&4u32.to_be_bytes());
+        bytes
+    }
+    #[test]
+    fn list_ignores_only_identified_host_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "nx-host-metadata-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        std::fs::create_dir(path.join("romfs")).unwrap();
+        std::fs::write(path.join("._romfs"), apple_double()).unwrap();
+        std::fs::write(path.join(".DS_Store"), b"\0\0\0\x01Bud1synthetic").unwrap();
+        std::fs::write(path.join("game"), b"payload").unwrap();
+        std::fs::write(path.join("._game"), b"ordinary game file").unwrap();
+        std::fs::write(path.join("._orphan"), apple_double()).unwrap();
+        std::fs::create_dir(path.join("._directory")).unwrap();
+        let root = Root::open(&path).unwrap();
+        let names = root.names("", 32).unwrap();
+        assert_eq!(
+            names,
+            ["._directory", "._game", "._orphan", "game", "romfs"]
+        );
+        let long_name = "a".repeat(240);
+        std::fs::write(path.join(&long_name), b"payload").unwrap();
+        std::fs::write(path.join(format!("._{long_name}")), apple_double()).unwrap();
+        let names = root.names("", 32).unwrap();
+        assert!(names.contains(&long_name));
+        assert!(!names.contains(&format!("._{long_name}")));
+        let mut invalid = apple_double();
+        invalid[34..38].copy_from_slice(&100u32.to_be_bytes());
+        std::fs::write(path.join("._romfs"), invalid).unwrap();
+        std::fs::write(path.join(".DS_Store"), b"game content").unwrap();
+        let names = root.names("", 32).unwrap();
+        assert!(names.contains(&"._romfs".to_string()));
+        assert!(names.contains(&".DS_Store".to_string()));
+        drop(root);
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

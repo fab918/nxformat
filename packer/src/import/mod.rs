@@ -4,6 +4,7 @@ mod convert;
 mod manifest;
 mod nup;
 mod secure;
+pub(crate) use secure::Root as SourceRoot;
 pub mod structures;
 pub mod synthetic;
 pub mod synthetic_nup;

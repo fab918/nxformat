@@ -254,36 +254,27 @@ fn walk(tree: &Path, cap: usize) -> Result<Walk, Box<dyn std::error::Error>> {
         listings: Vec::new(),
         bytes: 0,
     };
-    let mut pending = vec![tree.to_path_buf()];
+    // Use the importer's capability-safe listing and host-metadata policy so
+    // progress totals and memory estimates describe exactly the imported tree.
+    let root = import::SourceRoot::open(tree)?;
+    let mut pending = vec![String::new()];
     while let Some(dir) = pending.pop() {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
+        for entry in root.list(&dir, cap.saturating_sub(out.nodes))? {
             out.nodes += 1;
-            if out.nodes > cap {
-                return Err(format!(
-                    "tree has more than {cap} entries; outside the supported import ceiling"
-                )
-                .into());
-            }
-            let ty = entry.file_type()?;
-            if ty.is_symlink() {
-                return Err("source symlinks unsupported".into());
-            }
-            let path = entry.path();
-            let relative = path
-                .strip_prefix(tree)?
-                .to_str()
-                .ok_or("non-UTF8 source path")?
-                .replace('\\', "/");
+            let relative = if dir.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{dir}/{}", entry.name)
+            };
             // Mirrors tree inventory: listing scratch + per-node charge
             // (1024 + 4*logical + 2*source path), with room for the package prefix.
             out.inventory_estimate += 2048 + 6 * relative.len() as u64 + 2 * 256;
-            if ty.is_dir() {
-                pending.push(path);
-            } else if ty.is_file() && entry.file_name() == ".listing" {
+            if entry.dir {
+                pending.push(relative);
+            } else if entry.name == ".listing" {
                 out.listings.push(relative);
-            } else if ty.is_file() {
-                out.bytes += entry.metadata()?.len();
+            } else {
+                out.bytes += entry.size;
             }
         }
     }

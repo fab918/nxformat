@@ -1030,3 +1030,58 @@ fn compact_no_compress_removes_existing_compression_without_original_sources() {
         inspect_archive(&nx, &options, IntegrityPolicy::Strict).unwrap()
     );
 }
+
+#[test]
+fn macos_metadata_does_not_change_extracted_archive_or_source_verification() {
+    let t = Temp::new();
+    let game = t.path("Game");
+    executable_tree(&game.join("base"), APP, 0x41).unwrap();
+    fs::write(game.join("base/romfs/game"), b"real game file").unwrap();
+    fs::write(game.join("base/romfs/._game"), b"similarly named game file").unwrap();
+    let clean = t.path("clean.nx");
+    let clean_bar = frontend!(
+        "pack-tree",
+        s(&game),
+        s(&clean),
+        "--platform",
+        "switch2",
+        "--frontend"
+    );
+    assert_full_bar(clean_bar.clone(), "clean extracted tree");
+    let mut metadata = vec![0; 42];
+    metadata[..8].copy_from_slice(&[0, 5, 22, 7, 0, 2, 0, 0]);
+    metadata[24..26].copy_from_slice(&1u16.to_be_bytes());
+    metadata[26..30].copy_from_slice(&9u32.to_be_bytes());
+    metadata[30..34].copy_from_slice(&38u32.to_be_bytes());
+    metadata[34..38].copy_from_slice(&4u32.to_be_bytes());
+    fs::write(game.join("base/._romfs"), &metadata).unwrap();
+    fs::write(game.join("base/romfs/._data.bin"), &metadata).unwrap();
+    fs::write(game.join("base/.DS_Store"), b"\0\0\0\x01Bud1synthetic").unwrap();
+    fs::write(
+        game.join("base/romfs/.DS_Store"),
+        b"\0\0\0\x01Bud1synthetic",
+    )
+    .unwrap();
+    let archive = t.path("with-host-metadata.nx");
+    let metadata_bar = frontend!(
+        "pack-tree",
+        s(&game),
+        s(&archive),
+        "--platform",
+        "switch2",
+        "--frontend"
+    );
+    assert_eq!(clean_bar.0, metadata_bar.0);
+    assert_full_bar(metadata_bar, "tree with macOS metadata");
+    assert_eq!(fs::read(&clean).unwrap(), fs::read(&archive).unwrap());
+    verify(&archive);
+    cmd!(
+        "verify",
+        s(&archive),
+        s(&game),
+        format!("{}.nxreceipt", archive.display())
+    )
+    .unwrap();
+    assert!(game.join("base/._romfs").is_file());
+    assert!(game.join("base/.DS_Store").is_file());
+}
