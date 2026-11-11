@@ -113,11 +113,13 @@ fn raise_open_file_limit() {
             if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
                 return;
             }
-            let mut want = lim.rlim_max.min(65_536);
-            #[cfg(target_os = "macos")]
-            {
-                want = want.min(10_240); // OPEN_MAX: above it setrlimit fails
-            }
+            // macOS refuses a soft limit above OPEN_MAX (10240).
+            let ceiling: libc::rlim_t = if cfg!(target_os = "macos") {
+                10_240
+            } else {
+                65_536
+            };
+            let want = lim.rlim_max.min(ceiling);
             if want > lim.rlim_cur {
                 lim.rlim_cur = want;
                 let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
