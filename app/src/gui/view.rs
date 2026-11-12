@@ -696,6 +696,7 @@ impl App {
                 }
             }
         });
+        ui.label(theme::muted("Extract all keeps a compressed .nxrestore.zst recipe in the folder. Drop the whole folder back to restore the exact NX and its original package recipes. Edited files are repacked at the same relative paths; original-package reconstruction is then unavailable."));
         if archive.snapshots.iter().any(|s| s.native) {
             ui.label("Native NCA content: extraction reads ExeFS and RomFS and verifies IVFC integrity. BKTR updates require their exact base. Unsupported layouts or missing bases stop extraction and remove its output.");
             ui.label(theme::muted("Native extraction supports decrypted IVFC content. Advanced bucket trees, compressed sections and sparse RomFS are not supported. Memory limits may reject large metadata tables."));

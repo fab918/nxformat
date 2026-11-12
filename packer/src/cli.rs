@@ -147,6 +147,7 @@ nxconvert rebuild ARCHIVE.nx FOLDER [RECIPE_ID...] (rebuild the original files i
 nxconvert check-recipe ARCHIVE.nx (replay every recipe kept in the NX)\n\
 nxconvert scan SOURCE|FOLDER... (decrypted packages; @SOURCE, @CONTENT and @ISSUE lines)\n\
 nxconvert contents ARCHIVE.nx (@APP, @SNAPSHOT, @STORAGE, @RESOURCE, @RECIPE, @RECLAIMABLE and @ALLOCATED lines)\n\
+nxconvert restore EXTRACTED_FOLDER NEW_ARCHIVE.nx (uses .nxrestore.zst; pack-tree detects it automatically)\n\
 nxconvert extract-exefs ARCHIVE.nx SNAPSHOT_IDENTITY NEW_FOLDER\n\
 nxconvert extract-ncas ARCHIVE.nx NEW_FOLDER (raw native NCA files, no package reconstruction)\n\
 nxconvert extract ARCHIVE.nx NEW_FOLDER (every snapshot as a dump: base, updates/<version>, dlc/<title>/<version>)\n\
@@ -1180,6 +1181,7 @@ fn extract_all(
     }
     fs::create_dir(destination)?;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let mut exported = Vec::new();
         for (folder, program_id, identity, _tree) in &jobs {
             let shared = jobs.iter().filter(|(other, ..)| other == folder).count() > 1;
             let folder = match (shared, program_id) {
@@ -1197,12 +1199,23 @@ fn extract_all(
                 _ => folder.clone(),
             };
             let target = destination.join(&folder);
+            exported.push((*identity, folder.clone()));
             fs::create_dir_all(target.parent().unwrap_or(destination))?;
             if raw {
                 extract_raw_ncas(path, *identity, &target, options)?;
             } else {
                 extract_tree(path, *identity, &target, options)?;
             }
+        }
+        if !raw {
+            let manifest = restoration_manifest(path, destination, &summary, &exported, options)?;
+            let stats = create_restoration(path, destination, &exported, &manifest, options)?;
+            println!(
+                "@RESTORATION\t{}\t{}\t{}",
+                destination.join(RESTORATION_FILE).display(),
+                stats.recipe_bytes,
+                stats.referenced_bytes
+            );
         }
         Ok(())
     })();
@@ -1211,6 +1224,130 @@ fn extract_all(
     }
     result.map(|()| (jobs.len(), partial))
 }
+/// Exact identities and explicit roots make edited roundtrips independent of
+/// folder-name guesses, including multiple applications and Programs.
+fn restoration_manifest(
+    path: &Path,
+    directory: &Path,
+    summary: &ArchiveSummary,
+    exported: &[([u8; 32], String)],
+    options: &WriterOptions,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut text = "NXIMPORT\t1\n".to_owned();
+    let keys: std::collections::HashMap<_, _> =
+        exported.iter().map(|(id, _)| (*id, hex(id))).collect();
+    for a in &summary.applications {
+        for s in &a.snapshots {
+            let Some((_, root)) = exported.iter().find(|(id, _)| *id == s.identity) else {
+                continue;
+            };
+            let key = &keys[&s.identity];
+            let platform = match a.platform {
+                Platform::Switch1 => "switch1",
+                Platform::Switch2 => "switch2",
+                _ => return Err("unknown restoration platform".into()),
+            };
+            let kind = match s.snapshot_type {
+                SnapshotType::Base => "base",
+                SnapshotType::Update => "update",
+                SnapshotType::StandaloneUpdate => "standalone-update",
+                SnapshotType::Dlc => "dlc",
+                _ => continue,
+            };
+            let program = s
+                .program_id
+                .map(|p| format!("{p:016x}"))
+                .unwrap_or_else(|| "-".into());
+            let program_kind = if s.program_id.is_none() {
+                "none"
+            } else {
+                match a
+                    .programs
+                    .iter()
+                    .find(|p| Some(p.program_id) == s.program_id)
+                    .map(|p| p.kind)
+                {
+                    Some(ProgramKind::Auxiliary) => "auxiliary",
+                    Some(ProgramKind::Primary) => "primary",
+                    _ => "unknown",
+                }
+            };
+            let profile = (|| {
+                let pinned = import::SourceRoot::open(&directory.join(root)).ok()?;
+                let mut file = pinned.open_relative("exefs/main.npdm").ok()?;
+                if file.metadata().ok()?.len() > 1024 * 1024 {
+                    return None;
+                }
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut file, &mut bytes).ok()?;
+                [
+                    (NpdmProfile::MetaAcid2048V1, "meta-acid2048-v1"),
+                    (NpdmProfile::MetaAcid3072V1, "meta-acid3072-v1"),
+                ]
+                .into_iter()
+                .find_map(|(profile, name)| {
+                    import::structures::validate_npdm(&bytes, profile)
+                        .ok()
+                        .map(|_| name)
+                })
+            })()
+            .unwrap_or("none");
+            text.push_str(&format!("snapshot\t{key}\t{root}\t{platform}\t{:016x}\t{program}\t{program_kind}\t{kind}\t{}\tcomplete\tmaterialized-v1\t{profile}\n", a.application_id, s.numeric_version));
+            if s.snapshot_type == SnapshotType::Dlc {
+                text.push_str(&format!(
+                    "addon\t{key}\t{:016x}\n",
+                    dlc_title(path, s, options)
+                ));
+            }
+            for dependency in &s.dependencies {
+                if let Some(other) = keys.get(&dependency.target_snapshot_identity) {
+                    let kind = match dependency.kind {
+                        DependencyKind::RequiredBase => "required-base",
+                        DependencyKind::Requires => "requires",
+                        _ => continue,
+                    };
+                    text.push_str(&format!("dependency\t{key}\t{kind}\t{other}\n"));
+                }
+            }
+            let display = read_snapshot_display(path, s.identity, options, false)?;
+            let native_text = display
+                .nacp
+                .as_ref()
+                .map(|n| crate::native::parse_nacp_text(n).0)
+                .unwrap_or_default();
+            for (field, value) in [
+                (
+                    "title",
+                    display
+                        .title
+                        .or_else(|| native_text.iter().find_map(|t| t.name.clone())),
+                ),
+                (
+                    "publisher",
+                    display
+                        .publisher
+                        .or_else(|| native_text.iter().find_map(|t| t.publisher.clone())),
+                ),
+                (
+                    "display-version",
+                    display
+                        .nacp
+                        .as_ref()
+                        .map(|n| nacp_texts(n).1)
+                        .filter(|v| !v.is_empty()),
+                ),
+            ] {
+                if let Some(value) =
+                    value.filter(|v| !v.is_empty() && !v.chars().any(char::is_control))
+                {
+                    text.push_str(&format!("{field}\t{key}\t{value}\n"));
+                }
+            }
+        }
+    }
+    Ok(text)
+}
+
 /// Machine-readable contents of an NX archive.
 fn print_contents(path: &Path, options: &WriterOptions) -> Result<(), Box<dyn std::error::Error>> {
     let (summary, reclaimable, allocated) =
@@ -1681,6 +1818,15 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
             drop(watch);
             println!("Extracted ExeFS to {}", args[3]);
         }
+        ("restore", 3) => {
+            let watch = ProgressWatch::counter(o.frontend, &options.progress);
+            let stats = restore_extraction(&args[1], &args[2], &options)?;
+            drop(watch);
+            println!(
+                "Restored NX: unchanged={} files={} bytes={}",
+                stats.unchanged, stats.files, stats.archive_bytes
+            );
+        }
         ("extract" | "extract-ncas", 3) => {
             let watch = ProgressWatch::counter(o.frontend, &options.progress);
             let (count, partial) = extract_all(
@@ -2000,6 +2146,7 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 | "extract-exefs"
                 | "extract"
                 | "extract-ncas"
+                | "restore"
                 | "add"
                 | "remove"
                 | "compact"
@@ -2019,6 +2166,35 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     }
     // --no-trail: review files of automatic pack-tree, removed once it ends.
     let mut _trail = RemoveOnDrop(Vec::new());
+    if args.len() == 3
+        && args[0] == "pack-tree"
+        && Path::new(&args[1]).join(RESTORATION_FILE).exists()
+    {
+        size_budgets(None, &o, &mut limits, &mut options)?;
+        options.cancellation = command_token(&o);
+        let all_selected = if o.tree_roots.is_empty() {
+            true
+        } else {
+            let declarations = inspect_restoration(&args[1], &options)?;
+            let roots: std::collections::BTreeSet<_> = declarations
+                .snapshots
+                .iter()
+                .map(|s| s.root.clone())
+                .collect();
+            roots == o.tree_roots
+        };
+        if o.latest || !o.dlc.is_empty() || !all_selected || o.update_version.is_some() {
+            return Err("restoration repacks use every declared snapshot; selection flags require an explicit manifest".into());
+        }
+        let watch = ProgressWatch::counter(o.frontend, &options.progress);
+        let stats = restore_extraction(&args[1], &args[2], &options)?;
+        drop(watch);
+        println!(
+            "Restored NX: unchanged={} files={} bytes={}",
+            stats.unchanged, stats.files, stats.archive_bytes
+        );
+        return Ok(());
+    }
     if args.len() == 3 && args[0] == "pack-tree" {
         if o.latest || !o.dlc.is_empty() {
             return Err("--latest/--dlc require an explicit manifest".into());

@@ -1,5 +1,13 @@
 # Unreleased
 
+- Full extraction keeps `.nxrestore.zst`, compressed at Zstd level 13. Unchanged
+  repacks restore the exact NX and retain embedded original-package recipes.
+  Edited repacks keep file paths and snapshot associations, with no promise to
+  rebuild original packages after modifications. NX format compatibility is
+  unchanged.
+- Compact restoration uses path IDs, an aggregate inventory fingerprint and
+  derived IVFC hash runs: the tested 30XX recipe shrank from 8.7 MB to 1.8 MB.
+
 - Fix issue #9: native extraction now includes verified RomFS, BKTR update views
   and DLC instead of silently exporting ExeFS alone. Multi-Program and version
   destinations are kept distinct.

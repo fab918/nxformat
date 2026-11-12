@@ -36,6 +36,42 @@ fn display_text(nacp: &[u8]) -> (String, String) {
 }
 
 fn extracted(path: &Path, selected: &BTreeSet<String>) -> Option<Source> {
+    if path.join(nxformat_packer::RESTORATION_FILE).is_file() {
+        let declarations = nxformat_packer::inspect_restoration(path, &Default::default()).ok()?;
+        let contents = declarations
+            .snapshots
+            .iter()
+            .filter(|s| selected.is_empty() || selected.contains(&s.root))
+            .map(|s| Content {
+                platform: format!("{:?}", s.platform),
+                kind: match s.snapshot_type {
+                    SnapshotType::Base => "base",
+                    SnapshotType::Dlc => "dlc",
+                    SnapshotType::StandaloneUpdate => "standalone",
+                    _ => "update",
+                }
+                .into(),
+                application: s.application_id,
+                version: s.numeric_version,
+                display: s
+                    .presentation
+                    .get("display-version")
+                    .cloned()
+                    .unwrap_or_default(),
+                name: s.presentation.get("title").cloned().unwrap_or_default(),
+                publisher: s.presentation.get("publisher").cloned().unwrap_or_default(),
+            })
+            .collect();
+        return Some(Source {
+            path: path.to_owned(),
+            kind: SourceKind::Extracted,
+            tree_roots: selected.iter().cloned().collect(),
+            supported: true,
+            selected: true,
+            contents,
+            ..Default::default()
+        });
+    }
     let mut candidates = import::discover(path, &import::ImportLimits::default()).ok()?;
     let package_has_base = candidates.iter().any(|c| c.relative_root == "base");
     if !selected.is_empty() {
@@ -262,6 +298,10 @@ pub fn scan(paths: Vec<PathBuf>, token: &CancellationToken) -> Result<Vec<Source
         }
         if path.is_dir() {
             let path = std::path::absolute(&path).map_err(|e| e.to_string())?;
+            if path.join(nxformat_packer::RESTORATION_FILE).is_file() {
+                extracted_dumps.insert(path, None);
+                continue;
+            }
             if let Some((root, selected)) = extracted_selection(&path) {
                 if let Some(roots) = extracted_dumps
                     .entry(root)

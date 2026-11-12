@@ -35,6 +35,12 @@ const NATIVE_EXTENSION: u32 = 0x0001_0005;
 const RECIPE_EXTENSION: u32 = 0x0001_0006;
 /// All rebuild recipes of one archive together stay well inside the Catalog.
 pub const MAX_EMBEDDED_RECIPE_BYTES: u64 = 8 * 1024 * 1024;
+#[path = "restoration.rs"]
+mod restoration;
+pub use restoration::{
+    create_restoration, inspect_restoration, restore_extraction, RestorationStats, RESTORATION_FILE,
+};
+
 #[path = "native_add.rs"]
 mod native_add;
 #[path = "reclaim.rs"]

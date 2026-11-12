@@ -468,6 +468,73 @@ pub(super) fn extract_native(
     budget: &MemoryBudget,
     options: &WriterOptions,
 ) -> Result<(), WriterError> {
+    native_view(path, archive, snapshot, destination, budget, options, true).map(|_| ())
+}
+
+pub(in crate::writer::repack) fn collect_native_ranges(
+    path: &Path,
+    archive: &SourceArchive,
+    snapshot: &SourceSnapshot,
+    budget: &MemoryBudget,
+    options: &WriterOptions,
+) -> Result<Vec<super::super::restoration::RestoreRange>, WriterError> {
+    native_view(
+        path,
+        archive,
+        snapshot,
+        Path::new(""),
+        budget,
+        options,
+        false,
+    )
+}
+
+fn physical_range(
+    reader: &SectionReader<NativeReader<'_>>,
+    index: u32,
+    virtual_offset: u64,
+) -> Result<(u32, u64, u64), WriterError> {
+    if reader.mappings.is_empty() {
+        return Ok((index, reader.patch_start + virtual_offset, reader.len));
+    }
+    let i = reader
+        .mappings
+        .partition_point(|m| m.start <= virtual_offset)
+        - 1;
+    let m = &reader.mappings[i];
+    let file = if m.patch {
+        index
+    } else {
+        reader
+            .base
+            .as_ref()
+            .ok_or_else(|| bad("missing BKTR base"))?
+            .extents[0]
+            .file
+    };
+    let start = if m.patch {
+        reader.patch_start
+    } else {
+        reader.base_start
+    };
+    Ok((
+        file,
+        start + m.physical + virtual_offset - m.start,
+        reader.mappings.get(i + 1).map_or(reader.len, |m| m.start),
+    ))
+}
+
+fn native_view(
+    path: &Path,
+    archive: &SourceArchive,
+    snapshot: &SourceSnapshot,
+    destination: &Path,
+    budget: &MemoryBudget,
+    options: &WriterOptions,
+    export: bool,
+) -> Result<Vec<super::super::restoration::RestoreRange>, WriterError> {
+    use super::super::restoration::RestoreRange;
+    let mut ranges = Vec::new();
     // Three transports can coexist while resolving a base: patch, base and
     // the CNMT inventory. Reserve their frame/decoded blocks and decoder windows.
     let transport = archive
@@ -593,20 +660,100 @@ pub(super) fn extract_native(
             "IVFC workspace exceeds remaining memory budget",
         ));
     }
-    verify_ivfc(&mut reader, &nca.hash_data[slot], options)?;
+    if export {
+        verify_ivfc(&mut reader, &nca.hash_data[slot], options)?;
+    }
     let entries = romfs_entries(&mut reader, &nca.hash_data[slot], limit)?;
     let romfs = destination.join("romfs");
-    std::fs::create_dir(&romfs)?;
-    options
-        .progress
-        .add_total(entries.iter().filter_map(|e| e.range.map(|(_, n)| n)).sum());
+    if export {
+        std::fs::create_dir(&romfs)?;
+    }
+    if export {
+        options
+            .progress
+            .add_total(entries.iter().filter_map(|e| e.range.map(|(_, n)| n)).sum());
+    }
     for entry in entries {
         cancelled(options)?;
         let target = crate::import::join(&romfs, &entry.path);
         if let Some((off, size)) = entry.range {
-            reader.seek(SeekFrom::Start(off))?;
-            export_exefs_file(&mut reader, &target, size, None, options)?;
-        } else {
+            let mut done = 0;
+            while !export && done < size {
+                let virtual_offset = off + done;
+                let (file, physical, end) = physical_range(&reader, index, virtual_offset)?;
+                let len = (size - done).min(end - virtual_offset);
+                ranges.push(RestoreRange {
+                    file,
+                    offset: physical,
+                    len,
+                    path: format!("romfs/{}", entry.path),
+                    file_offset: done,
+                    hash_size: 0,
+                    hash_offset: 0,
+                });
+                done += len;
+            }
+            if !export {
+                // The largest incompressible metadata is the IVFC leaf hash
+                // table. A hash wholly covered by one exported file can be
+                // recomputed instead of storing 32 random bytes in the recipe.
+                let layers = u32_at(&nca.hash_data[slot], 12) as usize;
+                if layers >= 3 {
+                    let at = 16 + (layers - 2) * 24;
+                    let data_offset = u64_at(&nca.hash_data[slot], at);
+                    let parent_offset = u64_at(&nca.hash_data[slot], at - 24);
+                    let block = 1u64 << u32_at(&nca.hash_data[slot], at + 16);
+                    if off >= data_offset {
+                        let mut begin = data_offset + (off - data_offset).div_ceil(block) * block;
+                        while begin.checked_add(block).is_some_and(|e| e <= off + size) {
+                            let hash_at = parent_offset + (begin - data_offset) / block * 32;
+                            let mut done = 0;
+                            while done < 32 {
+                                let (file, physical, end) =
+                                    physical_range(&reader, index, hash_at + done)?;
+                                let len = (32 - done).min(end - hash_at - done);
+                                let path = format!("romfs/{}", entry.path);
+                                if let Some(previous) = ranges.last_mut().filter(|r| {
+                                    r.file == file
+                                        && r.hash_size == block as u32
+                                        && r.hash_offset == 0
+                                        && r.len % 32 == 0
+                                        && done == 0
+                                        && len == 32
+                                        && r.offset + r.len == physical
+                                        && r.path == path
+                                        && r.file_offset + r.len / 32 * block == begin - off
+                                }) {
+                                    previous.len += 32;
+                                } else {
+                                    ranges.push(RestoreRange {
+                                        file,
+                                        offset: physical,
+                                        len,
+                                        path,
+                                        file_offset: begin - off,
+                                        hash_size: block as u32,
+                                        hash_offset: done as u8,
+                                    });
+                                }
+                                done += len;
+                            }
+                            if ranges.len() as u64 * (256 + entry.path.len() as u64 * 2) > limit / 3
+                            {
+                                return Err(limit_error(
+                                    "derived restoration hashes exceed memory budget",
+                                ));
+                            }
+                            begin += block;
+                        }
+                    }
+                }
+            }
+            if export {
+                reader.seek(SeekFrom::Start(off))?;
+                export_exefs_file(&mut reader, &target, size, None, options)?;
+            }
+        } else if export {
             std::fs::create_dir(target)?;
         }
     }
@@ -615,24 +762,39 @@ pub(super) fn extract_native(
         let mut file = File::open(path)?;
         let (index, entries) = native_exefs(path, &mut file, archive, snapshot, budget, options)?;
         let exefs = destination.join("exefs");
-        std::fs::create_dir(&exefs)?;
-        options
-            .progress
-            .add_total(entries.iter().map(|e| e.size).sum());
+        if export {
+            std::fs::create_dir(&exefs)?;
+        }
+        if export {
+            options
+                .progress
+                .add_total(entries.iter().map(|e| e.size).sum());
+        }
         let mut reader = snapshot_file_reader(&mut file, archive, index, options)?;
         for entry in entries {
             crate::import::portable_path(&entry.name, &crate::import::ImportLimits::default())?;
-            reader.seek(SeekFrom::Start(entry.offset))?;
-            export_exefs_file(
-                &mut reader,
-                &exefs.join(entry.name),
-                entry.size,
-                None,
-                options,
-            )?;
+            ranges.push(RestoreRange {
+                file: index,
+                offset: entry.offset,
+                len: entry.size,
+                path: format!("exefs/{}", entry.name),
+                file_offset: 0,
+                hash_size: 0,
+                hash_offset: 0,
+            });
+            if export {
+                reader.seek(SeekFrom::Start(entry.offset))?;
+                export_exefs_file(
+                    &mut reader,
+                    &exefs.join(entry.name),
+                    entry.size,
+                    None,
+                    options,
+                )?;
+            }
         }
     }
-    Ok(())
+    Ok(ranges)
 }
 
 #[cfg(test)]
@@ -793,11 +955,25 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nx-extraction-{}-{id}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
         let mut base = TitleSpec::application(APP, 0, 1);
+        base.program.as_mut().unwrap().romfs_bytes = 262144;
+        base.program.as_mut().unwrap().npdm = Some(crate::import::synthetic::npdm(
+            APP,
+            crate::import::structures::NpdmProfile::MetaAcid2048V1,
+        ));
         let mut secondary = base.program.clone().unwrap();
         secondary.program_id += 1;
+        secondary.npdm = Some(crate::import::synthetic::npdm(
+            APP + 1,
+            crate::import::structures::NpdmProfile::MetaAcid2048V1,
+        ));
         secondary.build_id = [4; 32];
         base.extra_programs.push(secondary.clone());
         let mut patch = TitleSpec::patch(APP, 17, 2);
+        patch.program.as_mut().unwrap().romfs_bytes = 262144;
+        patch.program.as_mut().unwrap().npdm = Some(crate::import::synthetic::npdm(
+            APP,
+            crate::import::structures::NpdmProfile::MetaAcid2048V1,
+        ));
         secondary.bktr = true;
         secondary.build_id = [5; 32];
         patch.extra_programs.push(secondary);
@@ -809,11 +985,7 @@ mod tests {
             args.push(path.to_string_lossy().into_owned());
         }
         let nx = dir.join("game.nx");
-        args.extend([
-            nx.to_string_lossy().into_owned(),
-            "--no-recipe".into(),
-            "--no-compress".into(),
-        ]);
+        args.extend([nx.to_string_lossy().into_owned(), "--no-compress".into()]);
         crate::cli::run(args, None, None).unwrap();
         let options = WriterOptions::default();
         let summary = inspect_archive(&nx, &options, IntegrityPolicy::Strict).unwrap();
@@ -835,7 +1007,7 @@ mod tests {
                 };
                 assert_eq!(
                     std::fs::read(output.join("romfs/data.bin")).unwrap(),
-                    vec![expected; 4096]
+                    vec![expected; 262144]
                 );
             }
             assert!(extract_tree(&nx, snapshot.identity, &output, &options).is_err());
@@ -870,6 +1042,61 @@ mod tests {
         assert!(dump
             .join(format!("dlc/{:016x}/3/romfs/dlc.bin", APP + 0x1001))
             .is_file());
+        let restored = dir.join("restored.nx");
+        let stats =
+            super::super::restoration::restore_extraction(&dump, &restored, &options).unwrap();
+        assert!(stats.unchanged);
+        assert_eq!(
+            std::fs::read(&nx).unwrap(),
+            std::fs::read(&restored).unwrap()
+        );
+        assert_eq!(
+            crate::recipe::embedded_recipes(&restored, &options)
+                .unwrap()
+                .len(),
+            3
+        );
+        for recipe in crate::recipe::embedded_recipes(&restored, &options).unwrap() {
+            crate::recipe::check_embedded(&restored, &recipe.bytes, &options).unwrap();
+        }
+        let changed = format!("base-{APP:016x}/romfs/data.bin");
+        std::fs::write(
+            crate::import::join(&dump, &changed),
+            b"edited file with a different size",
+        )
+        .unwrap();
+        let modified = dir.join("modified.nx");
+        let stats =
+            super::super::restoration::restore_extraction(&dump, &modified, &options).unwrap();
+        assert!(!stats.unchanged);
+        let mod_summary = inspect_archive(&modified, &options, IntegrityPolicy::Strict).unwrap();
+        assert_eq!(mod_summary.applications[0].snapshots.len(), 5);
+        for s in &mod_summary.applications[0].snapshots {
+            let output = dir.join(format!(
+                "mod-{}-{}",
+                s.program_id.unwrap_or(0),
+                s.numeric_version
+            ));
+            extract_tree(&modified, s.identity, &output, &options).unwrap();
+            if s.snapshot_type != SnapshotType::Dlc {
+                let bytes = std::fs::read(output.join("romfs/data.bin")).unwrap();
+                if s.snapshot_type == SnapshotType::Base && s.program_id == Some(APP) {
+                    assert_eq!(bytes, b"edited file with a different size");
+                } else {
+                    assert_eq!(
+                        bytes,
+                        vec![
+                            if s.snapshot_type == SnapshotType::Base {
+                                1
+                            } else {
+                                2
+                            };
+                            262144
+                        ]
+                    );
+                }
+            }
+        }
         let mut input = File::open(&nx).unwrap();
         let mut budget = MemoryBudget {
             current: 0,

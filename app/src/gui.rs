@@ -471,6 +471,40 @@ mod tests {
                 &options
             )
             .is_err());
+            let reversible = dir.join(format!("{app_id:016x}-reversible"));
+            cli::run(
+                vec![
+                    "extract".into(),
+                    output.to_string_lossy().into_owned(),
+                    reversible.to_string_lossy().into_owned(),
+                ],
+                None,
+                None,
+            )
+            .unwrap();
+            let sources =
+                discovery::scan(vec![reversible.clone()], &CancellationToken::default()).unwrap();
+            assert_eq!(sources.len(), 1);
+            assert!(sources[0].kind == super::SourceKind::Extracted);
+            assert!(sources[0].supported);
+            assert!(sources[0].contents.iter().all(|c| c.application == app_id));
+            assert!(sources[0]
+                .contents
+                .iter()
+                .any(|c| c.name == "Custom NUP title"));
+            let roundtrip = dir.join(format!("{app_id:016x}-restored.nx"));
+            cli::run(
+                vec![
+                    "pack-tree".into(),
+                    reversible.to_string_lossy().into_owned(),
+                    roundtrip.to_string_lossy().into_owned(),
+                    "--no-trail".into(),
+                ],
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(std::fs::read(&roundtrip).unwrap(), before);
         }
         std::fs::remove_dir_all(dir).unwrap();
     }

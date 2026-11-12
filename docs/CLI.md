@@ -354,3 +354,17 @@ compressed sections, sparse RomFS, ambiguous multi-Data DLC and missing exact
 bases are rejected. Failures or cancellation remove the new extraction folder;
 existing destinations are never overwritten. The desktop application and CLI
 show these limitations and package reconstruction availability before extraction.
+
+### Reversible extraction with `.nxrestore.zst`
+
+Full extraction also writes a compact Zstd level 13 restoration recipe inside the
+folder. `pack-tree FOLDER NEW.nx` detects it automatically; `restore FOLDER NEW.nx`
+is the explicit equivalent. Dropping the whole folder into NXConvert does the
+same thing. Keep the recipe beside the exported snapshots.
+
+An unchanged extraction restores the NX byte for byte, retaining NCA/BKTR storage
+and all embedded original-package recipes. After editing, the same paths are
+repacked as materialized views with the saved application/Program/version
+associations; the original DNSP byte-exact reconstruction is no longer promised
+and stale package recipes are not embedded. See [RESTORATION.md](RESTORATION.md)
+for the format, limits and tested roundtrips.

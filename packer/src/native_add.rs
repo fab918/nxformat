@@ -1,7 +1,7 @@
 //! Native additions inside the existing repack transaction. No base extraction.
 use super::*;
 #[path = "extraction.rs"]
-mod extraction;
+pub(super) mod extraction;
 use crate::native::container::{PartitionEntry, Source};
 use crate::native::{self, ContentMetaType, InventoryOptions, Severity, SourceReport};
 use std::io;

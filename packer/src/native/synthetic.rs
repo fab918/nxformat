@@ -314,7 +314,11 @@ fn nca(content_type: u8, program_id: u64, sections: Vec<Section>, encrypted: boo
             put_u32(&mut out, bucket + 4, 3);
             put_u64(&mut out, bucket + 8, virtual_size as u64);
             let data_offset = u64::from_le_bytes(s.hash_data[0x28..0x30].try_into().unwrap());
-            for (i, (offset, patch)) in [(0, 1), (32, 0), (data_offset, 1)].iter().enumerate() {
+            let table_size = u64::from_le_bytes(s.hash_data[0x18..0x20].try_into().unwrap());
+            for (i, (offset, patch)) in [(0, 1), (table_size, 0), (data_offset, 1)]
+                .iter()
+                .enumerate()
+            {
                 put_u64(&mut out, bucket + 16 + i * 20, *offset);
                 put_u64(&mut out, bucket + 24 + i * 20, *offset);
                 put_u32(&mut out, bucket + 32 + i * 20, *patch);
@@ -383,6 +387,9 @@ pub fn title_entries_custom(
     for p in spec.program.iter().chain(&spec.extra_programs) {
         let mut nso = vec![0u8; 0x100];
         nso[..4].copy_from_slice(b"NSO0");
+        if p.npdm.as_ref().is_some_and(|n| n.len() > 4) {
+            nso = crate::import::synthetic::nso(p.build_id[0], false);
+        }
         nso[0x40..0x60].copy_from_slice(&p.build_id);
         let mut sections = vec![pfs_section(&[
             ("main".into(), nso),
