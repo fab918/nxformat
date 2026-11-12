@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # What a program linking the static library also links.
 STATIC_LIBS = {
-    'windows': ['ws2_32', 'userenv', 'ntdll', 'bcrypt', 'advapi32', 'kernel32'],
+    'windows': ['ws2_32', 'userenv', 'ntdll', 'bcrypt', 'advapi32', 'kernel32', 'synchronization'],
     'linux': ['pthread', 'dl', 'm'],
     'macos': [],
     'android': ['dl', 'm', 'log'],
