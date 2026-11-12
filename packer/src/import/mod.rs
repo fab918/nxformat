@@ -29,6 +29,19 @@ pub use tree::{
     audit_executables, discover, inspect_tree, ExecutableAudit, SourceFile, TreeCandidate, TreeView,
 };
 
+/// Independent declaration sidecar written by full filesystem extraction.
+pub const EXTRACTION_MANIFEST: &str = "extracted.nximport";
+
+/// Read explicit associations without requiring a restoration recipe. The
+/// source root pins the directory and rejects symlinks/path traversal.
+pub fn inspect_extraction_manifest(
+    directory: impl AsRef<std::path::Path>,
+    limits: &ImportLimits,
+) -> Result<DeclarationManifest, WriterError> {
+    let root = SourceRoot::open(directory.as_ref())?;
+    DeclarationManifest::read(root.open_relative(EXTRACTION_MANIFEST)?, limits)
+}
+
 #[derive(Clone, Debug)]
 pub struct ImportLimits {
     pub max_manifest_bytes: u64,

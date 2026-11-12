@@ -341,8 +341,10 @@ snapshot. NXConvert shows the same distinction before extraction.
   NCA export remains available for native snapshots.
 
 Extraction uses `base/`, `updates/<numeric version>/`, and
-`dlc/<title id>/<numeric version>/`; application, Program and identity suffixes
-prevent collisions between multiple titles, Programs or base variants. Filesystem
+`dlc/<title id>/<numeric version>/`. Multi-application archives prepend
+`switch1/<application id>/` or `switch2/<application id>/`; the platform is part
+of application identity. Program and identity suffixes prevent collisions between
+multiple titles, Programs or base variants. Filesystem
 traversal rejects cycles, unsafe paths, case collisions and out-of-range files.
 File payloads and IVFC levels are streamed. Native transport buffers, BKTR tables,
 RomFS metadata, paths and traversal nodes are bounded by the configured memory
@@ -398,3 +400,25 @@ NX the size of the original. `--temp-mib` covers that store and writer staging;
 - Unknown/unexported snapshots block edited restoration; unchanged exact replay
   preserves them. Multiple RomFS sections in a content NCA or BKTR base are
   rejected explicitly rather than exporting only the first section.
+
+### Independent import declarations from extraction
+
+Full filesystem extraction also writes `extracted.nximport`, using the existing
+`NXIMPORT 1` text grammar. It records explicit platforms, application/Program
+associations, roots, snapshot kinds, versions and dependencies, including paths
+such as `base-<program id>` and platform/application-prefixed collections.
+This file is generated with `--no-restore` too, and remains available if optional
+restoration-recipe creation fails. Raw NCA export does not create this tree manifest.
+
+When no recipe is present, `pack-tree FOLDER NEW.nx` automatically uses this
+manifest. With a bad or deliberately unused recipe, use
+`pack-tree FOLDER NEW.nx --ignore-restore`. The desktop discovers these exports
+from the independent declarations, without guessing ownership from directory names.
+The complete declaration set is imported; partial `--tree-root` selection needs
+an explicit manifest. A supplied `--platform` must agree with every declaration.
+
+Normal import preserves the materialized game paths and associations; original
+native metadata/resources stored only in `.nxrestore.zst` and byte-exact original
+package replay still require that recipe. Keep both metadata files unchanged for
+an unchanged exact roundtrip; the recipe includes its own original declarations.
+The independent manifest is never deleted by `--no-trail`.

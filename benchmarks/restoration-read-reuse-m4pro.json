@@ -1,0 +1,185 @@
+{
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "logical_bytes_per_case": 1073741824,
+  "samples_per_binary": 3,
+  "method": "Same source files and filesystem, alternating binary order; no OS cache flush. Recipe SHA-256 compared across all runs. Baseline must be built before the buffer-reuse change.",
+  "limitations": "Elapsed times include inventory hashing and compression. Logical reads eliminated are derived from stored block lengths, not measured physical device I/O. Warm OS cache may absorb redundant reads; runs are not CPU-isolated and these figures do not predict slow-device performance.",
+  "cases": [
+    {
+      "codec": "raw",
+      "blocks": 1024,
+      "archive_bytes": 1074041504,
+      "payload_sha256": "f663e9f1fea07ebcfe2d2e0b9ea28670cde26509b91046d41e69b90aa1a4fbbf",
+      "recipe_sha256": "3e408b179bbd717021c06dbe41aaac5a68eccc8cfe9223ff03bceaf832591174",
+      "exact_replay_verified": true,
+      "logical_stored_block_rereads_eliminated_bytes": 1073741824,
+      "median_recipe_seconds": {
+        "before": 7.699036,
+        "after": 7.699218
+      },
+      "runs": [
+        {
+          "binary": "before",
+          "sample": 0,
+          "process_wall_seconds": 10.209192959126085,
+          "archive_bytes": 1074041504,
+          "recipe_bytes": 271698,
+          "elapsed_seconds": 7.775809,
+          "compression_attempts": 0,
+          "exhaustive_searches": 0,
+          "literal_fallback_blocks": 0,
+          "restored_exactly": null
+        },
+        {
+          "binary": "after",
+          "sample": 0,
+          "process_wall_seconds": 9.802819041069597,
+          "archive_bytes": 1074041504,
+          "recipe_bytes": 271698,
+          "elapsed_seconds": 7.597538,
+          "compression_attempts": 0,
+          "exhaustive_searches": 0,
+          "literal_fallback_blocks": 0,
+          "restored_exactly": null
+        },
+        {
+          "binary": "after",
+          "sample": 1,
+          "process_wall_seconds": 9.624661875190213,
+          "archive_bytes": 1074041504,
+          "recipe_bytes": 271698,
+          "elapsed_seconds": 7.699218,
+          "compression_attempts": 0,
+          "exhaustive_searches": 0,
+          "literal_fallback_blocks": 0,
+          "restored_exactly": null
+        },
+        {
+          "binary": "before",
+          "sample": 1,
+          "process_wall_seconds": 9.626865749945864,
+          "archive_bytes": 1074041504,
+          "recipe_bytes": 271698,
+          "elapsed_seconds": 7.699036,
+          "compression_attempts": 0,
+          "exhaustive_searches": 0,
+          "literal_fallback_blocks": 0,
+          "restored_exactly": null
+        },
+        {
+          "binary": "before",
+          "sample": 2,
+          "process_wall_seconds": 9.53429550002329,
+          "archive_bytes": 1074041504,
+          "recipe_bytes": 271698,
+          "elapsed_seconds": 7.623569,
+          "compression_attempts": 0,
+          "exhaustive_searches": 0,
+          "literal_fallback_blocks": 0,
+          "restored_exactly": null
+        },
+        {
+          "binary": "after",
+          "sample": 2,
+          "process_wall_seconds": 9.650807291967794,
+          "archive_bytes": 1074041504,
+          "recipe_bytes": 271698,
+          "elapsed_seconds": 7.739868,
+          "compression_attempts": 0,
+          "exhaustive_searches": 0,
+          "literal_fallback_blocks": 0,
+          "restored_exactly": null
+        }
+      ]
+    },
+    {
+      "codec": "foreign-zstd",
+      "blocks": 1024,
+      "archive_bytes": 1074090656,
+      "payload_sha256": "f663e9f1fea07ebcfe2d2e0b9ea28670cde26509b91046d41e69b90aa1a4fbbf",
+      "recipe_sha256": "efeacc5f9e27609ff0b4d8c3db3258964756059975445767cc2d8b8db3fa7cb1",
+      "exact_replay_verified": true,
+      "logical_stored_block_rereads_eliminated_bytes": 1073779712,
+      "median_recipe_seconds": {
+        "before": 13.821677,
+        "after": 13.661703
+      },
+      "runs": [
+        {
+          "binary": "before",
+          "sample": 0,
+          "process_wall_seconds": 17.902109999908134,
+          "archive_bytes": 1074090656,
+          "recipe_bytes": 1074107823,
+          "elapsed_seconds": 14.678597,
+          "compression_attempts": 1280,
+          "exhaustive_searches": 4,
+          "literal_fallback_blocks": 1024,
+          "restored_exactly": null
+        },
+        {
+          "binary": "after",
+          "sample": 0,
+          "process_wall_seconds": 15.670136458007619,
+          "archive_bytes": 1074090656,
+          "recipe_bytes": 1074107823,
+          "elapsed_seconds": 13.661703,
+          "compression_attempts": 1280,
+          "exhaustive_searches": 4,
+          "literal_fallback_blocks": 1024,
+          "restored_exactly": null
+        },
+        {
+          "binary": "after",
+          "sample": 1,
+          "process_wall_seconds": 16.136231292039156,
+          "archive_bytes": 1074090656,
+          "recipe_bytes": 1074107823,
+          "elapsed_seconds": 14.147487,
+          "compression_attempts": 1280,
+          "exhaustive_searches": 4,
+          "literal_fallback_blocks": 1024,
+          "restored_exactly": null
+        },
+        {
+          "binary": "before",
+          "sample": 1,
+          "process_wall_seconds": 15.813281957991421,
+          "archive_bytes": 1074090656,
+          "recipe_bytes": 1074107823,
+          "elapsed_seconds": 13.821677,
+          "compression_attempts": 1280,
+          "exhaustive_searches": 4,
+          "literal_fallback_blocks": 1024,
+          "restored_exactly": null
+        },
+        {
+          "binary": "before",
+          "sample": 2,
+          "process_wall_seconds": 15.731831709155813,
+          "archive_bytes": 1074090656,
+          "recipe_bytes": 1074107823,
+          "elapsed_seconds": 13.753005,
+          "compression_attempts": 1280,
+          "exhaustive_searches": 4,
+          "literal_fallback_blocks": 1024,
+          "restored_exactly": null
+        },
+        {
+          "binary": "after",
+          "sample": 2,
+          "process_wall_seconds": 15.426195666892454,
+          "archive_bytes": 1074090656,
+          "recipe_bytes": 1074107823,
+          "elapsed_seconds": 13.442849,
+          "compression_attempts": 1280,
+          "exhaustive_searches": 4,
+          "literal_fallback_blocks": 1024,
+          "restored_exactly": null
+        }
+      ]
+    }
+  ],
+  "baseline_revision": "86f5bf0381f9ca9e0cf263c399bac7c27489f6d6",
+  "after_change": "Borrow decoded RAW/Zstd source buffers instead of allocating and rereading each block"
+}

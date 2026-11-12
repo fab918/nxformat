@@ -658,10 +658,13 @@ pub fn create_restoration_with_mode(
         if !checks_match(block, &logical) {
             return Err(bad("restoration source block integrity mismatch"));
         }
-        // decode_source_block does not retain stored RAW data in `stored`.
-        let mut original = vec![0; block.stored_size as usize];
-        nx.seek(SeekFrom::Start(block.range.offset))?;
-        nx.read_exact(&mut original)?;
+        // The decoder retains the exact source frame for Zstd, and the source
+        // bytes themselves for RAW. Borrow them without re-reading or copying.
+        let original = if block.codec == 0 {
+            logical.as_slice()
+        } else {
+            stored.as_slice()
+        };
         let parts = reps
             .get(&(id as u32))
             .map(|(file, off)| pieces(&all[file], *off, block.logical_size as u64));
@@ -677,7 +680,7 @@ pub fn create_restoration_with_mode(
             if block.codec == 0 {
                 Some((0, 0))
             } else {
-                compression_search.find(&logical, &original, options)?
+                compression_search.find(&logical, original, options)?
             }
         } else {
             None
@@ -725,7 +728,7 @@ pub fn create_restoration_with_mode(
         } else {
             out.write_all(&[0])?;
             num(&mut out, original.len() as u64)?;
-            out.write_all(&original)?;
+            out.write_all(original)?;
         }
         position = block.range.offset + block.stored_size as u64;
         options.progress.add_done(block.stored_size as u64);
@@ -1085,6 +1088,7 @@ pub fn restore_extraction(
         // Never silently ignore files added outside a declared snapshot root.
         for node in &current {
             if !node.dir
+                && node.path != crate::import::EXTRACTION_MANIFEST
                 && !declarations
                     .snapshots
                     .iter()
@@ -1523,6 +1527,16 @@ mod tests {
         assert!(!output.exists());
         let mut args = args;
         args.push("--ignore-restore".into());
+        let receipt = PathBuf::from(format!(
+            "{}.trail-{}.nxreceipt",
+            output.display(),
+            std::process::id()
+        ));
+        std::fs::write(&receipt, b"keep existing receipt").unwrap();
+        assert!(crate::cli::run(args.clone(), None, None).is_err());
+        assert_eq!(std::fs::read(&receipt).unwrap(), b"keep existing receipt");
+        assert!(!output.exists());
+        std::fs::remove_file(receipt).unwrap();
         crate::cli::run(args, None, None).unwrap();
         inspect_archive(&output, &WriterOptions::default(), IntegrityPolicy::Strict).unwrap();
         assert_eq!(std::fs::read(recipe).unwrap(), b"corrupt recipe");
@@ -1594,6 +1608,180 @@ mod tests {
         )
         .is_err());
         assert!(!conflict.exists());
+    }
+
+    #[test]
+    fn cross_platform_ids_and_multi_program_exports_rebuild_without_recipe() {
+        let f = fixture();
+        const APP: u64 = 0x0400_0000_0010_0000;
+        const DLC: u64 = APP + 0x1001;
+        fn snapshot(platform: Platform, program: Option<u64>) -> SnapshotInput {
+            let seed = platform as u8 + program.map_or(0, |p| (p - APP) as u8) + 3;
+            let mut entries = vec![EntryInput::directory(
+                "romfs",
+                DirectoryInput::new(vec![EntryInput::file(
+                    if program.is_some() {
+                        "data.bin"
+                    } else {
+                        "dlc.bin"
+                    },
+                    FileInput::from_bytes(vec![seed; 8192]),
+                )]),
+            )];
+            if let Some(id) = program {
+                entries.push(EntryInput::directory(
+                    "exefs",
+                    DirectoryInput::new(vec![
+                        EntryInput::file(
+                            "main",
+                            FileInput::from_bytes(crate::import::synthetic::nso(seed, false)),
+                        ),
+                        EntryInput::file(
+                            "main.npdm",
+                            FileInput::from_bytes(crate::import::synthetic::npdm(
+                                id,
+                                if platform == Platform::Switch1 {
+                                    crate::import::structures::NpdmProfile::MetaAcid2048V1
+                                } else {
+                                    crate::import::structures::NpdmProfile::MetaAcid3072V1
+                                },
+                            )),
+                        ),
+                    ]),
+                ));
+            }
+            SnapshotInput {
+                program_id: program,
+                snapshot_type: if program.is_some() {
+                    SnapshotType::Base
+                } else {
+                    SnapshotType::Dlc
+                },
+                numeric_version: if program.is_some() { 0 } else { 3 },
+                content_id: None,
+                addon_title_id: program.is_none().then_some(DLC),
+                build_id: program.map(|_| [seed; 32]),
+                display_version: None,
+                dependencies: vec![],
+                metadata: None,
+                native: Default::default(),
+                root: DirectoryInput::new(entries),
+            }
+        }
+        let applications = [Platform::Switch1, Platform::Switch2]
+            .into_iter()
+            .map(|platform| ApplicationInput {
+                platform,
+                application_id: APP,
+                programs: vec![
+                    ProgramInput {
+                        program_id: APP,
+                        kind: ProgramKind::Primary,
+                        content_id: None,
+                        npdm: None,
+                    },
+                    ProgramInput {
+                        program_id: APP + 1,
+                        kind: ProgramKind::Auxiliary,
+                        content_id: None,
+                        npdm: None,
+                    },
+                ],
+                snapshots: vec![
+                    snapshot(platform, Some(APP)),
+                    snapshot(platform, Some(APP + 1)),
+                    snapshot(platform, None),
+                ],
+            })
+            .collect();
+        let original = f.dir.join("cross-platform.nx");
+        let options = WriterOptions::default();
+        write_archive(ArchiveInput::new(applications), &original, &options).unwrap();
+        for keep_recipe in [false, true] {
+            let dump = f.dir.join(if keep_recipe {
+                "cross-recipe"
+            } else {
+                "cross-no-recipe"
+            });
+            let mut args = vec![
+                "extract".into(),
+                original.to_string_lossy().into_owned(),
+                dump.to_string_lossy().into_owned(),
+            ];
+            if !keep_recipe {
+                args.push("--no-restore".into());
+            }
+            crate::cli::run(args, None, None).unwrap();
+            for platform in ["switch1", "switch2"] {
+                assert!(dump
+                    .join(format!(
+                        "{platform}/{APP:016x}/base-{APP:016x}/romfs/data.bin"
+                    ))
+                    .is_file());
+                assert!(dump
+                    .join(format!(
+                        "{platform}/{APP:016x}/dlc/{DLC:016x}/3/romfs/dlc.bin"
+                    ))
+                    .is_file());
+            }
+            let declarations =
+                crate::import::inspect_extraction_manifest(&dump, &ImportLimits::default())
+                    .unwrap();
+            assert_eq!(declarations.snapshots.len(), 6);
+            for d in &declarations.snapshots {
+                let platform = if d.platform == Platform::Switch1 {
+                    "switch1"
+                } else {
+                    "switch2"
+                };
+                assert!(d.root.starts_with(&format!("{platform}/{APP:016x}/")));
+            }
+            if keep_recipe {
+                let exact = f.dir.join("cross-exact.nx");
+                restore_extraction(&dump, &exact, &options).unwrap();
+                assert_eq!(
+                    std::fs::read(&exact).unwrap(),
+                    std::fs::read(&original).unwrap()
+                );
+                std::fs::write(dump.join(RESTORATION_FILE), b"corrupt recipe").unwrap();
+            }
+            let output = f.dir.join(if keep_recipe {
+                "cross-ignore.nx"
+            } else {
+                "cross-materialized.nx"
+            });
+            let mut args = vec![
+                "pack-tree".into(),
+                dump.to_string_lossy().into_owned(),
+                output.to_string_lossy().into_owned(),
+                "--no-trail".into(),
+            ];
+            if keep_recipe {
+                args.push("--ignore-restore".into());
+            }
+            crate::cli::run(args, None, None).unwrap();
+            let summary = inspect_archive(&output, &options, IntegrityPolicy::Strict).unwrap();
+            assert_eq!(summary.applications.len(), 2);
+            for a in &summary.applications {
+                assert_eq!(a.application_id, APP);
+                assert_eq!(a.snapshots.len(), 3);
+                assert_eq!(a.programs.len(), 2);
+                for (i, s) in a.snapshots.iter().enumerate() {
+                    let tree = f
+                        .dir
+                        .join(format!("verified-{keep_recipe}-{}-{i}", a.platform as u8));
+                    extract_tree(&output, s.identity, &tree, &options).unwrap();
+                    let seed = a.platform as u8 + s.program_id.map_or(0, |p| (p - APP) as u8) + 3;
+                    let file = if s.snapshot_type == SnapshotType::Dlc {
+                        "romfs/dlc.bin"
+                    } else {
+                        "romfs/data.bin"
+                    };
+                    assert_eq!(std::fs::read(tree.join(file)).unwrap(), vec![seed; 8192]);
+                }
+            }
+            assert!(dump.join(crate::import::EXTRACTION_MANIFEST).is_file());
+        }
     }
 
     #[test]
@@ -1694,6 +1882,18 @@ mod tests {
             );
             assert!(output.join("base/exefs/main").is_file());
             assert!(!output.join(RESTORATION_FILE).exists());
+            assert!(
+                output.join(crate::import::EXTRACTION_MANIFEST).is_file(),
+                "{name}: {:?}",
+                messages.lock().unwrap()
+            );
+            assert_eq!(
+                crate::import::inspect_extraction_manifest(&output, &ImportLimits::default())
+                    .unwrap()
+                    .snapshots
+                    .len(),
+                1
+            );
             let expected_status = if warning {
                 "@RESTORE_STATUS\tfailed"
             } else {

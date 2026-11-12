@@ -1,5 +1,11 @@
 # Unreleased
 
+- Qualify multi-application extraction paths by platform and application ID.
+  Export an independent `extracted.nximport` so multi-Program and collection
+  exports can be imported without restoration recipes, including in the desktop.
+  Reuse decoded source-block buffers during recipe creation instead of reading
+  and allocating the original block a second time. NX serialization is unchanged.
+
 - Reject edited restoration that would omit unexported snapshots, and reject
   multiple RomFS sections explicitly. Keep extracted folders discoverable when
   recipe inspection fails, with explicit normal-import recovery via

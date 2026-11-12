@@ -18,7 +18,7 @@ class StreamedFile:
     def __init__(self, size, digest): self.size, self.digest = size, digest
     def __len__(self): return self.size
 
-def generate(directory, gib):
+def generate(directory, gib, raw=False):
     size = int(gib * 1024**3)
     archive = directory / "foreign.nx"
     tree = directory / "extracted"
@@ -32,9 +32,9 @@ def generate(directory, gib):
             logical = rng.randbytes(1048576)
             whole.update(logical)
             extracted.write(logical)
-            stored = zstd.compress(logical, options={zstd.CompressionParameter.compression_level: 3, zstd.CompressionParameter.checksum_flag: 1})
+            stored = logical if raw else zstd.compress(logical, options={zstd.CompressionParameter.compression_level: 3, zstd.CompressionParameter.checksum_flag: 1})
             output.write(bytes(fixture.align(output.tell(), 16) - output.tell()))
-            records.append((output.tell(), len(stored), len(logical), 1, 0, 0, len(checks)))
+            records.append((output.tell(), len(stored), len(logical), 0 if raw else 1, 0, 0, len(checks)))
             checks.extend(google_crc32c.value(logical[i:i + fixture.CHECK_SIZE]) for i in range(0, len(logical), fixture.CHECK_SIZE))
             output.write(stored)
         data_end = output.tell()

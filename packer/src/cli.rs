@@ -1176,7 +1176,12 @@ fn extract_all(
     let mut partial = Vec::new();
     for a in &summary.applications {
         let prefix = if several {
-            format!("{:016x}/", a.application_id)
+            let platform = match a.platform {
+                Platform::Switch1 => "switch1",
+                Platform::Switch2 => "switch2",
+                _ => return Err("unknown extraction platform".into()),
+            };
+            format!("{platform}/{:016x}/", a.application_id)
         } else {
             String::new()
         };
@@ -1252,16 +1257,70 @@ fn extract_all(
         let _ = fs::remove_dir_all(destination);
     }
     result?;
+    // Export declarations even when a restoration recipe is disabled or fails.
+    // This file is final extracted metadata, not temporary writer staging.
+    let manifest = if raw {
+        None
+    } else {
+        Some(restoration_manifest(
+            path,
+            destination,
+            &summary,
+            &exported,
+            &extraction_options,
+        ))
+    };
+    if !raw {
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let text = manifest
+                .as_ref()
+                .ok_or("missing extraction declarations")?
+                .as_ref()
+                .map_err(|error| error.to_string())?;
+            let limits = import::ImportLimits {
+                max_manifest_bytes: 16 * MIB,
+                max_snapshots: (options.max_entries as usize).min(4096),
+                max_inventory_bytes: (options.max_memory_bytes / 4)
+                    .min(import::ImportLimits::MAX_INVENTORY_BYTES),
+                ..Default::default()
+            };
+            import::DeclarationManifest::read(text.as_bytes(), &limits)?;
+            let target = destination.join(import::EXTRACTION_MANIFEST);
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)?;
+            let result = file
+                .write_all(text.as_bytes())
+                .and_then(|()| file.sync_all());
+            drop(file);
+            if let Err(error) = result {
+                let _ = fs::remove_file(&target);
+                return Err(error.into());
+            }
+            println!("@IMPORT_MANIFEST\t{}", target.display());
+            Ok(())
+        })();
+        if let Err(error) = result {
+            partial.push(format!(
+                "Independent import manifest not created: {error}. Extracted files were kept."
+            ));
+        }
+    }
     // File extraction is now committed. An optional recipe failure must never
     // remove already verified game files, even for cancellation or low budgets.
     if !raw && restore {
         let recipe_result = (|| -> Result<(), Box<dyn std::error::Error>> {
-            let manifest = restoration_manifest(path, destination, &summary, &exported, options)?;
+            let manifest = manifest
+                .as_ref()
+                .ok_or("missing extraction declarations")?
+                .as_ref()
+                .map_err(|error| error.to_string())?;
             let stats = create_restoration_with_mode(
                 path,
                 destination,
                 &exported,
-                &manifest,
+                manifest,
                 mode,
                 options,
             )?;
@@ -2217,6 +2276,8 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut limits = import::ImportLimits::default();
     let mut options = WriterOptions::default();
     let mut measured = None;
+    let mut export_declarations = None;
+    let mut temporary_receipt = false;
     if args.first().map(String::as_str) == Some("pack-nup") {
         return pack_nup(&args, &o);
     }
@@ -2298,20 +2359,58 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             args[2].clone()
         };
-        let plan = automatic_manifest(Path::new(&args[1]), &trail, &o)?;
-        if o.no_trail {
-            _trail.0 = [
-                plan.manifest.clone(),
-                format!("{trail}.assumptions.txt"),
-                plan.receipt.clone(),
-            ]
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
+        if Path::new(&args[1])
+            .join(import::EXTRACTION_MANIFEST)
+            .symlink_metadata()
+            .is_ok()
+        {
+            measured = Some(walk(Path::new(&args[1]), NODE_CEILING)?);
+            size_budgets(measured.as_ref(), &o, &mut limits, &mut options)?;
+            let declarations = import::inspect_extraction_manifest(&args[1], &limits)?;
+            if let Some(platform) = o.platform.as_deref() {
+                let platform = match platform {
+                    "switch1" => Platform::Switch1,
+                    "switch2" => Platform::Switch2,
+                    _ => return Err("--platform requires switch1 or switch2".into()),
+                };
+                if declarations
+                    .snapshots
+                    .iter()
+                    .any(|s| s.platform != platform)
+                {
+                    return Err("--platform disagrees with exported declarations".into());
+                }
+            }
+            if o.update_version.is_some() {
+                return Err("exported declarations already specify versions".into());
+            }
+            let roots: std::collections::BTreeSet<_> = declarations
+                .snapshots
+                .iter()
+                .map(|s| s.root.clone())
+                .collect();
+            if !o.tree_roots.is_empty() && o.tree_roots != roots {
+                return Err("exported manifest import uses every declared snapshot; partial selection requires an explicit manifest".into());
+            }
+            let sidecar = Path::new(&args[1]).join(import::EXTRACTION_MANIFEST);
+            let receipt = format!("{trail}.nxreceipt");
+            temporary_receipt = o.no_trail;
+            args.insert(2, sidecar.to_string_lossy().into_owned());
+            args.push(receipt);
+            export_declarations = Some(declarations);
+        } else {
+            let plan = automatic_manifest(Path::new(&args[1]), &trail, &o)?;
+            if o.no_trail {
+                temporary_receipt = true;
+                _trail.0 = [plan.manifest.clone(), format!("{trail}.assumptions.txt")]
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect();
+            }
+            args.insert(2, plan.manifest);
+            args.push(plan.receipt);
+            measured = Some(plan.walk);
         }
-        args.insert(2, plan.manifest);
-        args.push(plan.receipt);
-        measured = Some(plan.walk);
     } else if o.no_trail {
         return Err("--no-trail applies to pack-nup, automatic pack-tree and add-tree".into());
     } else if o.platform.is_some() {
@@ -2380,7 +2479,10 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             if !o.latest && !o.dlc.is_empty() {
                 return Err("--dlc requires --latest".into());
             }
-            let mut m = import::DeclarationManifest::read(File::open(&args[2])?, &limits)?;
+            let mut m = match export_declarations.take() {
+                Some(m) => m,
+                None => import::DeclarationManifest::read(File::open(&args[2])?, &limits)?,
+            };
             if o.latest {
                 let selection = m.select_latest_complete(&o.dlc, &limits)?;
                 println!(
@@ -2419,6 +2521,9 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 .write(true)
                 .create_new(true)
                 .open(receipt_path)?;
+            if temporary_receipt {
+                _trail.0.push(receipt_path.to_owned());
+            }
             options.cancellation = command_token(&o);
             let watch = ProgressWatch::counter(o.frontend, &options.progress);
             let converted =

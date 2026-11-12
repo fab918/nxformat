@@ -403,6 +403,50 @@ mod tests {
     }
 
     #[test]
+    fn standalone_manifest_discovers_and_rebuilds_multi_program_export_without_recipe() {
+        use nxformat_packer::{
+            cli, import, inspect_archive, CancellationToken, IntegrityPolicy, WriterOptions,
+        };
+        const APP: u64 = 0x0400_0000_0010_0000;
+        let dir =
+            std::env::temp_dir().join(format!("nxconvert-manifest-export-{}", std::process::id()));
+        let dump = dir.join("dump");
+        let mut manifest = "NXIMPORT\t1\n".to_owned();
+        for i in 0..2 {
+            let program = APP + i;
+            let root = format!("switch2/{APP:016x}/base-{program:016x}");
+            import::synthetic::executable_tree(&dump.join(&root), program, 3).unwrap();
+            let kind = if i == 0 { "primary" } else { "auxiliary" };
+            manifest.push_str(&format!("snapshot\tp{i}\t{root}\tswitch2\t{APP:016x}\t{program:016x}\t{kind}\tbase\t0\tcomplete\tmaterialized-v1\tmeta-acid3072-v1\n"));
+        }
+        std::fs::write(dump.join(import::EXTRACTION_MANIFEST), manifest).unwrap();
+        assert!(import::discover(&dump, &Default::default())
+            .unwrap()
+            .is_empty());
+        let sources =
+            super::discovery::scan(vec![dump.clone()], &CancellationToken::default()).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert!(sources[0].supported && sources[0].selected);
+        assert!(!sources[0].has_restore_recipe);
+        assert_eq!(sources[0].contents.len(), 2);
+        let mut app = App {
+            sources,
+            output_dir: Some(dir.clone()),
+            ..Default::default()
+        };
+        let output = app.games().remove(0).output.unwrap();
+        app.convert();
+        let job = app.queue.pop_front().unwrap();
+        cli::run(job.args, None, Some(CancellationToken::default())).unwrap();
+        let summary =
+            inspect_archive(&output, &WriterOptions::default(), IntegrityPolicy::Strict).unwrap();
+        assert_eq!(summary.applications[0].programs.len(), 2);
+        assert_eq!(summary.applications[0].snapshots.len(), 2);
+        assert!(dump.join(import::EXTRACTION_MANIFEST).is_file());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn nup_sources_convert_with_updates_dlc_and_metadata() {
         use super::{
             cli, discovery, Appearance, CancellationToken, IntegrityPolicy, Platform, WriterOptions,
