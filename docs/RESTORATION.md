@@ -219,3 +219,27 @@ Median recipe time was 7.699 s before/after for RAW and 13.822 s before versus
 removed, but the measured warm-cache wall-time gain is small (none for RAW,
 about 1.2% for Zstd). There is no claimed physical I/O or slow-device speedup.
 Recipe bytes match between binaries and exact replay is independently verified.
+
+## Internally compressed native RomFS
+
+The native extractor reads compression tables and RAW, zero and LZ4 entries in
+an NCA's integrity-protected data region, after BKTR resolution when applicable.
+The original IVFC storage is verified before decompression. Reserved whole hash
+blocks which are unreachable from the declared data extent are not interpreted
+as live hashes; every reachable hash block and all live data remain checked.
+
+The compression index and a single 64 KiB decoded block are bounded by the
+configured memory limit; the full decompressed section is never staged. The
+same file paths feed normal edited repacking. Unknown compression types, sparse
+and metadata-hashed storage and unsupported tree shapes still fail explicitly.
+
+A compact restoration recipe retains original LZ4 storage bytes literally rather
+than guessing an encoder configuration. This preserves exact original NX/package
+replay, but the recipe may approach source size for these snapshots. The NX format
+and restoration opcodes do not change. An unchanged roundtrip remains byte exact.
+
+Opt-in read-only tests can inspect local native inputs without publishing game
+files: set `NXFORMAT_COMPRESSED_PROBES` to a TSV containing label, package path,
+NCA offset, NCA size, base-package path (or `-`), base-NCA offset and size; then run
+`cargo test --release --manifest-path packer/Cargo.toml real_compressed_romfs_read_only_probe -- --ignored --nocapture`.
+The probe verifies IVFC and streams all decompressed files into SHA-256 digests.

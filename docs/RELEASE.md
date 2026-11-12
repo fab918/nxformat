@@ -1,5 +1,11 @@
 # Unreleased
 
+- Extract internally compressed native RomFS using bounded RAW/zero/LZ4 reads,
+  including supported BKTR updates. Verify the underlying IVFC data and reachable
+  hash blocks; retain original compressed storage literally for exact restoration.
+  Full macOS conformance uses the Intel runner pool, retaining arm64 coverage in
+  the other macOS jobs, after hosted arm64 capacity failures before job startup.
+
 - Qualify multi-application extraction paths by platform and application ID.
   Export an independent `extracted.nximport` so multi-Program and collection
   exports can be imported without restoration recipes, including in the desktop.

@@ -1616,6 +1616,9 @@ fn export_exefs_file(
     digest: Option<[u8; 32]>,
     options: &WriterOptions,
 ) -> Result<(), WriterError> {
+    if size > options.max_file_size {
+        return Err(limit_error("extracted file exceeds configured size limit"));
+    }
     let mut output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

@@ -350,9 +350,10 @@ File payloads and IVFC levels are streamed. Native transport buffers, BKTR table
 RomFS metadata, paths and traversal nodes are bounded by the configured memory
 budget (`--memory-mib`) and hard traversal limits.
 
-Supported native layouts are decrypted DNCA, IVFC RomFS and single-root BKTR
-relocation bucket trees. Encrypted content, advanced/multilevel BKTR trees,
-compressed sections, sparse RomFS, ambiguous multi-Data DLC and missing exact
+Supported native layouts are decrypted DNCA, IVFC RomFS, internal RAW/zero/LZ4
+compressed storage and single-root BKTR relocation bucket trees. Encrypted content,
+advanced/multilevel BKTR trees, unknown compression codecs, sparse RomFS, ambiguous
+multi-Data DLC and missing exact
 bases are rejected. Failures or cancellation remove the new extraction folder;
 existing destinations are never overwritten. The desktop application and CLI
 show these limitations and package reconstruction availability before extraction.

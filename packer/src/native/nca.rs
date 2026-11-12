@@ -48,6 +48,7 @@ pub(crate) struct ParsedNca {
     pub(crate) hash_data: Vec<[u8; 0xF8]>,
     pub(crate) patch_data: Vec<[u8; 0x40]>,
     pub(crate) unsupported_storage: Vec<bool>,
+    pub(crate) compression_data: Vec<[u8; 0x28]>,
 }
 
 pub(crate) enum NcaRejection {
@@ -108,6 +109,7 @@ pub(crate) fn parse_nca(src: &mut Source, at: u64, size: u64) -> Result<ParsedNc
     let mut hash_data = Vec::new();
     let mut patch_data = Vec::new();
     let mut unsupported_storage = Vec::new();
+    let mut compression_data = Vec::new();
     for i in 0..4usize {
         let start = u32_at(&h, 0x240 + i * 16) as u64 * SECTOR;
         let end = u32_at(&h, 0x244 + i * 16) as u64 * SECTOR;
@@ -151,7 +153,13 @@ pub(crate) fn parse_nca(src: &mut Source, at: u64, size: u64) -> Result<ParsedNc
         });
         hash_data.push(data);
         patch_data.push(patch.try_into().unwrap());
-        unsupported_storage.push(fs[0x148..0x1a0].iter().any(|&b| b != 0));
+        unsupported_storage.push(
+            fs[0x148..0x178]
+                .iter()
+                .chain(&fs[0x1a0..0x1d0])
+                .any(|&b| b != 0),
+        );
+        compression_data.push(fs[0x178..0x1a0].try_into().unwrap());
     }
     if sections.is_empty() {
         return Err(NativeError::invalid("NCA declares no sections").into());
@@ -182,6 +190,7 @@ pub(crate) fn parse_nca(src: &mut Source, at: u64, size: u64) -> Result<ParsedNc
         hash_data,
         patch_data,
         unsupported_storage,
+        compression_data,
     })
 }
 

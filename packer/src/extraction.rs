@@ -1,6 +1,8 @@
 //! Bounded, read-only native filesystem extraction. BKTR maps section-relative
 //! virtual offsets to the exact base dependency, never to a guessed version.
 use super::*;
+#[path = "native_compression.rs"]
+mod compression;
 use crate::native::container::{u32_at, u64_at};
 use crate::native::nca::ParsedNca;
 
@@ -281,7 +283,26 @@ fn verify_ivfc(
         return Err(invalid("unsupported IVFC master hash size"));
     }
     let count = u32_at(data, 12) as usize - 1;
-    for i in 0..count {
+    // Hash regions can reserve more capacity than the next level uses. Only
+    // hashes reachable from the declared data level are authenticated; unused
+    // whole hash blocks need not have parent signatures. Still hash the full
+    // stored block (including its padding) for every reachable block.
+    let mut used: Vec<u64> = (0..count).map(|i| u64_at(data, 24 + i * 24)).collect();
+    for i in (0..count.saturating_sub(1)).rev() {
+        let child_log = u32_at(data, 32 + (i + 1) * 24);
+        if !(9..=24).contains(&child_log) {
+            return Err(bad("invalid IVFC child block size"));
+        }
+        let required = used[i + 1]
+            .div_ceil(1u64 << child_log)
+            .checked_mul(32)
+            .ok_or_else(|| bad("IVFC hash extent overflow"))?;
+        if required > used[i] {
+            return Err(bad("IVFC parent table too small"));
+        }
+        used[i] = required;
+    }
+    for (i, &used_size) in used.iter().enumerate() {
         let at = 16 + i * 24;
         let (off, size, log2) = (
             u64_at(data, at),
@@ -295,7 +316,7 @@ fn verify_ivfc(
         if block > options.max_memory_bytes / 8 {
             return Err(limit_error("IVFC block exceeds memory budget"));
         }
-        let hashes = size
+        let hashes = used_size
             .div_ceil(block)
             .checked_mul(32)
             .ok_or_else(|| bad("IVFC size overflow"))?;
@@ -314,7 +335,7 @@ fn verify_ivfc(
         let mut buf = vec![0; block as usize];
         let mut hash_page = vec![0u8; 32 * 1024];
         let mut hash_page_start = u64::MAX;
-        for b in 0..size.div_ceil(block) {
+        for b in 0..used_size.div_ceil(block) {
             cancelled(options)?;
             let n = (size - b * block).min(block) as usize;
             buf.fill(0);
@@ -636,7 +657,9 @@ fn native_view(
     };
     let section = &nca.summary.sections[slot];
     if section.sparse_flattened || nca.unsupported_storage[slot] {
-        return Err(invalid("sparse RomFS cannot be extracted; export raw NCAs"));
+        return Err(invalid(
+            "sparse or metadata-hashed RomFS storage is unsupported; export raw NCAs",
+        ));
     }
     if section.hash_type != 3 {
         return Err(invalid("only IVFC RomFS is supported; export raw NCAs"));
@@ -679,7 +702,7 @@ fn native_view(
             .any(|(i, s)| s.fs_type == 0 && (s.sparse_flattened || parsed.unsupported_storage[i]))
         {
             return Err(invalid(
-                "BKTR base has unsupported sparse or compressed storage",
+                "BKTR base has unsupported sparse or metadata-hashed storage",
             ));
         }
         let base_slot = romfs_slot(&parsed)?
@@ -731,6 +754,73 @@ fn native_view(
     }
     if export {
         verify_ivfc(&mut reader, &nca.hash_data[slot], options)?;
+    }
+    if nca.compression_data[slot].iter().any(|&b| b != 0) {
+        let (offset, size) = region(&nca.hash_data[slot], reader.len)?;
+        let compressed = compression::Reader::new(
+            reader,
+            offset,
+            size,
+            &nca.compression_data[slot],
+            limit,
+            options.cancellation.clone(),
+        )?;
+        let mut hash = [0u8; 0xf8];
+        hash[..4].copy_from_slice(b"IVFC");
+        hash[12..16].copy_from_slice(&2u32.to_le_bytes());
+        hash[24..32].copy_from_slice(&compressed.len.to_le_bytes());
+        // Reuse the bounded RomFS traversal with a zero-based decompressed
+        // view. IVFC above has verified the original compressed storage.
+        let remaining = limit
+            .checked_sub(compressed.memory)
+            .ok_or_else(|| limit_error("combined NCA compression memory budget"))?;
+        let len = compressed.len;
+        let mut view = SectionReader {
+            patch: compressed,
+            base: None,
+            patch_start: 0,
+            base_start: 0,
+            mappings: Vec::new(),
+            len,
+            position: 0,
+        };
+        let mut entries = romfs_entries(&mut view, &hash, remaining)?;
+        if export {
+            let romfs = destination.join("romfs");
+            std::fs::create_dir(&romfs)?;
+            options
+                .progress
+                .add_total(entries.iter().filter_map(|e| e.range.map(|(_, n)| n)).sum());
+            // Create parents in traversal order, then stream files in storage
+            // order so a one-block cache does not turn HDD reads into seeks.
+            for entry in entries.iter().filter(|e| e.range.is_none()) {
+                std::fs::create_dir(crate::import::join(&romfs, &entry.path))?;
+            }
+            entries.retain(|e| e.range.is_some());
+            entries.sort_unstable_by_key(|e| e.range.map(|(at, _)| at));
+            for entry in entries {
+                cancelled(options)?;
+                let target = crate::import::join(&romfs, &entry.path);
+                if let Some((at, size)) = entry.range {
+                    view.seek(SeekFrom::Start(at))?;
+                    export_exefs_file(&mut view, &target, size, None, options)?;
+                } else {
+                    std::fs::create_dir(target)?;
+                }
+            }
+        }
+        drop(view);
+        // LZ4 source frames are literal recipe bytes: decoded file ranges
+        // cannot reproduce an arbitrary original LZ4 encoding exactly.
+        return native_exefs_view(
+            path,
+            archive,
+            snapshot,
+            destination,
+            budget,
+            options,
+            export,
+        );
     }
     let entries = romfs_entries(&mut reader, &nca.hash_data[slot], limit)?;
     let romfs = destination.join("romfs");
@@ -1083,6 +1173,49 @@ mod tests {
         assert!(verify_ivfc(&mut view(bytes), &data, &options).is_err());
     }
     #[test]
+    fn decoded_file_size_limit_is_checked_before_creating_output() {
+        let path = std::env::temp_dir().join(format!(
+            "nx-lz4-size-limit-{}.bin",
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let options = WriterOptions {
+            max_file_size: 1,
+            ..Default::default()
+        };
+        assert!(export_exefs_file(&mut Cursor::new(vec![0; 2]), &path, 2, None, &options).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn ivfc_checks_reachable_hash_blocks_and_rejects_corrupt_live_data() {
+        let payload = vec![7u8; 512];
+        let mut bytes = vec![0; 1024];
+        bytes[..32].copy_from_slice(&sha256(&payload));
+        // Reserved whole hash blocks have no parent signature and are not
+        // reachable from the data extent. They must not mask live corruption.
+        bytes[512..1024].fill(0xfe);
+        let master = sha256(&bytes[..512]);
+        bytes.extend_from_slice(&payload);
+        let mut hash = [0u8; 0xf8];
+        hash[..4].copy_from_slice(b"IVFC");
+        hash[8..12].copy_from_slice(&32u32.to_le_bytes());
+        hash[12..16].copy_from_slice(&3u32.to_le_bytes());
+        for (i, (offset, size)) in [(0u64, 1024u64), (1024, 512)].iter().enumerate() {
+            let at = 16 + i * 24;
+            hash[at..at + 8].copy_from_slice(&offset.to_le_bytes());
+            hash[at + 8..at + 16].copy_from_slice(&size.to_le_bytes());
+            hash[at + 16..at + 20].copy_from_slice(&9u32.to_le_bytes());
+        }
+        hash[0xc0..0xe0].copy_from_slice(&master);
+        verify_ivfc(&mut view(bytes.clone()), &hash, &WriterOptions::default()).unwrap();
+        for offset in [0, 1024] {
+            let mut damaged = bytes.clone();
+            damaged[offset] ^= 1;
+            assert!(verify_ivfc(&mut view(damaged), &hash, &WriterOptions::default()).is_err());
+        }
+    }
+
+    #[test]
     fn native_base_bktr_versions_multi_program_dlc_and_raw_roundtrip() {
         use native::synthetic::{self, TitleSpec};
         const APP: u64 = 0x0100_0000_0001_0000;
@@ -1288,6 +1421,253 @@ mod tests {
         assert!(!failed.exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn compressed_romfs_base_bktr_exact_restore_and_edited_repack() {
+        use native::synthetic::{self, TitleSpec};
+        const APP: u64 = 0x0100_0000_0001_0000;
+        let id = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("nx-compressed-native-{}-{id}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let mut base = TitleSpec::application(APP, 0, 1);
+        let mut patch = TitleSpec::patch(APP, 1, 2);
+        for spec in [&mut base, &mut patch] {
+            let p = spec.program.as_mut().unwrap();
+            p.romfs_bytes = 200000;
+            p.compressed_romfs = true;
+            p.npdm = Some(crate::import::synthetic::npdm(
+                APP,
+                crate::import::structures::NpdmProfile::MetaAcid3072V1,
+            ));
+        }
+        let nx = dir.join("compressed.nx");
+        let mut args = vec!["pack".into()];
+        for (i, spec) in [base, patch].iter().enumerate() {
+            let path = dir.join(format!("{i}.dnsp"));
+            std::fs::write(&path, synthetic::dnsp(&synthetic::title_entries(spec))).unwrap();
+            args.push(path.to_string_lossy().into_owned());
+        }
+        args.push(nx.to_string_lossy().into_owned());
+        crate::cli::run(args, None, None).unwrap();
+        let dump = dir.join("dump");
+        crate::cli::run(
+            vec![
+                "extract".into(),
+                nx.to_string_lossy().into_owned(),
+                dump.to_string_lossy().into_owned(),
+                "--require-restore".into(),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(dump.join("base/romfs/data.bin")).unwrap(),
+            vec![1; 200000]
+        );
+        assert_eq!(
+            std::fs::read(dump.join("updates/1/romfs/data.bin")).unwrap(),
+            vec![2; 200000]
+        );
+        let exact = dir.join("exact.nx");
+        super::super::super::restoration::restore_extraction(
+            &dump,
+            &exact,
+            &WriterOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&exact).unwrap(), std::fs::read(&nx).unwrap());
+        std::fs::write(
+            dump.join("updates/1/romfs/data.bin"),
+            b"resized compressed-view mod",
+        )
+        .unwrap();
+        let modified = dir.join("modified.nx");
+        super::super::super::restoration::restore_extraction(
+            &dump,
+            &modified,
+            &WriterOptions::default(),
+        )
+        .unwrap();
+        let summary = inspect_archive(
+            &modified,
+            &WriterOptions::default(),
+            IntegrityPolicy::Strict,
+        )
+        .unwrap();
+        let update = summary.applications[0]
+            .snapshots
+            .iter()
+            .find(|s| s.numeric_version == 1)
+            .unwrap();
+        let check = dir.join("check");
+        extract_tree(
+            &modified,
+            update.identity,
+            &check,
+            &WriterOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(check.join("romfs/data.bin")).unwrap(),
+            b"resized compressed-view mod"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Opt-in read-only probes: TSV columns are label, package, NCA offset,
+    /// NCA size, base package (or -), base NCA offset and base NCA size.
+    #[test]
+    #[ignore = "requires NXFORMAT_COMPRESSED_PROBES with local plaintext fixtures"]
+    fn real_compressed_romfs_read_only_probe() {
+        struct Segment {
+            file: File,
+            base: u64,
+            len: u64,
+            pos: u64,
+        }
+        impl Segment {
+            fn new(path: &str, base: u64, len: u64) -> Self {
+                let file = File::open(path).unwrap();
+                assert!(base + len <= file.metadata().unwrap().len());
+                Self {
+                    file,
+                    base,
+                    len,
+                    pos: 0,
+                }
+            }
+        }
+        impl Read for Segment {
+            fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+                let n = b
+                    .len()
+                    .min((self.len - self.pos).min(usize::MAX as u64) as usize);
+                self.file.seek(SeekFrom::Start(self.base + self.pos))?;
+                self.file.read_exact(&mut b[..n])?;
+                self.pos += n as u64;
+                Ok(n)
+            }
+        }
+        impl Seek for Segment {
+            fn seek(&mut self, p: SeekFrom) -> io::Result<u64> {
+                let n = match p {
+                    SeekFrom::Start(n) => n as i128,
+                    SeekFrom::Current(n) => self.pos as i128 + n as i128,
+                    SeekFrom::End(n) => self.len as i128 + n as i128,
+                };
+                if n < 0 || n > self.len as i128 {
+                    return Err(io::Error::other("probe seek"));
+                }
+                self.pos = n as u64;
+                Ok(self.pos)
+            }
+        }
+        let list =
+            std::fs::read_to_string(std::env::var("NXFORMAT_COMPRESSED_PROBES").unwrap()).unwrap();
+        let options = WriterOptions::default();
+        for line in list.lines().filter(|l| !l.is_empty()) {
+            let f: Vec<_> = line.split('\t').collect();
+            assert_eq!(f.len(), 7);
+            let offset = f[2].parse().unwrap();
+            let size = f[3].parse().unwrap();
+            let mut patch = Segment::new(f[1], offset, size);
+            let nca = native::nca::parse_nca(&mut Source::new(&mut patch, size), 0, size)
+                .unwrap_or_else(|_| panic!("probe NCA"));
+            let slot = romfs_slot(&nca).unwrap().unwrap();
+            let section = &nca.summary.sections[slot];
+            let (mappings, len) = if section.has_patch_info {
+                relocations(
+                    &mut Source::new(&mut patch, size),
+                    &nca,
+                    slot,
+                    512 * 1024 * 1024,
+                )
+                .unwrap()
+            } else {
+                (Vec::new(), section.end - section.start)
+            };
+            let mut base_start = 0;
+            let base = if mappings.iter().any(|m| !m.patch) {
+                assert_ne!(f[4], "-");
+                let mut b = Segment::new(f[4], f[5].parse().unwrap(), f[6].parse().unwrap());
+                let size = b.len;
+                let parsed = native::nca::parse_nca(&mut Source::new(&mut b, size), 0, size)
+                    .unwrap_or_else(|_| panic!("probe base"));
+                base_start = parsed.summary.sections[romfs_slot(&parsed).unwrap().unwrap()].start;
+                Some(b)
+            } else {
+                None
+            };
+            let mut section = SectionReader {
+                patch,
+                base,
+                patch_start: section.start,
+                base_start,
+                mappings,
+                len,
+                position: 0,
+            };
+            verify_ivfc(&mut section, &nca.hash_data[slot], &options).unwrap();
+            println!("REAL_COMPRESSED_IVFC_OK\t{}", f[0]);
+            let (data, size) = region(&nca.hash_data[slot], len).unwrap();
+            let compressed = compression::Reader::new(
+                section,
+                data,
+                size,
+                &nca.compression_data[slot],
+                512 * 1024 * 1024,
+                options.cancellation.clone(),
+            )
+            .unwrap();
+            let len = compressed.len;
+            let mut view = SectionReader {
+                patch: compressed,
+                base: None,
+                patch_start: 0,
+                base_start: 0,
+                mappings: Vec::new(),
+                len,
+                position: 0,
+            };
+            let mut hash = [0; 0xf8];
+            hash[..4].copy_from_slice(b"IVFC");
+            hash[12..16].copy_from_slice(&2u32.to_le_bytes());
+            hash[24..32].copy_from_slice(&len.to_le_bytes());
+            let mut entries = romfs_entries(&mut view, &hash, 256 * 1024 * 1024).unwrap();
+            entries.sort_unstable_by_key(|e| e.range.map(|(at, _)| at));
+            let mut files = 0u64;
+            let mut total = 0u64;
+            let mut digest = crate::hash::Sha256::new();
+            let mut buffer = vec![0u8; 128 * 1024];
+            for entry in entries {
+                if let Some((at, size)) = entry.range {
+                    view.seek(SeekFrom::Start(at)).unwrap();
+                    let mut left = size;
+                    let mut file_hash = crate::hash::Sha256::new();
+                    while left > 0 {
+                        let n = left.min(buffer.len() as u64) as usize;
+                        view.read_exact(&mut buffer[..n]).unwrap();
+                        file_hash.update(&buffer[..n]);
+                        left -= n as u64;
+                    }
+                    files += 1;
+                    total += size;
+                    digest.update(&(entry.path.len() as u64).to_le_bytes());
+                    digest.update(entry.path.as_bytes());
+                    digest.update(&file_hash.finish());
+                }
+            }
+            println!(
+                "REAL_COMPRESSED_OK\t{}\t{}\t{}\t{}",
+                f[0],
+                files,
+                total,
+                crate::import::hex(&digest.finish())
+            );
+        }
+    }
+
     #[test]
     fn exefs_only_programs_and_data_only_updates_extract_and_restore() {
         use native::synthetic::{self, TitleSpec};

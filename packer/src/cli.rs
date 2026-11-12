@@ -1162,7 +1162,7 @@ fn extract_all(
             .iter()
             .any(|a| a.snapshots.iter().any(|s| s.content_id.is_some()))
     {
-        eprintln!("Native extraction supports decrypted IVFC RomFS and single-root BKTR. Encrypted, compressed or sparse RomFS, multilevel BKTR and multi-Data DLC are unsupported; metadata is memory-bounded. Use extract-ncas for the stored NCA files.");
+        eprintln!("Native extraction supports decrypted IVFC RomFS, internal RAW/zero/LZ4 compression and single-root BKTR. Encrypted or sparse RomFS, unknown compression codecs, multilevel BKTR and multi-Data DLC are unsupported; metadata is memory-bounded. Use extract-ncas for the stored NCA files.");
     }
     if !raw && restore {
         let size = fs::metadata(path)?.len();
