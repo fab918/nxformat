@@ -1861,6 +1861,7 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
         }
         ("restore", 3) => {
             let watch = ProgressWatch::counter(o.frontend, &options.progress);
+            eprintln!("If files were edited, restoration needs temporary space for the full original NX metadata capsule plus the new NX and writer staging. Sparse-file savings are not assumed; --temp-mib bounds this space.");
             let stats = restore_extraction(&args[1], &args[2], &options)?;
             drop(watch);
             println!(
@@ -2242,6 +2243,7 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             return Err("restoration repacks use every declared snapshot; selection flags require an explicit manifest".into());
         }
         let watch = ProgressWatch::counter(o.frontend, &options.progress);
+        eprintln!("If files were edited, restoration needs temporary space for the full original NX metadata capsule plus the new NX and writer staging. Sparse-file savings are not assumed; --temp-mib bounds this space.");
         let stats = restore_extraction(&args[1], &args[2], &options)?;
         drop(watch);
         println!(

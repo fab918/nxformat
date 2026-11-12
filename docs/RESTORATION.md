@@ -95,6 +95,15 @@ even if originally deduplicated with a game file, then streamed and verified.
 An older recipe missing a required resource fails explicitly instead of silently
 dropping it. No new NX field or extension is introduced.
 
+The capsule has the original NX's logical size. On filesystems without effective
+sparse-file support it may occupy that full size physically, alongside the new NX
+and writer staging files. Budget for all of these in addition to the extracted
+folder and recipe. `--temp-mib` conservatively charges the capsule's full logical
+size even when sparse holes save physical space; it also bounds the writer's
+remaining temporary space. The CLI and desktop log this warning before restoration.
+A disk-limit or I/O failure removes the temporary output and capsule, while
+retaining the extracted folder and recipe.
+
 Level 13 compression reserves additional encoder workspace. A memory budget too
 small for the recipe fails explicitly. RAW NCA export (`extract-ncas`) remains
 available without creating a restoration recipe.

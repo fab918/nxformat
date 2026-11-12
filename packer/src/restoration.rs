@@ -693,13 +693,23 @@ pub fn create_restoration_with_mode(
                     Piece::File(path, offset, n) => {
                         out.write_all(&[1])?;
                         num(&mut out, n)?;
-                        out.write_all(&path_ids[path.as_str()].to_le_bytes())?;
+                        let id = path_ids.get(path.as_str()).ok_or_else(|| {
+                            invalid(format!(
+                                "restoration source file missing from extraction: {path}"
+                            ))
+                        })?;
+                        out.write_all(&id.to_le_bytes())?;
                         num(&mut out, offset)?;
                     }
                     Piece::Hash(path, offset, size, begin, len) => {
                         out.write_all(&[2])?;
                         num(&mut out, len)?;
-                        out.write_all(&path_ids[path.as_str()].to_le_bytes())?;
+                        let id = path_ids.get(path.as_str()).ok_or_else(|| {
+                            invalid(format!(
+                                "restoration source file missing from extraction: {path}"
+                            ))
+                        })?;
+                        out.write_all(&id.to_le_bytes())?;
                         num(&mut out, offset)?;
                         out.write_all(&size.to_le_bytes())?;
                         out.write_all(&[begin])?;
@@ -783,6 +793,9 @@ pub fn inspect_restoration(
 /// Restore unchanged extractions to the exact original NX, including all its
 /// embedded DNSP/DXCI recipes. Edited trees use the saved explicit declarations
 /// and the existing materialized-tree writer, preserving their relative paths.
+/// Edited restoration reserves the full original NX size for its metadata
+/// capsule, even on filesystems with sparse-file support, in addition to the
+/// materialized writer's temporary space. All temporary files are removed on error.
 pub fn restore_extraction(
     directory: impl AsRef<Path>,
     destination: impl AsRef<Path>,
@@ -1237,6 +1250,65 @@ mod tests {
         );
         assert!(output.join("romfs/empty").is_dir());
     }
+    #[test]
+    fn missing_exported_file_returns_error_without_publishing_recipe() {
+        let f = fixture();
+        let options = WriterOptions::default();
+        let manifest = inspect_restoration(&f.extracted, &options).unwrap();
+        let summary = inspect_archive(&f.original, &options, IntegrityPolicy::Strict).unwrap();
+        std::fs::remove_file(f.extracted.join(RESTORATION_FILE)).unwrap();
+        std::fs::remove_file(f.extracted.join("base/romfs/random.bin")).unwrap();
+        let error = create_restoration(
+            &f.original,
+            &f.extracted,
+            &[(summary.applications[0].snapshots[0].identity, "base".into())],
+            std::str::from_utf8(manifest.bytes()).unwrap(),
+            &options,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("restoration source file missing from extraction: base/romfs/random.bin"));
+        assert!(!f.extracted.join(RESTORATION_FILE).exists());
+        assert!(f.extracted.join("base/exefs/main").is_file());
+        assert!(!std::fs::read_dir(&f.dir).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".nxrestore")));
+    }
+
+    #[test]
+    fn edited_restore_charges_full_capsule_size_and_cleans_up_on_disk_limit() {
+        let f = fixture();
+        let original_size = std::fs::metadata(&f.original).unwrap().len();
+        let options = WriterOptions {
+            max_temporary_disk_bytes: original_size,
+            ..Default::default()
+        };
+        // The same quota can restore the unchanged archive exactly.
+        let exact = f.dir.join("exact.nx");
+        assert!(
+            restore_extraction(&f.extracted, &exact, &options)
+                .unwrap()
+                .unchanged
+        );
+        std::fs::write(f.extracted.join("base/romfs/data.bin"), b"modified").unwrap();
+        let modified = f.dir.join("modified.nx");
+        assert!(restore_extraction(&f.extracted, &modified, &options).is_err());
+        assert!(!modified.exists());
+        assert_eq!(
+            std::fs::read(f.extracted.join("base/romfs/data.bin")).unwrap(),
+            b"modified"
+        );
+        assert!(f.extracted.join(RESTORATION_FILE).is_file());
+        assert!(!std::fs::read_dir(&f.dir).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".nxrestore")));
+    }
+
     #[test]
     fn checksum_truncation_and_existing_outputs_never_publish_or_overwrite() {
         let f = fixture();
