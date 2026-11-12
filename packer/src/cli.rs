@@ -146,8 +146,9 @@ nxconvert recipe ARCHIVE.nx SOURCE|RECIPE.nxrecipe... (keep rebuild recipes insi
 nxconvert rebuild ARCHIVE.nx FOLDER [RECIPE_ID...] (rebuild the original files into FOLDER)\n\
 nxconvert check-recipe ARCHIVE.nx (replay every recipe kept in the NX)\n\
 nxconvert scan SOURCE|FOLDER... (decrypted packages; @SOURCE, @CONTENT and @ISSUE lines)\n\
-nxconvert contents ARCHIVE.nx (@APP, @SNAPSHOT, @RESOURCE, @RECIPE, @RECLAIMABLE and @ALLOCATED lines)\n\
+nxconvert contents ARCHIVE.nx (@APP, @SNAPSHOT, @STORAGE, @RESOURCE, @RECIPE, @RECLAIMABLE and @ALLOCATED lines)\n\
 nxconvert extract-exefs ARCHIVE.nx SNAPSHOT_IDENTITY NEW_FOLDER\n\
+nxconvert extract-ncas ARCHIVE.nx NEW_FOLDER (raw native NCA files, no package reconstruction)\n\
 nxconvert extract ARCHIVE.nx NEW_FOLDER (every snapshot as a dump: base, updates/<version>, dlc/<title>/<version>)\n\
 nxconvert add ARCHIVE.nx SOURCE... [--no-recipe [--omit-firmware]] (add updates and DLC in place, with rebuild recipes by default)\n\
 nxconvert add-tree ARCHIVE.nx PACKAGE [--platform switch1|switch2] [--update-version N] (add extracted trees in place: updates/<version>/ and dlc/ folders, or with --update-version one update folder holding exefs/ and romfs/)\n\
@@ -1106,21 +1107,34 @@ fn dlc_title(path: &Path, s: &SnapshotSummary, options: &WriterOptions) -> u64 {
         })
         .unwrap_or(0)
 }
-/// Export every snapshot in the dump layout `pack-tree` reads: `base`,
-/// `updates/<version>` and `dlc/<title id>/<version>`, under one folder per
-/// application when the archive holds several. A file tree (from a NUP or a
-/// dump folder) is written whole, usually exefs/ and romfs/. Snapshots kept as
-/// NCA files only give their ExeFS, and native DLC is skipped: reading their
-/// RomFS would need NCA and patch decoding. Programs that would share a folder
-/// get their Program ID appended. `destination` must not exist and is removed
-/// on error. Returns the number of snapshots written and the partial ones.
+/// Export all snapshots with collision-free application/Program/version paths.
+/// Native extraction verifies IVFC and reconstructs BKTR against exact base
+/// identities. Unsupported native layouts fail and remove the new output root.
+/// Raw mode exports stored NCA bytes and reports skipped materialized trees.
 fn extract_all(
     path: &Path,
     destination: &Path,
     options: &WriterOptions,
+    raw: bool,
 ) -> Result<(usize, Vec<String>), Box<dyn std::error::Error>> {
     let summary = inspect_archive(path, options, IntegrityPolicy::Fast)?;
     let several = summary.applications.len() > 1;
+    let recipes: usize = summary.applications.iter().map(|a| a.recipes.len()).sum();
+    if recipes > 0 {
+        eprintln!("Original package reconstruction available ({recipes} recipes): nxconvert rebuild ARCHIVE.nx EXISTING_FOLDER");
+    } else {
+        eprintln!(
+            "Original package reconstruction unavailable: this archive has no rebuild recipes."
+        );
+    }
+    if !raw
+        && summary
+            .applications
+            .iter()
+            .any(|a| a.snapshots.iter().any(|s| s.content_id.is_some()))
+    {
+        eprintln!("Native extraction supports decrypted IVFC RomFS and single-root BKTR. Encrypted, compressed or sparse RomFS, multilevel BKTR and multi-Data DLC are unsupported; metadata is memory-bounded. Use extract-ncas for the stored NCA files.");
+    }
     let mut jobs: Vec<(String, Option<u64>, [u8; 32], bool)> = Vec::new();
     let mut partial = Vec::new();
     for a in &summary.applications {
@@ -1144,13 +1158,20 @@ fn extract_all(
                 _ => continue,
             };
             let folder = format!("{prefix}{folder}");
-            if !tree {
-                if s.snapshot_type == SnapshotType::Dlc {
-                    partial.push(format!("{folder} skipped (stored as NCA files)"));
-                    continue;
-                }
-                partial.push(format!("{folder} ExeFS only (stored as NCA files)"));
+            if raw && tree {
+                partial.push(format!("{folder} skipped: extracted tree has no raw NCAs"));
+                continue;
             }
+            eprintln!(
+                "{folder}: {}",
+                if tree {
+                    "extracted tree (complete stored files)"
+                } else if raw {
+                    "native NCA files (byte-for-byte export)"
+                } else {
+                    "native ExeFS/RomFS (IVFC verified; BKTR requires exact base; unsupported layouts fail without partial output)"
+                }
+            );
             jobs.push((folder, s.program_id, s.identity, tree));
         }
     }
@@ -1159,19 +1180,28 @@ fn extract_all(
     }
     fs::create_dir(destination)?;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        for (folder, program_id, identity, tree) in &jobs {
+        for (folder, program_id, identity, _tree) in &jobs {
             let shared = jobs.iter().filter(|(other, ..)| other == folder).count() > 1;
             let folder = match (shared, program_id) {
-                (true, Some(id)) => format!("{folder}-{id:016x}"),
+                (true, Some(id)) => {
+                    let variants = jobs
+                        .iter()
+                        .filter(|(other, program, ..)| other == folder && *program == Some(*id))
+                        .count();
+                    if variants > 1 {
+                        format!("{folder}-{id:016x}-{}", &hex(identity)[..16])
+                    } else {
+                        format!("{folder}-{id:016x}")
+                    }
+                }
                 _ => folder.clone(),
             };
             let target = destination.join(&folder);
-            if *tree {
-                fs::create_dir_all(target.parent().unwrap_or(destination))?;
-                extract_tree(path, *identity, &target, options)?;
+            fs::create_dir_all(target.parent().unwrap_or(destination))?;
+            if raw {
+                extract_raw_ncas(path, *identity, &target, options)?;
             } else {
-                fs::create_dir_all(&target)?;
-                extract_exefs(path, *identity, target.join("exefs"), options)?;
+                extract_tree(path, *identity, &target, options)?;
             }
         }
         Ok(())
@@ -1209,6 +1239,15 @@ fn print_contents(path: &Path, options: &WriterOptions) -> Result<(), Box<dyn st
                 hex(&s.identity),
                 a.application_id,
                 s.numeric_version
+            );
+            println!(
+                "@STORAGE\t{}\t{}",
+                hex(&s.identity),
+                if s.content_id.is_some() {
+                    "native"
+                } else {
+                    "tree"
+                }
             );
         }
     }
@@ -1642,9 +1681,14 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
             drop(watch);
             println!("Extracted ExeFS to {}", args[3]);
         }
-        ("extract", 3) => {
+        ("extract" | "extract-ncas", 3) => {
             let watch = ProgressWatch::counter(o.frontend, &options.progress);
-            let (count, partial) = extract_all(Path::new(&args[1]), Path::new(&args[2]), &options)?;
+            let (count, partial) = extract_all(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                &options,
+                args[0] == "extract-ncas",
+            )?;
             drop(watch);
             for note in &partial {
                 println!("Note: {note}");
@@ -1955,6 +1999,7 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 | "contents"
                 | "extract-exefs"
                 | "extract"
+                | "extract-ncas"
                 | "add"
                 | "remove"
                 | "compact"

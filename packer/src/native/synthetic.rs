@@ -227,7 +227,7 @@ fn romfs(files: &[(String, Vec<u8>)]) -> Vec<u8> {
         if files.is_empty() { u32::MAX } else { 0 },
     );
     put_u32(&mut dir_meta, 16, u32::MAX);
-    put_u32(&mut dir_meta, 20, u32::MAX);
+    put_u32(&mut dir_meta, 20, 0);
     let hash_table = u32::MAX.to_le_bytes().to_vec();
     let mut out = vec![0u8; 0x50];
     let mut cursor = 0x50usize;
@@ -301,6 +301,25 @@ fn nca(content_type: u8, program_id: u64, sections: Vec<Section>, encrypted: boo
         let start = align(out.len(), 0x200);
         out.resize(start, 0);
         out.extend_from_slice(&s.body);
+        let virtual_size = align(s.body.len(), 0x200);
+        let relocation_offset = align(virtual_size, 0x4000);
+        if s.bktr {
+            // Real, single-root BKTR fixture. The base supplies zero padding
+            // between the IVFC hash table and RomFS; payload comes from patch.
+            out.resize(start + relocation_offset + 0x8000, 0);
+            let root = start + relocation_offset;
+            put_u32(&mut out, root + 4, 1);
+            put_u64(&mut out, root + 8, virtual_size as u64);
+            let bucket = root + 0x4000;
+            put_u32(&mut out, bucket + 4, 3);
+            put_u64(&mut out, bucket + 8, virtual_size as u64);
+            let data_offset = u64::from_le_bytes(s.hash_data[0x28..0x30].try_into().unwrap());
+            for (i, (offset, patch)) in [(0, 1), (32, 0), (data_offset, 1)].iter().enumerate() {
+                put_u64(&mut out, bucket + 16 + i * 20, *offset);
+                put_u64(&mut out, bucket + 24 + i * 20, *offset);
+                put_u32(&mut out, bucket + 32 + i * 20, *patch);
+            }
+        }
         let end = align(out.len(), 0x200);
         out.resize(end, 0);
         put_u32(&mut out, 0x240 + i * 16, (start / 0x200) as u32);
@@ -312,7 +331,11 @@ fn nca(content_type: u8, program_id: u64, sections: Vec<Section>, encrypted: boo
         out[fs + 4] = if encrypted { 3 } else { 1 };
         out[fs + 8..fs + 0x100].copy_from_slice(&s.hash_data);
         if s.bktr {
+            put_u64(&mut out, fs + 0x100, relocation_offset as u64);
+            put_u64(&mut out, fs + 0x108, 0x8000);
             out[fs + 0x110..fs + 0x114].copy_from_slice(b"BKTR");
+            put_u32(&mut out, fs + 0x114, 1);
+            put_u32(&mut out, fs + 0x118, 3);
             out[fs + 0x130..fs + 0x134].copy_from_slice(b"BKTR");
         }
         let digest = sha256(&out[fs..fs + 0x200]);

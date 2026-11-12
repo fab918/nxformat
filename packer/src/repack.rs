@@ -40,8 +40,8 @@ mod native_add;
 #[path = "reclaim.rs"]
 mod reclaim;
 pub use native_add::{
-    add_native_content, add_native_contents, extract_exefs, extract_tree, read_original_icon,
-    read_snapshot_file_range, NativeAddRequest, NativeAddStats,
+    add_native_content, add_native_contents, extract_exefs, extract_raw_ncas, extract_tree,
+    read_original_icon, read_snapshot_file_range, NativeAddRequest, NativeAddStats,
 };
 pub(crate) use native_add::{add_native_contents_with_recipes, verify_extracted_source_files};
 

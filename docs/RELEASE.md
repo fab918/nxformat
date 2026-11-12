@@ -1,3 +1,14 @@
+# Unreleased
+
+- Fix issue #9: native extraction now includes verified RomFS, BKTR update views
+  and DLC instead of silently exporting ExeFS alone. Multi-Program and version
+  destinations are kept distinct.
+- Show snapshot storage types, native extraction limitations and original-package
+  reconstruction availability. Add **Export raw NCAs…** / `extract-ncas` to export
+  stored NCA files without package reconstruction.
+- Add bounded traversal, streaming IVFC verification and regression coverage for
+  mixed base/patch reads, corruption, paths, memory limits and native roundtrips.
+
 # NXFormat 1.0.3
 
 NXFormat 1.0.3 fixes importing extracted game folders copied through macOS and

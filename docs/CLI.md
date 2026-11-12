@@ -319,3 +319,38 @@ Extracted-tree imports ignore well-formed AppleDouble `._name` sidecars when
 These host metadata files are excluded from discovery, content snapshots and
 source verification. Similarly named game files without the matching metadata
 structure remain part of the import. Original source files are never removed.
+
+## Extracting files and rebuilding packages
+
+`nxconvert contents ARCHIVE.nx` emits `@STORAGE <identity> tree|native` for each
+snapshot. NXConvert shows the same distinction before extraction.
+
+- `nxconvert extract ARCHIVE.nx NEW_FOLDER` exports every snapshot. Materialized
+  trees preserve all their stored files. Native decrypted Program NCAs export
+  ExeFS and RomFS; DLC Data NCAs export RomFS. IVFC integrity is checked across
+  the complete virtual section before exporting its RomFS files. BKTR relocations
+  combine update and base section bytes using the exact `RequiredBase` snapshot
+  identity and Program association; no version is guessed.
+- `nxconvert extract-ncas ARCHIVE.nx NEW_FOLDER` exports the stored NCA files byte
+  for byte, with NX file SHA-256 verification. It needs no rebuild recipe and
+  reports any skipped materialized trees. A native update's complete stored NCA
+  view can also include inherited base NCAs.
+- `nxconvert rebuild ARCHIVE.nx EXISTING_FOLDER [RECIPE_ID...]` reconstructs original
+  packages when the archive contains recipes. Available originals appear under
+  **Original files → Rebuild…** in the desktop application. Without recipes, raw
+  NCA export remains available for native snapshots.
+
+Extraction uses `base/`, `updates/<numeric version>/`, and
+`dlc/<title id>/<numeric version>/`; application, Program and identity suffixes
+prevent collisions between multiple titles, Programs or base variants. Filesystem
+traversal rejects cycles, unsafe paths, case collisions and out-of-range files.
+File payloads and IVFC levels are streamed. Native transport buffers, BKTR tables,
+RomFS metadata, paths and traversal nodes are bounded by the configured memory
+budget (`--memory-mib`) and hard traversal limits.
+
+Supported native layouts are decrypted DNCA, IVFC RomFS and single-root BKTR
+relocation bucket trees. Encrypted content, advanced/multilevel BKTR trees,
+compressed sections, sparse RomFS, ambiguous multi-Data DLC and missing exact
+bases are rejected. Failures or cancellation remove the new extraction folder;
+existing destinations are never overwritten. The desktop application and CLI
+show these limitations and package reconstruction availability before extraction.

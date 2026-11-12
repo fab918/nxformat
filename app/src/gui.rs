@@ -82,6 +82,7 @@ enum SourceKind {
 #[derive(Clone, Default)]
 struct Snapshot {
     identity: String,
+    native: bool,
     kind: String,
     application: u64,
     title: u64,
@@ -1376,6 +1377,7 @@ impl App {
                 ["SNAPSHOT", identity, kind, application, title, version, display, name, ..] => {
                     archive.snapshots.push(Snapshot {
                         identity: identity.into(),
+                        native: false,
                         kind: kind.into(),
                         application: u64::from_str_radix(application, 16).unwrap_or(0),
                         title: u64::from_str_radix(title, 16).unwrap_or(0),
@@ -1383,6 +1385,15 @@ impl App {
                         display: display.into(),
                         name: name.into(),
                     })
+                }
+                ["STORAGE", identity, storage, ..] => {
+                    if let Some(snapshot) = archive
+                        .snapshots
+                        .iter_mut()
+                        .find(|s| s.identity == *identity)
+                    {
+                        snapshot.native = storage == "native";
+                    }
                 }
                 ["RECIPE", id, _, size, _, name, ..] => archive.originals.push(Original {
                     id: id.into(),
