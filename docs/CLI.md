@@ -381,3 +381,6 @@ warn that additional disk use may approach the source NX size. The flags
 `--portable-restore` and `--no-restore` are mutually exclusive. Modified repacks
 preserve original NACP, localized artwork and titles, execution metadata and
 source resources in addition to the declared game-file paths.
+Edited restoration uses a compact metadata/resource store instead of a temporary
+NX the size of the original. `--temp-mib` covers that store and writer staging;
+`metadata_staged_bytes` in the completion log reports the store's actual size.

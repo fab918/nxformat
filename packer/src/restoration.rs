@@ -4,6 +4,8 @@
 use super::*;
 #[path = "restoration_metadata.rs"]
 mod metadata;
+#[path = "restoration_store.rs"]
+mod store;
 use crate::hash::Sha256;
 use crate::import::{ImportLimits, SourceRoot};
 use std::io::{self, BufReader};
@@ -39,6 +41,9 @@ pub struct RestorationStats {
     pub archive_bytes: u64,
     pub recipe_bytes: u64,
     pub referenced_bytes: u64,
+    /// Original metadata and source-resource bytes staged during edited replay.
+    /// Zero for recipe creation and exact unchanged restoration.
+    pub metadata_staged_bytes: u64,
     pub files: usize,
     /// Recipe creation metrics; zero when replaying an existing recipe.
     pub compression_attempts: u64,
@@ -758,6 +763,7 @@ pub fn create_restoration_with_mode(
         archive_bytes: archive.file_size,
         recipe_bytes: size,
         referenced_bytes: referenced,
+        metadata_staged_bytes: 0,
         files: inventory.iter().filter(|n| !n.dir).count(),
         compression_attempts: compression_search.attempts,
         exhaustive_searches: compression_search.exhaustive_searches,
@@ -793,9 +799,9 @@ pub fn inspect_restoration(
 /// Restore unchanged extractions to the exact original NX, including all its
 /// embedded DNSP/DXCI recipes. Edited trees use the saved explicit declarations
 /// and the existing materialized-tree writer, preserving their relative paths.
-/// Edited restoration reserves the full original NX size for its metadata
-/// capsule, even on filesystems with sparse-file support, in addition to the
-/// materialized writer's temporary space. All temporary files are removed on error.
+/// Edited restoration stages only the original metadata and source resources in
+/// a compact file, in addition to the materialized writer's temporary space.
+/// All temporary files are removed on error.
 pub fn restore_extraction(
     directory: impl AsRef<Path>,
     destination: impl AsRef<Path>,
@@ -827,8 +833,7 @@ pub fn restore_extraction(
     input.remaining = original_size
         .saturating_mul(16)
         .saturating_add(options.max_memory_bytes);
-    if original_size > options.max_archive_size || original_size > options.max_temporary_disk_bytes
-    {
+    if original_size > options.max_archive_size {
         return Err(limit_error("restored NX exceeds disk budget"));
     }
     let manifest = text(&mut input, MAX_TEXT.min(options.max_memory_bytes / 8))?;
@@ -867,12 +872,26 @@ pub fn restore_extraction(
     }
     let current = nodes(&root, options)?;
     let unchanged = fingerprint(&current) == expected_fingerprint;
+    if unchanged && original_size > options.max_temporary_disk_bytes {
+        return Err(limit_error("restored NX exceeds disk budget"));
+    }
+    let mut metadata_store = store::Store::new(original_size);
+    let operation_prefix = 48
+        + 8
+        + manifest.len() as u64
+        + 8
+        + 32
+        + expected
+            .iter()
+            .map(|n| 8 + n.path.len() as u64 + 1 + 8)
+            .sum::<u64>();
     let files = current.iter().filter(|n| !n.dir).count();
     let parent = destination
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let (mut output, guard) = unique_temp(parent, OsStr::new(".nxrestore-output"))?;
+    let (file, guard) = unique_temp(parent, OsStr::new(".nxrestore-output"))?;
+    let mut output = file;
     let mut whole = Sha256::new();
     let mut produced = 0u64;
     let mut referenced = 0u64;
@@ -896,9 +915,16 @@ pub fn restore_extraction(
                     if unchanged {
                         whole.update(&buffer[..k]);
                     }
-                    // Literal regions contain the authoritative catalog, media
-                    // and resource blocks, needed even when game files changed.
-                    output.write_all(&buffer[..k])?;
+                    if unchanged {
+                        output.write_all(&buffer[..k])?;
+                    } else {
+                        metadata_store.metadata(
+                            &mut output,
+                            produced + n - left,
+                            &buffer[..k],
+                            options,
+                        )?;
+                    }
                     left -= k as u64;
                 }
                 produced += n;
@@ -1018,9 +1044,6 @@ pub fn restore_extraction(
                     whole.update(&stored);
                     output.write_all(&stored)?;
                 }
-                if !unchanged {
-                    output.seek(SeekFrom::Start(produced + stored_size))?;
-                }
                 produced += stored_size;
                 options.progress.add_done(stored_size);
             }
@@ -1037,7 +1060,9 @@ pub fn restore_extraction(
     {
         return Err(bad("restoration recipe checksum or length mismatch"));
     }
-    output.set_len(original_size)?;
+    if unchanged {
+        output.set_len(original_size)?;
+    }
     let mut modified_output = None;
     if unchanged {
         if whole.finish() != original_digest {
@@ -1048,7 +1073,6 @@ pub fn restore_extraction(
         // Validate the archive before publishing, as well as its exact bytes.
         inspect_archive(&guard.path, options, IntegrityPolicy::Strict)?;
     } else {
-        drop(output);
         let limits = ImportLimits {
             max_manifest_bytes: MAX_TEXT.min(options.max_memory_bytes / 8),
             max_snapshots: 4096,
@@ -1071,13 +1095,26 @@ pub fn restore_extraction(
                 ));
             }
         }
-        let recovered = metadata::recover(&guard.path, &declarations, options)?;
+        metadata_store.sort();
+        let resource_ranges = store::resource_ranges(&guard.path, &metadata_store, options)?;
+        store::collect_resources(
+            &root,
+            &mut metadata_store,
+            &mut output,
+            &resource_ranges,
+            operation_prefix,
+            checksum,
+            options,
+        )?;
+        drop(resource_ranges);
+        drop(output);
+        let recovered = metadata::recover(&guard.path, &metadata_store, &declarations, options)?;
         let mut bounded = options.clone();
         bounded.max_temporary_disk_bytes = options
             .max_temporary_disk_bytes
-            .checked_sub(original_size)
+            .checked_sub(metadata_store.bytes)
             .ok_or_else(|| {
-                limit_error("metadata capsule and modified NX exceed temporary disk budget")
+                limit_error("metadata store and modified NX exceed temporary disk budget")
             })?;
         let (file, candidate) = unique_temp(parent, OsStr::new(".nxrestore-modified"))?;
         drop(file);
@@ -1104,6 +1141,9 @@ pub fn restore_extraction(
             });
         }
         if !plan.metadata_sources.is_empty() {
+            // This private candidate only needs a metadata tail. Never make a
+            // full payload copy just to restore the selected metadata source.
+            bounded.auto_compact_free_percent = 0;
             bounded.max_temporary_disk_bytes = bounded
                 .max_temporary_disk_bytes
                 .saturating_sub(std::fs::metadata(&candidate.path)?.len());
@@ -1126,6 +1166,7 @@ pub fn restore_extraction(
         archive_bytes,
         recipe_bytes,
         referenced_bytes: referenced,
+        metadata_staged_bytes: metadata_store.bytes,
         files,
         compression_attempts: 0,
         exhaustive_searches: 0,
@@ -1279,7 +1320,7 @@ mod tests {
     }
 
     #[test]
-    fn edited_restore_charges_full_capsule_size_and_cleans_up_on_disk_limit() {
+    fn edited_restore_uses_compact_metadata_and_cleans_up_on_disk_limit() {
         let f = fixture();
         let original_size = std::fs::metadata(&f.original).unwrap().len();
         let options = WriterOptions {
@@ -1293,12 +1334,22 @@ mod tests {
                 .unwrap()
                 .unchanged
         );
-        std::fs::write(f.extracted.join("base/romfs/data.bin"), b"modified").unwrap();
+        std::fs::write(f.extracted.join("base/romfs/random.bin"), b"modified").unwrap();
+        let compact = f.dir.join("compact.nx");
+        let stats = restore_extraction(&f.extracted, &compact, &options).unwrap();
+        assert!(!stats.unchanged);
+        assert!(stats.metadata_staged_bytes < original_size / 4);
+        eprintln!("compact metadata benchmark: original_bytes={original_size} new_nx_bytes={} metadata_staged_bytes={}", stats.archive_bytes, stats.metadata_staged_bytes);
+        inspect_archive(&compact, &options, IntegrityPolicy::Strict).unwrap();
         let modified = f.dir.join("modified.nx");
+        let options = WriterOptions {
+            max_temporary_disk_bytes: stats.metadata_staged_bytes,
+            ..options
+        };
         assert!(restore_extraction(&f.extracted, &modified, &options).is_err());
         assert!(!modified.exists());
         assert_eq!(
-            std::fs::read(f.extracted.join("base/romfs/data.bin")).unwrap(),
+            std::fs::read(f.extracted.join("base/romfs/random.bin")).unwrap(),
             b"modified"
         );
         assert!(f.extracted.join(RESTORATION_FILE).is_file());
@@ -1307,6 +1358,75 @@ mod tests {
             .file_name()
             .to_string_lossy()
             .starts_with(".nxrestore")));
+    }
+
+    #[test]
+    fn edited_large_compact_and_portable_recipes_fit_one_output_plus_small_overhead() {
+        let f = fixture();
+        let mut state = 12345u64;
+        let noise: Vec<u8> = (0..16 * 1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        std::fs::write(f.dir.join("source/romfs/random.bin"), &noise).unwrap();
+        drop(noise);
+        let original = f.dir.join("large.nx");
+        crate::cli::run(
+            vec![
+                "pack-tree".into(),
+                f.dir.join("source").to_string_lossy().into_owned(),
+                original.to_string_lossy().into_owned(),
+                "--platform".into(),
+                "switch2".into(),
+                "--no-trail".into(),
+                "--no-compress".into(),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        let original_size = std::fs::metadata(&original).unwrap().len();
+        assert!(original_size > 16 * 1024 * 1024);
+        for portable in [false, true] {
+            let dump = f.dir.join(if portable {
+                "large-portable"
+            } else {
+                "large-compact"
+            });
+            let mut args = vec![
+                "extract".into(),
+                original.to_string_lossy().into_owned(),
+                dump.to_string_lossy().into_owned(),
+            ];
+            if portable {
+                args.push("--portable-restore".into());
+            }
+            crate::cli::run(args, None, None).unwrap();
+            std::fs::write(dump.join("base/romfs/data.bin"), b"one mod").unwrap();
+            let options = WriterOptions {
+                max_temporary_disk_bytes: original_size + 128 * 1024,
+                ..Default::default()
+            };
+            let output = f.dir.join(if portable {
+                "large-portable-mod.nx"
+            } else {
+                "large-compact-mod.nx"
+            });
+            let stats = restore_extraction(&dump, &output, &options).unwrap();
+            assert!(!stats.unchanged);
+            assert!(stats.archive_bytes > 16 * 1024 * 1024);
+            assert!(stats.metadata_staged_bytes < 128 * 1024);
+            assert!(
+                stats.archive_bytes + stats.metadata_staged_bytes
+                    <= options.max_temporary_disk_bytes
+            );
+            inspect_archive(&output, &options, IntegrityPolicy::Strict).unwrap();
+            eprintln!("large compact-store benchmark: portable={portable} original_bytes={original_size} new_nx_bytes={} metadata_staged_bytes={} temporary_budget={}", stats.archive_bytes, stats.metadata_staged_bytes, options.max_temporary_disk_bytes);
+        }
     }
 
     #[test]
@@ -1506,6 +1626,20 @@ mod tests {
             std::fs::read(restored).unwrap(),
             std::fs::read(&f.original).unwrap()
         );
+        std::fs::write(portable.join("base/romfs/random.bin"), b"portable edit").unwrap();
+        let edited = f.dir.join("portable-edited.nx");
+        let stats = restore_extraction(
+            &portable,
+            &edited,
+            &WriterOptions {
+                max_temporary_disk_bytes: std::fs::metadata(&f.original).unwrap().len(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!stats.unchanged);
+        assert!(stats.metadata_staged_bytes < std::fs::metadata(&f.original).unwrap().len() / 4);
+        inspect_archive(&edited, &WriterOptions::default(), IntegrityPolicy::Strict).unwrap();
         assert!(crate::cli::run(
             vec![
                 "extract".into(),

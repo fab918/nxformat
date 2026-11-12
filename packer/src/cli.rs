@@ -1861,12 +1861,12 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
         }
         ("restore", 3) => {
             let watch = ProgressWatch::counter(o.frontend, &options.progress);
-            eprintln!("If files were edited, restoration needs temporary space for the full original NX metadata capsule plus the new NX and writer staging. Sparse-file savings are not assumed; --temp-mib bounds this space.");
+            eprintln!("Edited restoration stages only original metadata and source resources, alongside the new NX and writer staging; no original-size capsule is created. --temp-mib bounds temporary space.");
             let stats = restore_extraction(&args[1], &args[2], &options)?;
             drop(watch);
             println!(
-                "Restored NX: unchanged={} files={} bytes={}",
-                stats.unchanged, stats.files, stats.archive_bytes
+                "Restored NX: unchanged={} files={} bytes={} metadata_staged_bytes={}",
+                stats.unchanged, stats.files, stats.archive_bytes, stats.metadata_staged_bytes
             );
         }
         ("extract" | "extract-ncas", 3) => {
@@ -2243,12 +2243,12 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             return Err("restoration repacks use every declared snapshot; selection flags require an explicit manifest".into());
         }
         let watch = ProgressWatch::counter(o.frontend, &options.progress);
-        eprintln!("If files were edited, restoration needs temporary space for the full original NX metadata capsule plus the new NX and writer staging. Sparse-file savings are not assumed; --temp-mib bounds this space.");
+        eprintln!("Edited restoration stages only original metadata and source resources, alongside the new NX and writer staging; no original-size capsule is created. --temp-mib bounds temporary space.");
         let stats = restore_extraction(&args[1], &args[2], &options)?;
         drop(watch);
         println!(
-            "Restored NX: unchanged={} files={} bytes={}",
-            stats.unchanged, stats.files, stats.archive_bytes
+            "Restored NX: unchanged={} files={} bytes={} metadata_staged_bytes={}",
+            stats.unchanged, stats.files, stats.archive_bytes, stats.metadata_staged_bytes
         );
         return Ok(());
     }

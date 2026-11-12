@@ -88,21 +88,33 @@ not the original encoder. The recipe can approach the original archive size.
 Both modes warn about that possible additional disk cost before extraction;
 `--no-restore` and the desktop checkbox can disable recipe creation.
 
-During an edited repack, literal metadata regions are recovered into a private
-sparse temporary capsule. Game data holes are not used as source content. Native
-media is streamed and SHA-256 checked; resource blocks are retained literally,
-even if originally deduplicated with a game file, then streamed and verified.
-An older recipe missing a required resource fails explicitly instead of silently
-dropping it. No new NX field or extension is introduced.
+During an edited repack, only the header and active metadata tail (tables and
+native media) are retained in a compact private store. An in-memory range map
+translates original NX offsets to packed offsets; no sparse or full-size original
+NX is created. Game payloads, including literal blocks in portable recipes and
+obsolete archive generations, are discarded while the recipe is checked.
 
-The capsule has the original NX's logical size. On filesystems without effective
-sparse-file support it may occupy that full size physically, alongside the new NX
-and writer staging files. Budget for all of these in addition to the extracted
-folder and recipe. `--temp-mib` conservatively charges the capsule's full logical
-size even when sparse holes save physical space; it also bounds the writer's
-remaining temporary space. The CLI and desktop log this warning before restoration.
-A disk-limit or I/O failure removes the temporary output and capsule, while
-retaining the extracted folder and recipe.
+If source resources exist, a second bounded streaming pass copies only their
+original stored blocks, deduplicated by range. Both recipe passes check the same
+SHA-256, and original native media and resources are streamed and independently
+verified before publication. An older recipe missing a required resource fails
+explicitly instead of silently dropping it. No new NX field or extension is
+introduced, and existing restoration recipes remain readable.
+
+Temporary space is the compact metadata/resource store plus the new NX and the
+writer's staging needs. It no longer includes a capsule the size of the original
+NX, and does not depend on sparse-file support. Large original source resources
+still need their actual stored size. `--temp-mib` bounds the combined temporary
+space; the CLI reports `metadata_staged_bytes` for the compact store. A failure
+removes temporary files while retaining the extracted folder and recipe.
+
+For a new NX around 30 GB with small metadata/resources, edited restoration
+normally needs approximately that new NX size plus metadata and staging overhead,
+not a fixed additional 30 GB copy of the original. Multi-pass imports and automatic
+compaction can still increase peak space, so 30 GB is not an unconditional bound.
+The writer streams compressed blocks into its eventual output. The final
+selected-metadata update appends a tail with automatic compaction disabled,
+avoiding a full payload copy.
 
 Level 13 compression reserves additional encoder workspace. A memory budget too
 small for the recipe fails explicitly. RAW NCA export (`extract-ncas`) remains

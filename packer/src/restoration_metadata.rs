@@ -1,5 +1,5 @@
 //! Recover immutable metadata from the literal regions of a verified recipe.
-//! Game blocks may be sparse holes; media and source-resource blocks must be
+//! Original ranges are mapped to a compact store; media and resource blocks are
 //! retained independently, and are checked before the new archive is published.
 use super::*;
 use crate::import::{DeclarationManifest, External, RestoredMetadata};
@@ -145,16 +145,17 @@ fn platform(value: u8) -> Result<Platform, WriterError> {
 
 pub(super) fn recover(
     capsule: &Path,
+    store: &super::store::Store,
     declarations: &DeclarationManifest,
     options: &WriterOptions,
 ) -> Result<Recovered, WriterError> {
     let mut file = File::open(capsule)?;
     let mut budget = MemoryBudget {
-        current: 0,
+        current: store.memory_bytes(),
         peak: 0,
         limit: options.max_memory_bytes / 2,
     };
-    let archive = parse_archive(&mut file, 0, options, &mut budget)?;
+    let archive = parse_archive(&mut store.reader(&mut file), 0, options, &mut budget)?;
     if !archive.optional_global_extensions.is_empty()
         || archive
             .applications
@@ -195,7 +196,7 @@ pub(super) fn recover(
             RegionReader {
                 path: capsule.to_owned(),
                 file: None,
-                offset: m.range.offset,
+                offset: store.translate(m.range.offset, m.size)?,
                 remaining: m.size,
                 digest: m.digest,
                 hash: Some(Sha256::new()),
@@ -307,7 +308,10 @@ pub(super) fn recover(
                         128 + block.checks.len() as u64 * 4,
                         "retained resource block descriptors",
                     )?;
-                    blocks.push(block.clone());
+                    let mut block = block.clone();
+                    block.range.offset =
+                        store.translate(block.range.offset, block.stored_size as u64)?;
+                    blocks.push(block);
                 }
                 entries.push(EntryInput::file(
                     entry.name.clone(),
@@ -570,29 +574,41 @@ mod tests {
         let before = fingerprint(&original, &options);
         assert_eq!(before.1, 0);
         assert_eq!(before.2.len(), 1);
-        let dump = dir.join("dump");
-        crate::cli::run(
-            vec![
-                "extract".into(),
-                original.to_string_lossy().into_owned(),
-                dump.to_string_lossy().into_owned(),
-            ],
-            None,
-            None,
-        )
-        .unwrap();
-        std::fs::write(
-            dump.join("base/romfs/shared.bin"),
-            b"a resized mod; source resource must retain original bytes",
-        )
-        .unwrap();
-        let modified = dir.join("modified.nx");
-        super::super::restore_extraction(&dump, &modified, &options).unwrap();
-        inspect_archive(&modified, &options, IntegrityPolicy::Strict).unwrap();
-        assert_eq!(fingerprint(&modified, &options), before);
-        let resources =
-            inspect_source_resources(&modified, Platform::Switch2, APP, &options).unwrap();
-        assert_eq!(resources[0].1[0].digest, sha256(&data));
+        for portable in [false, true] {
+            let dump = dir.join(if portable { "portable-dump" } else { "dump" });
+            crate::cli::run(
+                {
+                    let mut args = vec![
+                        "extract".into(),
+                        original.to_string_lossy().into_owned(),
+                        dump.to_string_lossy().into_owned(),
+                    ];
+                    if portable {
+                        args.push("--portable-restore".into());
+                    }
+                    args
+                },
+                None,
+                None,
+            )
+            .unwrap();
+            std::fs::write(
+                dump.join("base/romfs/shared.bin"),
+                b"a resized mod; source resource must retain original bytes",
+            )
+            .unwrap();
+            let modified = dir.join(if portable {
+                "portable-modified.nx"
+            } else {
+                "modified.nx"
+            });
+            super::super::restore_extraction(&dump, &modified, &options).unwrap();
+            inspect_archive(&modified, &options, IntegrityPolicy::Strict).unwrap();
+            assert_eq!(fingerprint(&modified, &options), before);
+            let resources =
+                inspect_source_resources(&modified, Platform::Switch2, APP, &options).unwrap();
+            assert_eq!(resources[0].1[0].digest, sha256(&data));
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

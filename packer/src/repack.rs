@@ -482,21 +482,38 @@ fn checked_range(
     }
     Ok(start..end)
 }
-fn read_exact_at(file: &mut File, offset: u64, bytes: &mut [u8]) -> Result<(), WriterError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileExt;
-        file.read_exact_at(bytes, offset)?;
+// Read-only archive access also supports a compact restoration metadata store.
+trait ArchiveRead {
+    fn archive_len(&self) -> Result<u64, WriterError>;
+    fn read_at(&mut self, offset: u64, bytes: &mut [u8]) -> Result<(), WriterError>;
+}
+impl ArchiveRead for File {
+    fn archive_len(&self) -> Result<u64, WriterError> {
+        Ok(self.metadata()?.len())
     }
-    #[cfg(not(unix))]
-    {
-        file.seek(SeekFrom::Start(offset))?;
-        file.read_exact(bytes)?;
+    fn read_at(&mut self, offset: u64, bytes: &mut [u8]) -> Result<(), WriterError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            self.read_exact_at(bytes, offset)?;
+        }
+        #[cfg(not(unix))]
+        {
+            self.seek(SeekFrom::Start(offset))?;
+            self.read_exact(bytes)?;
+        }
+        Ok(())
     }
-    Ok(())
+}
+fn read_exact_at(
+    file: &mut impl ArchiveRead,
+    offset: u64,
+    bytes: &mut [u8],
+) -> Result<(), WriterError> {
+    file.read_at(offset, bytes)
 }
 fn read_vec_at(
-    file: &mut File,
+    file: &mut impl ArchiveRead,
     offset: u64,
     size: u64,
     max: u64,
@@ -516,7 +533,7 @@ fn read_vec_at(
     Ok(result)
 }
 fn hash_range(
-    file: &mut File,
+    file: &mut impl ArchiveRead,
     offset: u64,
     size: u64,
     options: &WriterOptions,
@@ -559,7 +576,7 @@ struct SourceHeader {
     active_slot: usize,
 }
 
-fn zero_range(file: &mut File, offset: u64, size: u64) -> Result<(), WriterError> {
+fn zero_range(file: &mut impl ArchiveRead, offset: u64, size: u64) -> Result<(), WriterError> {
     let mut remaining = size;
     let mut at = offset;
     let mut buffer = [0u8; 4096];
@@ -609,8 +626,11 @@ fn decode_slot(bytes: &[u8]) -> Result<Option<SourceHeader>, WriterError> {
     }))
 }
 
-fn parse_header(file: &mut File, options: &WriterOptions) -> Result<SourceHeader, WriterError> {
-    let physical_size = file.metadata()?.len();
+fn parse_header(
+    file: &mut impl ArchiveRead,
+    options: &WriterOptions,
+) -> Result<SourceHeader, WriterError> {
+    let physical_size = file.archive_len()?;
     if !(DATA_START..=MAX_ARCHIVE_SIZE).contains(&physical_size) {
         return Err(bad("source archive size is outside supported bounds"));
     }
@@ -738,7 +758,7 @@ fn parse_header(file: &mut File, options: &WriterOptions) -> Result<SourceHeader
         offset: u64,
         size: u64,
         what: &str,
-        file: &mut File,
+        file: &mut impl ArchiveRead,
     ) -> Result<(), WriterError> {
         let expected = align_up(*cursor, 16)?;
         if offset != expected {
@@ -821,7 +841,7 @@ fn parse_header(file: &mut File, options: &WriterOptions) -> Result<SourceHeader
 }
 
 fn parse_media(
-    file: &mut File,
+    file: &mut impl ArchiveRead,
     h: SourceHeader,
     archive: u8,
 ) -> Result<Vec<SourceMedia>, WriterError> {
@@ -904,7 +924,7 @@ fn parse_media(
 }
 
 fn parse_blocks(
-    file: &mut File,
+    file: &mut impl ArchiveRead,
     h: SourceHeader,
     options: &WriterOptions,
     budget: &mut MemoryBudget,
@@ -1042,7 +1062,7 @@ fn catalog_string(
 }
 
 fn parse_manifest(
-    file: &mut File,
+    file: &mut impl ArchiveRead,
     h: SourceHeader,
     blocks: &[SourceBlock],
     options: &WriterOptions,
@@ -2555,7 +2575,7 @@ fn validate_snapshot_identities_within(
 }
 
 fn parse_archive(
-    file: &mut File,
+    file: &mut impl ArchiveRead,
     archive_id: u8,
     options: &WriterOptions,
     budget: &mut MemoryBudget,

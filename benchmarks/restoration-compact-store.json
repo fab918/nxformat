@@ -1,0 +1,16 @@
+{
+  "fixture": "Synthetic 16 MiB pseudorandom RomFS payload, RAW original NX, one small edited file",
+  "command": "cargo test --locked --manifest-path packer/Cargo.toml edited_large_compact_and_portable --lib -- --nocapture",
+  "original_nx_bytes": 16927460,
+  "modified_nx_bytes": 16794644,
+  "metadata_staged_bytes": 16772,
+  "enforced_temporary_budget_bytes": 17058532,
+  "recipe_modes_tested": ["compact", "portable"],
+  "checks": [
+    "Modified reconstruction succeeds within original NX size plus 128 KiB",
+    "Metadata store is smaller than 128 KiB",
+    "New NX is verified with Strict integrity policy",
+    "No sparse or original-size NX capsule is created"
+  ],
+  "limitations": "This records an enforced budget and metadata file size, not sampled filesystem peak usage. It is synthetic and is not a 30 GB game benchmark. Metadata and resource sizes depend on the archive. Multi-pass imports can need additional staging."
+}
