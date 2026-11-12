@@ -13,6 +13,7 @@ pub struct ProgramSpec {
     pub build_id: [u8; 32],
     /// Add a RomFS section whose PatchInfo carries a BKTR header.
     pub bktr: bool,
+    /// Zero omits the Program RomFS section (ExeFS-only fixture).
     pub romfs_bytes: usize,
     /// Optional artificial NPDM for native-loader association tests. This does
     /// not make the generated NSO executable or prove emulator compatibility.
@@ -399,7 +400,9 @@ pub fn title_entries_custom(
             ),
         ])];
         let image = romfs(&[("data.bin".into(), vec![spec.seed; p.romfs_bytes])]);
-        sections.push(ivfc_section(image, p.bktr));
+        if p.romfs_bytes != 0 {
+            sections.push(ivfc_section(image, p.bktr));
+        }
         contents.push((1, nca(0, p.program_id, sections, enc)));
     }
     if let Some(c) = &spec.control {

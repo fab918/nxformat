@@ -164,3 +164,28 @@ a multi-Program title where available, and localized native metadata:
 Synthetic fixtures establish the tested container behavior, not general Switch
 or emulator compatibility. Record results against this matrix before broad
 compatibility or gameplay-performance claims.
+
+## Non-reproducible restoration frames
+
+`restore_unreproducible.py` streams a valid NX with unique checksum-enabled Zstd
+frames, exercising the exact-byte literal fallback and archive-wide discovery
+cap. The default dataset is 3 GiB on disk and requires about 10 GiB of temporary
+space. It uses Python 3.14 and `google-crc32c`:
+
+```sh
+uv run --python 3.14 --with google-crc32c benchmarks/restore_unreproducible.py --gib 3 --report result.json
+```
+
+The report includes measured creation time and encoder attempts. The legacy
+worst-case count is an analytical comparison, not a timed legacy run.
+
+A single local run on Apple M4 Pro (2026-11-12), saved in
+`restoration-unreproducible-m4pro.json`, used a 3,222,254,240-byte archive with
+3,072 unique foreign frames. Recipe creation took 48.67 seconds, with 3,328
+encoder attempts and four exhaustive searches. All 3,072 frames used exact
+literal fallback; the recipe was 3,222,318,133 bytes. The old maximum would have
+been 199,680 attempts; that is an analytical count, not a measured old runtime.
+Strict source verification precedes the creation timer. Small checksum-enabled
+and checksum-free archives were also restored byte for byte. `--verify` enables
+full restoration verification in the benchmark and requires an extra archive's
+worth of temporary disk.

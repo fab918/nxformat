@@ -1,5 +1,12 @@
 # Unreleased
 
+- Keep successfully extracted files when optional restoration-recipe creation
+  fails. Add `extract --no-restore` and a desktop checkbox, enabled by default.
+- Bound encoder discovery to four exhaustive searches per archive and cache
+  successful parameters; unmatched frames always retain original literal bytes.
+- Extract verified ExeFS from Programs without RomFS and resolve data-only
+  updates through exact Program dependencies.
+
 - Full extraction keeps `.nxrestore.zst`, compressed at Zstd level 13. Unchanged
   repacks restore the exact NX and retain embedded original-package recipes.
   Edited repacks keep file paths and snapshot associations, with no promise to

@@ -79,3 +79,35 @@ bytes. The bundled Zstd dependency is pinned.
 Level 13 compression reserves additional encoder workspace. A memory budget too
 small for the recipe fails explicitly. RAW NCA export (`extract-ncas`) remains
 available without creating a restoration recipe.
+
+## Extraction without a restoration recipe
+
+Recipe creation remains enabled by default. Use
+`nxconvert extract GAME.nx NEW_FOLDER --no-restore` or clear **Keep restoration
+recipe after extraction** in the desktop application to skip it.
+
+Game-file extraction and recipe creation are separate phases. A failed file
+extraction still removes its incomplete output. Once the game files have been
+successfully extracted, a memory/disk/I/O/cancellation error creating the recipe
+keeps those files and emits a warning. A missing recipe means exact NX/package
+restoration is unavailable; normal tree import remains possible.
+
+Program NCAs without a RomFS section export their verified ExeFS and report that
+RomFS is absent. Data-only updates resolve an inherited Program through exact
+RequiredBase identities and the same application/Program association. Unsupported
+BKTR layouts still fail explicitly.
+
+## Bounded encoder discovery
+
+Recipe creation caches up to four exact encoder configurations and allows at
+most four exhaustive searches for the whole archive. A known configuration is
+always compared byte for byte with the original frame. If discovery has exhausted
+its budget or no candidate matches, the original stored bytes are retained as a
+literal; a similar or approximately recompressed frame is never used.
+
+`benchmarks/restore_unreproducible.py` builds a streamed, valid, multi-GiB archive
+of unique checksum-enabled Zstd frames that the NX encoder cannot reproduce. The
+benchmark reports physical/logical archive sizes, creation time, compression
+attempts, exhaustive searches and literal fallback blocks. Run it with Python
+3.14 and `google-crc32c` as described in the script. It uses bounded payload memory
+and cleans up its temporary source, extracted data and recipe automatically.

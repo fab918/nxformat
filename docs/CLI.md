@@ -368,3 +368,9 @@ repacked as materialized views with the saved application/Program/version
 associations; the original DNSP byte-exact reconstruction is no longer promised
 and stale package recipes are not embedded. See [RESTORATION.md](RESTORATION.md)
 for the format, limits and tested roundtrips.
+
+`extract ... --no-restore` skips the optional restoration recipe. The desktop
+application exposes the same choice. Failure to create a recipe warns and keeps
+the already extracted files; failure while extracting the files still removes
+incomplete output. ExeFS-only Program NCAs are exported with an explicit missing
+RomFS notice, and data-only updates use their exact inherited Program dependency.

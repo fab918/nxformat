@@ -150,7 +150,7 @@ nxconvert contents ARCHIVE.nx (@APP, @SNAPSHOT, @STORAGE, @RESOURCE, @RECIPE, @R
 nxconvert restore EXTRACTED_FOLDER NEW_ARCHIVE.nx (uses .nxrestore.zst; pack-tree detects it automatically)\n\
 nxconvert extract-exefs ARCHIVE.nx SNAPSHOT_IDENTITY NEW_FOLDER\n\
 nxconvert extract-ncas ARCHIVE.nx NEW_FOLDER (raw native NCA files, no package reconstruction)\n\
-nxconvert extract ARCHIVE.nx NEW_FOLDER (every snapshot as a dump: base, updates/<version>, dlc/<title>/<version>)\n\
+nxconvert extract ARCHIVE.nx NEW_FOLDER [--no-restore] (every snapshot as a dump: base, updates/<version>, dlc/<title>/<version>)\n\
 nxconvert add ARCHIVE.nx SOURCE... [--no-recipe [--omit-firmware]] (add updates and DLC in place, with rebuild recipes by default)\n\
 nxconvert add-tree ARCHIVE.nx PACKAGE [--platform switch1|switch2] [--update-version N] (add extracted trees in place: updates/<version>/ and dlc/ folders, or with --update-version one update folder holding exefs/ and romfs/)\n\
 nxconvert remove ARCHIVE.nx SNAPSHOT_IDENTITY... (remove in place)\n\
@@ -191,6 +191,7 @@ struct Options {
     /// pack-nup, automatic pack-tree, add-tree: keep no declarations,
     /// assumptions or receipt next to the archive.
     no_trail: bool,
+    no_restore: bool,
     /// add-tree: the folder is one update tree of this version.
     update_version: Option<u32>,
     tree_roots: std::collections::BTreeSet<String>,
@@ -222,6 +223,10 @@ fn parse(args: Vec<String>) -> Result<(Vec<String>, Options), Box<dyn std::error
         }
         if a == "--omit-firmware" {
             o.omit_firmware = true;
+            continue;
+        }
+        if a == "--no-restore" {
+            o.no_restore = true;
             continue;
         }
         if a == "--no-trail" {
@@ -1117,8 +1122,14 @@ fn extract_all(
     destination: &Path,
     options: &WriterOptions,
     raw: bool,
+    restore: bool,
 ) -> Result<(usize, Vec<String>), Box<dyn std::error::Error>> {
-    let summary = inspect_archive(path, options, IntegrityPolicy::Fast)?;
+    // Final extracted files are not staging data. A zero temporary budget
+    // may disable the optional recipe without disabling read-only extraction.
+    let mut extraction_options = options.clone();
+    extraction_options.max_temporary_disk_bytes =
+        extraction_options.max_temporary_disk_bytes.max(256);
+    let summary = inspect_archive(path, &extraction_options, IntegrityPolicy::Fast)?;
     let several = summary.applications.len() > 1;
     let recipes: usize = summary.applications.iter().map(|a| a.recipes.len()).sum();
     if recipes > 0 {
@@ -1153,7 +1164,7 @@ fn extract_all(
                 }
                 SnapshotType::Dlc => format!(
                     "dlc/{:016x}/{}",
-                    dlc_title(path, s, options),
+                    dlc_title(path, s, &extraction_options),
                     s.numeric_version
                 ),
                 _ => continue,
@@ -1180,8 +1191,8 @@ fn extract_all(
         return Err("the archive has no snapshot that can be extracted".into());
     }
     fs::create_dir(destination)?;
+    let mut exported = Vec::new();
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        let mut exported = Vec::new();
         for (folder, program_id, identity, _tree) in &jobs {
             let shared = jobs.iter().filter(|(other, ..)| other == folder).count() > 1;
             let folder = match (shared, program_id) {
@@ -1202,12 +1213,21 @@ fn extract_all(
             exported.push((*identity, folder.clone()));
             fs::create_dir_all(target.parent().unwrap_or(destination))?;
             if raw {
-                extract_raw_ncas(path, *identity, &target, options)?;
+                extract_raw_ncas(path, *identity, &target, &extraction_options)?;
             } else {
-                extract_tree(path, *identity, &target, options)?;
+                extract_tree(path, *identity, &target, &extraction_options)?;
             }
         }
-        if !raw {
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(destination);
+    }
+    result?;
+    // File extraction is now committed. An optional recipe failure must never
+    // remove already verified game files, even for cancellation or low budgets.
+    if !raw && restore {
+        let recipe_result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let manifest = restoration_manifest(path, destination, &summary, &exported, options)?;
             let stats = create_restoration(path, destination, &exported, &manifest, options)?;
             println!(
@@ -1216,13 +1236,13 @@ fn extract_all(
                 stats.recipe_bytes,
                 stats.referenced_bytes
             );
+            Ok(())
+        })();
+        if let Err(error) = recipe_result {
+            partial.push(format!("Restoration recipe not created: {error}. Extracted files were kept; exact NX/package restoration is unavailable."));
         }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(destination);
     }
-    result.map(|()| (jobs.len(), partial))
+    Ok((jobs.len(), partial))
 }
 /// Exact identities and explicit roots make edited roundtrips independent of
 /// folder-name guesses, including multiple applications and Programs.
@@ -1834,10 +1854,11 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
                 Path::new(&args[2]),
                 &options,
                 args[0] == "extract-ncas",
+                !o.no_restore,
             )?;
             drop(watch);
             for note in &partial {
-                println!("Note: {note}");
+                eprintln!("Warning: {note}");
             }
             println!("Extracted {count} snapshots to {}", args[2]);
         }
@@ -2112,6 +2133,9 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let (mut args, o) = parse(argv)?;
+    if o.no_restore && args.first().map(String::as_str) != Some("extract") {
+        return Err("--no-restore applies to extract only".into());
+    }
     if !o.tree_roots.is_empty() && (args.len() != 3 || args[0] != "pack-tree") {
         return Err("--tree-root applies to automatic pack-tree only".into());
     }

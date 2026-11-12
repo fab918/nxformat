@@ -1588,33 +1588,7 @@ fn native_exefs(
         ..InventoryOptions::default()
     };
     let metadata_budget = Rc::new(Cell::new(budget.limit.saturating_sub(budget.current)));
-    let report = inspect_base(
-        path,
-        file,
-        archive,
-        snapshot,
-        &inventory_options,
-        options,
-        &mut NativeAddStats::default(),
-        &metadata_budget,
-    )?;
-    let program = report
-        .metas
-        .iter()
-        .find(|m| m.meta.meta_content_id == Some(snapshot.snapshot.content_id))
-        .and_then(|m| {
-            m.meta
-                .programs
-                .iter()
-                .find(|p| Some(p.program_id) == snapshot.program_id)
-        })
-        .ok_or_else(|| invalid("the snapshot has no standalone Program NCA to extract"))?;
-    let name = format!("{}.nca", crate::import::hex(&program.content_id));
-    let index = snapshot_entries(archive, snapshot)?
-        .into_iter()
-        .find(|(path, _)| path.eq_ignore_ascii_case(&name))
-        .map(|(_, index)| index)
-        .ok_or_else(|| bad("snapshot Program NCA is absent"))?;
+    let (index, _) = extraction::content_file(path, archive, snapshot, budget, options)?;
     let size = archive.files[index as usize].size;
     let mut reader = snapshot_file_reader(file, archive, index, options)?;
     let mut source = Source::new(&mut reader, size).with_metadata_budget(metadata_budget);

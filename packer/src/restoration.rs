@@ -30,6 +30,10 @@ pub struct RestorationStats {
     pub recipe_bytes: u64,
     pub referenced_bytes: u64,
     pub files: usize,
+    /// Recipe creation metrics; zero when replaying an existing recipe.
+    pub compression_attempts: u64,
+    pub exhaustive_searches: u32,
+    pub literal_fallback_blocks: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,26 +180,72 @@ fn compression(bytes: &[u8], level: i32, window: u32) -> Result<Vec<u8>, WriterE
     c.set_parameter(zstd::zstd_safe::CParameter::DictIdFlag(false))?;
     Ok(c.compress(bytes)?)
 }
-fn find_compression(
-    logical: &[u8],
-    stored: &[u8],
-    last: &mut (i32, u32),
-) -> Result<Option<(i32, u32)>, WriterError> {
-    if compression(logical, last.0, last.1)? == stored {
-        return Ok(Some(*last));
-    }
-    for level in [3, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] {
-        for window in [20, 16, 17, 18, 19] {
-            if (level, window) == *last {
-                continue;
-            }
-            if compression(logical, level, window)? == stored {
-                *last = (level, window);
-                return Ok(Some(*last));
-            }
+/// Cache common encodings, but bound discovery work for the whole archive.
+/// Foreign encodings may remain literal; exact bytes always win over size.
+struct CompressionSearch {
+    cached: Vec<(i32, u32)>,
+    searches_left: u32,
+    attempts: u64,
+    exhaustive_searches: u32,
+    literal_fallback_blocks: u64,
+}
+impl Default for CompressionSearch {
+    fn default() -> Self {
+        Self {
+            cached: vec![(3, 20)],
+            searches_left: 4,
+            attempts: 0,
+            exhaustive_searches: 0,
+            literal_fallback_blocks: 0,
         }
     }
-    Ok(None)
+}
+impl CompressionSearch {
+    fn matches(
+        &mut self,
+        logical: &[u8],
+        stored: &[u8],
+        params: (i32, u32),
+        options: &WriterOptions,
+    ) -> Result<bool, WriterError> {
+        cancelled(options)?;
+        self.attempts += 1;
+        Ok(compression(logical, params.0, params.1)? == stored)
+    }
+    fn find(
+        &mut self,
+        logical: &[u8],
+        stored: &[u8],
+        options: &WriterOptions,
+    ) -> Result<Option<(i32, u32)>, WriterError> {
+        for i in 0..self.cached.len() {
+            let params = self.cached[i];
+            if self.matches(logical, stored, params, options)? {
+                self.cached.remove(i);
+                self.cached.insert(0, params);
+                return Ok(Some(params));
+            }
+        }
+        if self.searches_left != 0 {
+            self.searches_left -= 1;
+            self.exhaustive_searches += 1;
+            for level in [3, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] {
+                for window in [20, 16, 17, 18, 19] {
+                    let params = (level, window);
+                    if self.cached.contains(&params) {
+                        continue;
+                    }
+                    if self.matches(logical, stored, params, options)? {
+                        self.cached.insert(0, params);
+                        self.cached.truncate(4);
+                        return Ok(Some(params));
+                    }
+                }
+            }
+        }
+        self.literal_fallback_blocks += 1;
+        Ok(None)
+    }
 }
 
 // Native exclusive renames also work on removable filesystems without hard
@@ -535,7 +585,7 @@ pub fn create_restoration(
     let mut logical = Vec::new();
     let mut decoder = zstd::bulk::Decompressor::new()?;
     decoder.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(20))?;
-    let mut last = (3, 20);
+    let mut compression_search = CompressionSearch::default();
     let mut referenced = 0;
     options.progress.add_total(archive.file_size);
     for (id, block) in ordered {
@@ -580,7 +630,7 @@ pub fn create_restoration(
             if block.codec == 0 {
                 Some((0, 0))
             } else {
-                find_compression(&logical, &original, &mut last)?
+                compression_search.find(&logical, &original, options)?
             }
         } else {
             None
@@ -657,6 +707,9 @@ pub fn create_restoration(
         recipe_bytes: size,
         referenced_bytes: referenced,
         files: inventory.iter().filter(|n| !n.dir).count(),
+        compression_attempts: compression_search.attempts,
+        exhaustive_searches: compression_search.exhaustive_searches,
+        literal_fallback_blocks: compression_search.literal_fallback_blocks,
     })
 }
 
@@ -806,7 +859,7 @@ pub fn restore_extraction(
                     || logical_size > 1024 * 1024
                     || logical_size > options.max_memory_bytes / 16
                     || stored_size == 0
-                    || stored_size > logical_size
+                    || stored_size > logical_size + 64 * 1024
                     || stored_size > original_size.saturating_sub(produced)
                 {
                     return Err(bad("invalid restoration block size"));
@@ -967,6 +1020,9 @@ pub fn restore_extraction(
         recipe_bytes,
         referenced_bytes: referenced,
         files,
+        compression_attempts: 0,
+        exhaustive_searches: 0,
+        literal_fallback_blocks: 0,
     })
 }
 
@@ -1153,5 +1209,91 @@ mod tests {
         let output = f.dir.join("bad.nx");
         assert!(restore_extraction(&f.extracted, &output, &WriterOptions::default()).is_err());
         assert!(!output.exists());
+    }
+    #[test]
+    fn optional_recipe_failure_and_opt_out_keep_valid_extractions() {
+        let f = fixture();
+        for (name, flags, warning) in [
+            ("low-memory", vec!["--memory-mib", "64"], true),
+            ("low-disk", vec!["--temp-mib", "0"], true),
+            ("disabled", vec!["--no-restore", "--temp-mib", "0"], false),
+        ] {
+            let output = f.dir.join(name);
+            let messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured = messages.clone();
+            let mut args = vec![
+                "extract".into(),
+                f.original.to_string_lossy().into_owned(),
+                output.to_string_lossy().into_owned(),
+            ];
+            args.extend(flags.into_iter().map(String::from));
+            crate::cli::run(
+                args,
+                Some(Arc::new(move |_, line| {
+                    captured.lock().unwrap().push(line.to_owned())
+                })),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(output.join("base/romfs/random.bin")).unwrap(),
+                std::fs::read(f.extracted.join("base/romfs/random.bin")).unwrap()
+            );
+            assert!(output.join("base/exefs/main").is_file());
+            assert!(!output.join(RESTORATION_FILE).exists());
+            assert_eq!(
+                messages
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.contains("Restoration recipe not created")),
+                warning
+            );
+        }
+        assert!(crate::cli::run(
+            vec![
+                "contents".into(),
+                f.original.to_string_lossy().into_owned(),
+                "--no-restore".into()
+            ],
+            None,
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn compression_discovery_is_cached_bounded_and_never_approximate() {
+        let options = WriterOptions::default();
+        let mut search = CompressionSearch::default();
+        for value in 0..64u8 {
+            let logical = vec![value; 4096];
+            let mut foreign = zstd::bulk::Compressor::new(3).unwrap();
+            foreign
+                .set_parameter(zstd::zstd_safe::CParameter::ChecksumFlag(true))
+                .unwrap();
+            let stored = foreign.compress(&logical).unwrap();
+            assert!(search.find(&logical, &stored, &options).unwrap().is_none());
+        }
+        assert_eq!(search.exhaustive_searches, 4);
+        assert_eq!(search.literal_fallback_blocks, 64);
+        assert!(search.attempts <= 4 * 65 + 64);
+        let logical = crate::import::synthetic::nso(3, false);
+        let stored = compression(&logical, 3, 20).unwrap();
+        let attempts = search.attempts;
+        let params = search.find(&logical, &stored, &options).unwrap().unwrap();
+        assert_eq!(compression(&logical, params.0, params.1).unwrap(), stored);
+        assert_eq!(search.attempts, attempts + 1);
+        // A newly discovered nondefault encoder is tried first on reuse.
+        let mut fresh = CompressionSearch::default();
+        let stored = compression(&logical, 13, 16).unwrap();
+        let params = fresh.find(&logical, &stored, &options).unwrap().unwrap();
+        assert_eq!(compression(&logical, params.0, params.1).unwrap(), stored);
+        let attempts = fresh.attempts;
+        assert_eq!(
+            fresh.find(&logical, &stored, &options).unwrap(),
+            Some(params)
+        );
+        assert_eq!(fresh.attempts, attempts + 1);
     }
 }

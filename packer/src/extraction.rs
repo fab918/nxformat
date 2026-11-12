@@ -14,59 +14,95 @@ fn parse(reader: &mut NativeReader<'_>) -> Result<ParsedNca, WriterError> {
         .map_err(|_| bad("invalid or encrypted native NCA header"))
 }
 
-fn content_file(
+/// Resolve the Program actually supplied by a snapshot. A data-only update
+/// inherits it through exact RequiredBase identities, never by version/name.
+pub(super) fn content_file<'a>(
     path: &Path,
-    archive: &SourceArchive,
-    snapshot: &SourceSnapshot,
+    archive: &'a SourceArchive,
+    snapshot: &'a SourceSnapshot,
     budget: &MemoryBudget,
     options: &WriterOptions,
-) -> Result<u32, WriterError> {
-    let mut file = File::open(path)?;
-    let report = inspect_base(
-        path,
-        &mut file,
-        archive,
-        snapshot,
-        &InventoryOptions::default(),
-        options,
-        &mut NativeAddStats::default(),
-        &Rc::new(Cell::new(budget.limit.saturating_sub(budget.current))),
-    )?;
-    let meta = report
-        .metas
-        .iter()
-        .find(|m| m.meta.meta_content_id == Some(snapshot.snapshot.content_id))
-        .ok_or_else(|| bad("snapshot CNMT is absent"))?;
-    let id = if snapshot.snapshot.snapshot_type == SnapshotType::Dlc as u8 {
-        let mut data = meta
-            .meta
-            .contents
-            .iter()
-            .filter(|r| r.record_type == native::ContentRecordType::Data);
-        let id = data
-            .next()
-            .ok_or_else(|| invalid("DLC has no Data NCA"))?
-            .content_id;
-        if data.next().is_some() {
-            return Err(invalid(
-                "multiple DLC Data NCAs are not supported; export raw NCAs",
-            ));
+) -> Result<(u32, &'a SourceSnapshot), WriterError> {
+    let mut current = snapshot;
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert(current.snapshot.identity) {
+            return Err(bad("native Program inheritance cycle"));
         }
-        id
-    } else {
-        meta.meta
-            .programs
+        let mut file = File::open(path)?;
+        let report = inspect_base(
+            path,
+            &mut file,
+            archive,
+            current,
+            &InventoryOptions::default(),
+            options,
+            &mut NativeAddStats::default(),
+            &Rc::new(Cell::new(budget.limit.saturating_sub(budget.current))),
+        )?;
+        let meta = report
+            .metas
             .iter()
-            .find(|p| Some(p.program_id) == snapshot.program_id)
-            .ok_or_else(|| bad("snapshot Program NCA association is absent"))?
-            .content_id
-    };
-    let name = format!("{}.nca", crate::import::hex(&id));
-    snapshot_entries(archive, snapshot)?
-        .into_iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(&name))
-        .map(|(_, id)| id)
-        .ok_or_else(|| bad("snapshot content NCA is absent"))
+            .find(|m| m.meta.meta_content_id == Some(current.snapshot.content_id))
+            .ok_or_else(|| bad("snapshot CNMT is absent"))?;
+        let id = if current.snapshot.snapshot_type == SnapshotType::Dlc as u8 {
+            let mut data = meta
+                .meta
+                .contents
+                .iter()
+                .filter(|r| r.record_type == native::ContentRecordType::Data);
+            let id = data
+                .next()
+                .ok_or_else(|| invalid("DLC has no Data NCA"))?
+                .content_id;
+            if data.next().is_some() {
+                return Err(invalid(
+                    "multiple DLC Data NCAs are not supported; export raw NCAs",
+                ));
+            }
+            Some(id)
+        } else {
+            meta.meta
+                .programs
+                .iter()
+                .find(|p| Some(p.program_id) == current.program_id)
+                .map(|p| p.content_id)
+        };
+        if let Some(id) = id {
+            let name = format!("{}.nca", crate::import::hex(&id));
+            let file = snapshot_entries(archive, current)?
+                .into_iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(&name))
+                .map(|(_, id)| id)
+                .ok_or_else(|| bad("snapshot content NCA is absent"))?;
+            return Ok((file, current));
+        }
+        if current.snapshot.snapshot_type != SnapshotType::Update as u8
+            && current.snapshot.snapshot_type != SnapshotType::StandaloneUpdate as u8
+        {
+            return Err(bad("snapshot Program NCA association is absent"));
+        }
+        let mut dependencies = current
+            .snapshot
+            .dependencies
+            .iter()
+            .filter(|d| d.kind == DependencyKind::RequiredBase);
+        let dependency = dependencies
+            .next()
+            .ok_or_else(|| bad("inherited Program requires its exact base snapshot"))?;
+        if dependencies.next().is_some() {
+            return Err(bad("ambiguous native Program inheritance"));
+        }
+        current = archive
+            .snapshots
+            .iter()
+            .find(|s| {
+                s.snapshot.identity == dependency.target_snapshot_identity
+                    && s.key == snapshot.key
+                    && s.program_id == snapshot.program_id
+            })
+            .ok_or_else(|| bad("inherited Program base snapshot is absent"))?;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -554,17 +590,33 @@ fn native_view(
             "native extraction transport exceeds memory budget",
         ));
     }
-    let index = content_file(path, archive, snapshot, budget, options)?;
+    let (index, content_snapshot) = content_file(path, archive, snapshot, budget, options)?;
     let mut patch_file = File::open(path)?;
     let mut base_file = File::open(path)?;
     let mut patch = snapshot_file_reader(&mut patch_file, archive, index, options)?;
     let nca = parse(&mut patch)?;
-    let slot = nca
-        .summary
-        .sections
-        .iter()
-        .position(|s| s.fs_type == 0)
-        .ok_or_else(|| invalid("native content has no RomFS section; export raw NCAs"))?;
+    let Some(slot) = nca.summary.sections.iter().position(|s| s.fs_type == 0) else {
+        if nca.summary.content_type != native::NcaContentType::Program {
+            return Err(invalid("native Data NCA has no RomFS section"));
+        }
+        drop(patch);
+        if export {
+            crate::cli::emit(
+                true,
+                "Native Program NCA has no RomFS section; exporting its verified ExeFS only."
+                    .into(),
+            );
+        }
+        return native_exefs_view(
+            path,
+            archive,
+            snapshot,
+            destination,
+            budget,
+            options,
+            export,
+        );
+    };
     let section = &nca.summary.sections[slot];
     if section.sparse_flattened || nca.unsupported_storage[slot] {
         return Err(invalid("sparse RomFS cannot be extracted; export raw NCAs"));
@@ -581,7 +633,7 @@ fn native_view(
     };
     let mut base_start = 0;
     let base = if mappings.iter().any(|m| !m.patch) {
-        let mut dependencies = snapshot
+        let mut dependencies = content_snapshot
             .snapshot
             .dependencies
             .iter()
@@ -599,7 +651,7 @@ fn native_view(
                     && s.program_id == snapshot.program_id
             })
             .ok_or_else(|| bad("BKTR base snapshot or Program association is absent"))?;
-        let id = content_file(path, archive, base_snapshot, budget, options)?;
+        let (id, _) = content_file(path, archive, base_snapshot, budget, options)?;
         let mut base = snapshot_file_reader(&mut base_file, archive, id, options)?;
         let parsed = parse(&mut base)?;
         if parsed
@@ -758,6 +810,29 @@ fn native_view(
         }
     }
     drop(reader);
+    ranges.extend(native_exefs_view(
+        path,
+        archive,
+        snapshot,
+        destination,
+        budget,
+        options,
+        export,
+    )?);
+    Ok(ranges)
+}
+
+fn native_exefs_view(
+    path: &Path,
+    archive: &SourceArchive,
+    snapshot: &SourceSnapshot,
+    destination: &Path,
+    budget: &MemoryBudget,
+    options: &WriterOptions,
+    export: bool,
+) -> Result<Vec<super::super::restoration::RestoreRange>, WriterError> {
+    use super::super::restoration::RestoreRange;
+    let mut ranges = Vec::new();
     if snapshot.snapshot.snapshot_type != SnapshotType::Dlc as u8 {
         let mut file = File::open(path)?;
         let (index, entries) = native_exefs(path, &mut file, archive, snapshot, budget, options)?;
@@ -1135,5 +1210,71 @@ mod tests {
         .is_err());
         assert!(!failed.exists());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn exefs_only_programs_and_data_only_updates_extract_and_restore() {
+        use native::synthetic::{self, TitleSpec};
+        const APP: u64 = 0x0100_0000_0001_0000;
+        for exefs_only in [true, false] {
+            let id = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let dir =
+                std::env::temp_dir().join(format!("nx-exefs-only-{}-{id}", std::process::id()));
+            std::fs::create_dir(&dir).unwrap();
+            let mut base = TitleSpec::application(APP, 0, 1);
+            base.program.as_mut().unwrap().romfs_bytes = if exefs_only { 0 } else { 4096 };
+            let mut update = TitleSpec::patch(APP, 1, 2);
+            update.program = None;
+            update.control.as_mut().unwrap().title = "Data-only update".into();
+            let mut args = vec!["pack".into()];
+            for (i, spec) in [base, update].iter().enumerate() {
+                let path = dir.join(format!("{i}.dnsp"));
+                std::fs::write(&path, synthetic::dnsp(&synthetic::title_entries(spec))).unwrap();
+                args.push(path.to_string_lossy().into_owned());
+            }
+            let nx = dir.join("game.nx");
+            args.push(nx.to_string_lossy().into_owned());
+            crate::cli::run(args, None, None).unwrap();
+            let dump = dir.join("dump");
+            let messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured = messages.clone();
+            crate::cli::run(
+                vec![
+                    "extract".into(),
+                    nx.to_string_lossy().into_owned(),
+                    dump.to_string_lossy().into_owned(),
+                ],
+                Some(Arc::new(move |_, line| {
+                    captured.lock().unwrap().push(line.to_owned())
+                })),
+                None,
+            )
+            .unwrap();
+            assert!(dump.join("base/exefs/main").is_file());
+            assert_eq!(
+                std::fs::read(dump.join("base/exefs/main")).unwrap(),
+                std::fs::read(dump.join("updates/1/exefs/main")).unwrap()
+            );
+            assert_eq!(dump.join("updates/1/romfs").exists(), !exefs_only);
+            assert_eq!(
+                messages
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.contains("has no RomFS section")),
+                exefs_only
+            );
+            let restored = dir.join("restored.nx");
+            super::super::restoration::restore_extraction(
+                &dump,
+                &restored,
+                &WriterOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&nx).unwrap(),
+                std::fs::read(&restored).unwrap()
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 }

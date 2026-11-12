@@ -1,0 +1,24 @@
+{
+  "archive_bytes": 3222254240,
+  "recipe_bytes": 3222318133,
+  "elapsed_seconds": 48.66968,
+  "compression_attempts": 3328,
+  "exhaustive_searches": 4,
+  "literal_fallback_blocks": 3072,
+  "logical_bytes": 3221225472,
+  "blocks": 3072,
+  "legacy_worst_case_attempts": 199680,
+  "payload_sha256": "cf04041231b6e265e073b57c05dfaaa60b0a30aa0eaf86901abceb878af7d147",
+  "generation_seconds": 9.758076042169705,
+  "date": "2026-11-12",
+  "cpu": "Apple M4 Pro",
+  "python": "3.14.6",
+  "source_frames": "unique incompressible 1 MiB Zstd frames with checksums",
+  "source_verified_strictly": true,
+  "legacy_runtime_measured": false,
+  "restoration_smoke": {
+    "logical_bytes": 1048576,
+    "checksum_frame_literal_fallback_exact": true,
+    "checksum_free_recompression_exact": true
+  }
+}

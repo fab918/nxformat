@@ -689,14 +689,17 @@ impl App {
                         .file_stem()
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "archive".into());
-                    action = Some((
-                        "Extracting archive".into(),
-                        vec!["extract".into(), path.clone(), text(&folder.join(stem))],
-                    ));
+                    let mut args = vec!["extract".into(), path.clone(), text(&folder.join(stem))];
+                    if !self.restore_recipe {
+                        args.push("--no-restore".into());
+                    }
+                    action = Some(("Extracting archive".into(), args));
                 }
             }
         });
-        ui.label(theme::muted("Extract all keeps a compressed .nxrestore.zst recipe in the folder. Drop the whole folder back to restore the exact NX and its original package recipes. Edited files are repacked at the same relative paths; original-package reconstruction is then unavailable."));
+        ui.checkbox(&mut self.restore_recipe, "Keep restoration recipe after extraction")
+            .on_hover_text("Create .nxrestore.zst after extracting. If recipe creation fails, the extracted files are kept and a warning is shown.");
+        ui.label(theme::muted("The optional compressed .nxrestore.zst recipe in the folder lets you drop the whole folder back to restore the exact NX and its original package recipes. Edited files are repacked at the same relative paths; original-package reconstruction is then unavailable."));
         if archive.snapshots.iter().any(|s| s.native) {
             ui.label("Native NCA content: extraction reads ExeFS and RomFS and verifies IVFC integrity. BKTR updates require their exact base. Unsupported layouts or missing bases stop extraction and remove its output.");
             ui.label(theme::muted("Native extraction supports decrypted IVFC content. Advanced bucket trees, compressed sections and sparse RomFS are not supported. Memory limits may reject large metadata tables."));
