@@ -2,6 +2,8 @@
 //! extension: original headers, indexes, NCA/BKTR metadata and embedded package
 //! recipes are literal data; game bytes reference the exported file ranges.
 use super::*;
+#[path = "restoration_metadata.rs"]
+mod metadata;
 use crate::hash::Sha256;
 use crate::import::{ImportLimits, SourceRoot};
 use std::io::{self, BufReader};
@@ -21,6 +23,14 @@ pub(super) struct RestoreRange {
     /// Nonzero: reconstruct SHA-256 of this many exported file bytes.
     pub hash_size: u32,
     pub hash_offset: u8,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RestorationMode {
+    #[default]
+    Compact,
+    /// Preserve every stored source block; replay needs only a Zstd decoder.
+    Portable,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -488,6 +498,24 @@ pub fn create_restoration(
     manifest: &str,
     options: &WriterOptions,
 ) -> Result<RestorationStats, WriterError> {
+    create_restoration_with_mode(
+        archive_path,
+        directory,
+        jobs,
+        manifest,
+        RestorationMode::Compact,
+        options,
+    )
+}
+
+pub fn create_restoration_with_mode(
+    archive_path: impl AsRef<Path>,
+    directory: impl AsRef<Path>,
+    jobs: &[([u8; 32], String)],
+    manifest: &str,
+    mode: RestorationMode,
+    options: &WriterOptions,
+) -> Result<RestorationStats, WriterError> {
     validate_options(options)?;
     let archive_path = archive_path.as_ref();
     let directory = directory.as_ref();
@@ -508,7 +536,11 @@ pub fn create_restoration(
     if budget.current + options.max_memory_bytes / 3 > options.max_memory_bytes {
         return Err(limit_error("restoration parser exceeds memory budget"));
     }
-    let all = ranges_for(archive_path, &archive, jobs, &budget, options)?;
+    let all = if mode == RestorationMode::Compact {
+        ranges_for(archive_path, &archive, jobs, &budget, options)?
+    } else {
+        HashMap::new()
+    };
     let mut reps: HashMap<u32, (u32, u64)> = HashMap::new();
     let mut files: Vec<_> = all.keys().copied().collect();
     files.sort_unstable();
@@ -523,6 +555,16 @@ pub fn create_restoration(
                 r.offset < offset + archive.blocks[id as usize].logical_size as u64
             }) {
                 reps.entry(id).or_insert((file, offset));
+            }
+        }
+    }
+    for app in &archive.applications {
+        for &(_, root) in &app.source_resources {
+            for entry in &archive.directories[root as usize] {
+                let record = &archive.files[entry.target as usize];
+                for i in 0..record.block_count {
+                    reps.remove(&archive.block_refs[(record.first_ref + i) as usize]);
+                }
             }
         }
     }
@@ -840,8 +882,10 @@ pub fn restore_extraction(
                     input.read_exact(&mut buffer[..k])?;
                     if unchanged {
                         whole.update(&buffer[..k]);
-                        output.write_all(&buffer[..k])?;
                     }
+                    // Literal regions contain the authoritative catalog, media
+                    // and resource blocks, needed even when game files changed.
+                    output.write_all(&buffer[..k])?;
                     left -= k as u64;
                 }
                 produced += n;
@@ -961,6 +1005,9 @@ pub fn restore_extraction(
                     whole.update(&stored);
                     output.write_all(&stored)?;
                 }
+                if !unchanged {
+                    output.seek(SeekFrom::Start(produced + stored_size))?;
+                }
                 produced += stored_size;
                 options.progress.add_done(stored_size);
             }
@@ -977,6 +1024,8 @@ pub fn restore_extraction(
     {
         return Err(bad("restoration recipe checksum or length mismatch"));
     }
+    output.set_len(original_size)?;
+    let mut modified_output = None;
     if unchanged {
         if whole.finish() != original_digest {
             return Err(bad("restored NX SHA-256 differs from original"));
@@ -1009,10 +1058,55 @@ pub fn restore_extraction(
                 ));
             }
         }
-        crate::import::convert_extracted(directory, &declarations, &guard.path, &limits, options)?;
+        let recovered = metadata::recover(&guard.path, &declarations, options)?;
+        let mut bounded = options.clone();
+        bounded.max_temporary_disk_bytes = options
+            .max_temporary_disk_bytes
+            .checked_sub(original_size)
+            .ok_or_else(|| {
+                limit_error("metadata capsule and modified NX exceed temporary disk budget")
+            })?;
+        let (file, candidate) = unique_temp(parent, OsStr::new(".nxrestore-modified"))?;
+        drop(file);
+        let result = crate::import::convert_extracted_external(
+            directory,
+            &declarations,
+            &candidate.path,
+            &limits,
+            &bounded,
+            &recovered.external,
+        )?;
+        let mut plan = RepackPlan::new();
+        for (platform, application_id, key) in recovered.selected {
+            let id = result
+                .receipt
+                .snapshots
+                .get(&key)
+                .ok_or_else(|| bad("written native metadata source is absent"))?
+                .identity;
+            plan.metadata_sources.push(MetadataSourceSelection {
+                platform,
+                application_id,
+                snapshot_identity: id,
+            });
+        }
+        if !plan.metadata_sources.is_empty() {
+            bounded.max_temporary_disk_bytes = bounded
+                .max_temporary_disk_bytes
+                .saturating_sub(std::fs::metadata(&candidate.path)?.len());
+            repack_archive(
+                &candidate.path,
+                &candidate.path,
+                plan,
+                &bounded,
+                IntegrityPolicy::Strict,
+            )?;
+        }
+        modified_output = Some(candidate);
     }
     cancelled(options)?;
-    publish_new(&guard.path, destination)?;
+    let candidate = modified_output.as_ref().map_or(&guard.path, |g| &g.path);
+    publish_new(candidate, destination)?;
     let archive_bytes = std::fs::metadata(destination)?.len();
     Ok(RestorationStats {
         unchanged,
@@ -1295,5 +1389,62 @@ mod tests {
             Some(params)
         );
         assert_eq!(fresh.attempts, attempts + 1);
+    }
+    #[test]
+    fn portable_recipe_uses_no_encoder_and_replays_exact_original_bytes() {
+        let f = fixture();
+        let portable = f.dir.join("portable");
+        crate::cli::run(
+            vec![
+                "extract".into(),
+                f.original.to_string_lossy().into_owned(),
+                portable.to_string_lossy().into_owned(),
+                "--portable-restore".into(),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        let decoded =
+            zstd::stream::decode_all(File::open(portable.join(RESTORATION_FILE)).unwrap()).unwrap();
+        let mut reader = std::io::Cursor::new(decoded);
+        let mut header = [0; 48];
+        reader.read_exact(&mut header).unwrap();
+        text(&mut reader, MAX_TEXT).unwrap();
+        let count = number(&mut reader).unwrap();
+        digest(&mut reader).unwrap();
+        for _ in 0..count {
+            text(&mut reader, 4096).unwrap();
+            byte(&mut reader).unwrap();
+            number(&mut reader).unwrap();
+        }
+        loop {
+            match byte(&mut reader).unwrap() {
+                255 => break,
+                0 => {
+                    let len = number(&mut reader).unwrap();
+                    reader.seek(SeekFrom::Current(len as i64)).unwrap();
+                }
+                _ => panic!("portable recipe contains encoder-dependent operations"),
+            }
+        }
+        let restored = f.dir.join("portable-restored.nx");
+        restore_extraction(&portable, &restored, &WriterOptions::default()).unwrap();
+        assert_eq!(
+            std::fs::read(restored).unwrap(),
+            std::fs::read(&f.original).unwrap()
+        );
+        assert!(crate::cli::run(
+            vec![
+                "extract".into(),
+                f.original.to_string_lossy().into_owned(),
+                f.dir.join("invalid").to_string_lossy().into_owned(),
+                "--portable-restore".into(),
+                "--no-restore".into()
+            ],
+            None,
+            None
+        )
+        .is_err());
     }
 }

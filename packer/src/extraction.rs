@@ -1147,6 +1147,23 @@ mod tests {
         let mod_summary = inspect_archive(&modified, &options, IntegrityPolicy::Strict).unwrap();
         assert_eq!(mod_summary.applications[0].snapshots.len(), 5);
         for s in &mod_summary.applications[0].snapshots {
+            let original = summary.applications[0]
+                .snapshots
+                .iter()
+                .find(|old| {
+                    old.program_id == s.program_id
+                        && old.numeric_version == s.numeric_version
+                        && old.snapshot_type == s.snapshot_type
+                })
+                .unwrap();
+            assert_eq!(s.nacp_digest, original.nacp_digest);
+            let old_display =
+                read_snapshot_display(&nx, original.identity, &options, true).unwrap();
+            let new_display = read_snapshot_display(&modified, s.identity, &options, true).unwrap();
+            assert_eq!(new_display.nacp, old_display.nacp);
+            assert_eq!(new_display.icon, old_display.icon);
+            assert_eq!(new_display.title, old_display.title);
+            assert_eq!(new_display.publisher, old_display.publisher);
             let output = dir.join(format!(
                 "mod-{}-{}",
                 s.program_id.unwrap_or(0),

@@ -4948,14 +4948,14 @@ fn plan_inputs(
 mod repack;
 pub use repack::{
     add_native_content, add_native_contents, compact_archive, create_restoration,
-    edit_archive_metadata, edit_archive_recipes, extract_exefs, extract_raw_ncas, extract_tree,
-    inspect_archive, inspect_restoration, inspect_snapshot_files, inspect_source_resources,
-    read_original_icon, read_snapshot_display, read_snapshot_file_range, read_snapshot_nacp,
-    repack_archive, restore_extraction, ApplicationSummary, ArchiveSummary, IntegrityPolicy,
-    MetadataEdit, MetadataSourceSelection, NativeAddRequest, NativeAddStats, ProgramSummary,
-    RepackPlan, RepackStats, RestorationStats, SnapshotBlockReference, SnapshotDisplay,
-    SnapshotFileReference, SnapshotSummary, SourceFileSummary, VerificationStats,
-    MAX_EMBEDDED_RECIPE_BYTES, RESTORATION_FILE,
+    create_restoration_with_mode, edit_archive_metadata, edit_archive_recipes, extract_exefs,
+    extract_raw_ncas, extract_tree, inspect_archive, inspect_restoration, inspect_snapshot_files,
+    inspect_source_resources, read_original_icon, read_snapshot_display, read_snapshot_file_range,
+    read_snapshot_nacp, repack_archive, restore_extraction, ApplicationSummary, ArchiveSummary,
+    IntegrityPolicy, MetadataEdit, MetadataSourceSelection, NativeAddRequest, NativeAddStats,
+    ProgramSummary, RepackPlan, RepackStats, RestorationMode, RestorationStats,
+    SnapshotBlockReference, SnapshotDisplay, SnapshotFileReference, SnapshotSummary,
+    SourceFileSummary, VerificationStats, MAX_EMBEDDED_RECIPE_BYTES, RESTORATION_FILE,
 };
 pub(crate) use repack::{
     add_native_contents_with_recipes, inspect_archive_with_space, seal_staged_generations,

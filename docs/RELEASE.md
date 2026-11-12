@@ -1,5 +1,12 @@
 # Unreleased
 
+- Preserve native NACP, localized icons/titles, opaque metadata, execution
+  metadata, source resources and the selected application metadata snapshot
+  during edited restoration. Verify retained payloads while streaming them.
+- Warn about worst-case recipe disk use before extraction and add optional
+  `--portable-restore` / desktop portable mode for encoder-independent replay.
+  The NX and existing restoration stream layouts are unchanged.
+
 - Keep successfully extracted files when optional restoration-recipe creation
   fails. Add `extract --no-restore` and a desktop checkbox, enabled by default.
 - Bound encoder discovery to four exhaustive searches per archive and cache

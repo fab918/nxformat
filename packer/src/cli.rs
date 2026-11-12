@@ -150,7 +150,7 @@ nxconvert contents ARCHIVE.nx (@APP, @SNAPSHOT, @STORAGE, @RESOURCE, @RECIPE, @R
 nxconvert restore EXTRACTED_FOLDER NEW_ARCHIVE.nx (uses .nxrestore.zst; pack-tree detects it automatically)\n\
 nxconvert extract-exefs ARCHIVE.nx SNAPSHOT_IDENTITY NEW_FOLDER\n\
 nxconvert extract-ncas ARCHIVE.nx NEW_FOLDER (raw native NCA files, no package reconstruction)\n\
-nxconvert extract ARCHIVE.nx NEW_FOLDER [--no-restore] (every snapshot as a dump: base, updates/<version>, dlc/<title>/<version>)\n\
+nxconvert extract ARCHIVE.nx NEW_FOLDER [--no-restore | --portable-restore] (every snapshot as a dump: base, updates/<version>, dlc/<title>/<version>)\n\
 nxconvert add ARCHIVE.nx SOURCE... [--no-recipe [--omit-firmware]] (add updates and DLC in place, with rebuild recipes by default)\n\
 nxconvert add-tree ARCHIVE.nx PACKAGE [--platform switch1|switch2] [--update-version N] (add extracted trees in place: updates/<version>/ and dlc/ folders, or with --update-version one update folder holding exefs/ and romfs/)\n\
 nxconvert remove ARCHIVE.nx SNAPSHOT_IDENTITY... (remove in place)\n\
@@ -192,6 +192,7 @@ struct Options {
     /// assumptions or receipt next to the archive.
     no_trail: bool,
     no_restore: bool,
+    portable_restore: bool,
     /// add-tree: the folder is one update tree of this version.
     update_version: Option<u32>,
     tree_roots: std::collections::BTreeSet<String>,
@@ -223,6 +224,10 @@ fn parse(args: Vec<String>) -> Result<(Vec<String>, Options), Box<dyn std::error
         }
         if a == "--omit-firmware" {
             o.omit_firmware = true;
+            continue;
+        }
+        if a == "--portable-restore" {
+            o.portable_restore = true;
             continue;
         }
         if a == "--no-restore" {
@@ -1123,6 +1128,7 @@ fn extract_all(
     options: &WriterOptions,
     raw: bool,
     restore: bool,
+    mode: RestorationMode,
 ) -> Result<(usize, Vec<String>), Box<dyn std::error::Error>> {
     // Final extracted files are not staging data. A zero temporary budget
     // may disable the optional recipe without disabling read-only extraction.
@@ -1146,6 +1152,14 @@ fn extract_all(
             .any(|a| a.snapshots.iter().any(|s| s.content_id.is_some()))
     {
         eprintln!("Native extraction supports decrypted IVFC RomFS and single-root BKTR. Encrypted, compressed or sparse RomFS, multilevel BKTR and multi-Data DLC are unsupported; metadata is memory-bounded. Use extract-ncas for the stored NCA files.");
+    }
+    if !raw && restore {
+        let size = fs::metadata(path)?.len();
+        eprintln!("Restoration recipe may require roughly as much additional disk space as the original NX ({size} bytes), besides the extracted files. Use --no-restore to skip it.");
+        match mode {
+            RestorationMode::Compact => eprintln!("Compact mode requires a compatible Zstd encoder for exact replay of some blocks. --portable-restore preserves original block bytes independently of the encoder, with a potentially larger recipe."),
+            RestorationMode::Portable => eprintln!("Portable mode preserves original block bytes; replay is independent of the Zstd encoder version."),
+        }
     }
     let mut jobs: Vec<(String, Option<u64>, [u8; 32], bool)> = Vec::new();
     let mut partial = Vec::new();
@@ -1229,7 +1243,14 @@ fn extract_all(
     if !raw && restore {
         let recipe_result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let manifest = restoration_manifest(path, destination, &summary, &exported, options)?;
-            let stats = create_restoration(path, destination, &exported, &manifest, options)?;
+            let stats = create_restoration_with_mode(
+                path,
+                destination,
+                &exported,
+                &manifest,
+                mode,
+                options,
+            )?;
             println!(
                 "@RESTORATION\t{}\t{}\t{}",
                 destination.join(RESTORATION_FILE).display(),
@@ -1855,6 +1876,11 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
                 &options,
                 args[0] == "extract-ncas",
                 !o.no_restore,
+                if o.portable_restore {
+                    RestorationMode::Portable
+                } else {
+                    RestorationMode::Compact
+                },
             )?;
             drop(watch);
             for note in &partial {
@@ -2133,6 +2159,11 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let (mut args, o) = parse(argv)?;
+    if o.portable_restore && (args.first().map(String::as_str) != Some("extract") || o.no_restore) {
+        return Err(
+            "--portable-restore applies to extract and cannot be combined with --no-restore".into(),
+        );
+    }
     if o.no_restore && args.first().map(String::as_str) != Some("extract") {
         return Err("--no-restore applies to extract only".into());
     }

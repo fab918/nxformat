@@ -16,7 +16,7 @@ pub use convert::{
     add_extracted, convert_extracted, verify_extracted_sources, ImportReceipt, TreeAdditionStats,
     TreeConversionStats,
 };
-pub(crate) use convert::{convert_extracted_external, External, PackageMetadata};
+pub(crate) use convert::{convert_extracted_external, External, PackageMetadata, RestoredMetadata};
 pub use manifest::{
     addon_belongs_to, Composition, DeclarationManifest, ManifestSelection, SnapshotDeclaration,
 };

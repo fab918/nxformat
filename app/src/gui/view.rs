@@ -692,6 +692,8 @@ impl App {
                     let mut args = vec!["extract".into(), path.clone(), text(&folder.join(stem))];
                     if !self.restore_recipe {
                         args.push("--no-restore".into());
+                    } else if self.portable_restore {
+                        args.push("--portable-restore".into());
                     }
                     action = Some(("Extracting archive".into(), args));
                 }
@@ -699,6 +701,11 @@ impl App {
         });
         ui.checkbox(&mut self.restore_recipe, "Keep restoration recipe after extraction")
             .on_hover_text("Create .nxrestore.zst after extracting. If recipe creation fails, the extracted files are kept and a warning is shown.");
+        ui.add_enabled(self.restore_recipe, egui::Checkbox::new(&mut self.portable_restore, "Portable restoration (independent of encoder version)"))
+            .on_hover_text("Preserve original compressed blocks instead of recompressing them. The recipe may approach the original NX size.");
+        if self.restore_recipe {
+            ui.label(theme::muted(format!("Allow roughly {} of additional space for the recipe, besides extracted files. Compact mode may be much smaller but needs a compatible Zstd encoder for exact restoration.", bytes(archive.size))));
+        }
         ui.label(theme::muted("The optional compressed .nxrestore.zst recipe in the folder lets you drop the whole folder back to restore the exact NX and its original package recipes. Edited files are repacked at the same relative paths; original-package reconstruction is then unavailable."));
         if archive.snapshots.iter().any(|s| s.native) {
             ui.label("Native NCA content: extraction reads ExeFS and RomFS and verifies IVFC integrity. BKTR updates require their exact base. Unsupported layouts or missing bases stop extraction and remove its output.");

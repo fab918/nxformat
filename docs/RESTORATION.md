@@ -19,7 +19,10 @@ serialization, C/C++ readers and FFI are unchanged.
 
 If files were edited, the saved explicit declarations drive the existing tree
 writer. Paths remain relative to the same application/Program/version snapshot;
-only edited file contents change. File sizes may change. This produces complete
+only edited file contents change. Native NACP, default and localized icons,
+localized titles, opaque metadata, required firmware, Program metadata and
+block-backed source resources are retained. The original application metadata
+source selection is reapplied to the newly written snapshot identities. File sizes may change. This produces complete
 materialized views, not native NCA containers or a byte-identical original NX;
 its size can differ. Original-package rebuild recipes are not attached to this
 modified NX because their original byte hashes no longer describe its content.
@@ -75,6 +78,22 @@ before atomically publishing it without overwriting an existing destination.
 Original Zstd blocks depend on reproducible encoder output; an incompatible
 future Zstd encoder fails the final SHA-256 check instead of publishing different
 bytes. The bundled Zstd dependency is pinned.
+
+For encoder-independent long-term storage, use
+`nxconvert extract GAME.nx NEW_FOLDER --portable-restore`, or enable **Portable
+restoration** in the desktop application. This mode stores original block bytes
+as literals and never emits encoder-dependent reconstruction operations. It
+still uses a standard Zstd level 13 frame, so exact replay needs a decoder but
+not the original encoder. The recipe can approach the original archive size.
+Both modes warn about that possible additional disk cost before extraction;
+`--no-restore` and the desktop checkbox can disable recipe creation.
+
+During an edited repack, literal metadata regions are recovered into a private
+sparse temporary capsule. Game data holes are not used as source content. Native
+media is streamed and SHA-256 checked; resource blocks are retained literally,
+even if originally deduplicated with a game file, then streamed and verified.
+An older recipe missing a required resource fails explicitly instead of silently
+dropping it. No new NX field or extension is introduced.
 
 Level 13 compression reserves additional encoder workspace. A memory budget too
 small for the recipe fails explicitly. RAW NCA export (`extract-ncas`) remains
