@@ -298,7 +298,7 @@ impl App {
                             let source = &mut self.sources[index];
                             ui.horizontal(|ui| {
                                 ui.add_enabled(
-                                    source.supported,
+                                    source.supported && (!source.restoration_invalid || source.ignore_restore),
                                     egui::Checkbox::without_text(&mut source.selected),
                                 );
                                 ui.vertical(|ui| {
@@ -346,6 +346,11 @@ impl App {
                             }
                             if !source.issue.is_empty() {
                                 ui.colored_label(ui.visuals().warn_fg_color, &source.issue);
+                            }
+                            if source.has_restore_recipe {
+                                let response = ui.add_enabled(source.supported, egui::Checkbox::new(&mut source.ignore_restore, "Rebuild normally without the restoration recipe"));
+                                let response = response.on_hover_text("Use the extracted game files only. Exact original NX/package restoration and native metadata stored only in the recipe are unavailable.");
+                                if response.changed() && source.restoration_invalid { source.selected = source.ignore_restore && source.supported; }
                             }
                         }
                         let firmware_bytes = self.firmware_bytes(game);

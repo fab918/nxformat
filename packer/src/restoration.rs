@@ -1430,6 +1430,173 @@ mod tests {
     }
 
     #[test]
+    fn unknown_snapshot_survives_exact_restore_and_blocks_modified_restore() {
+        let f = fixture();
+        let options = WriterOptions::default();
+        let unknown = SnapshotInput {
+            program_id: Some(0x0400_0000_0010_0000),
+            snapshot_type: SnapshotType::Unknown,
+            numeric_version: 0,
+            content_id: None,
+            addon_title_id: None,
+            build_id: None,
+            display_version: None,
+            dependencies: vec![],
+            metadata: None,
+            native: Default::default(),
+            root: DirectoryInput::new(vec![EntryInput::file(
+                "opaque.bin",
+                FileInput::from_bytes(b"must survive".to_vec()),
+            )]),
+        };
+        repack_archive(
+            &f.original,
+            &f.original,
+            RepackPlan {
+                remove_snapshots: vec![],
+                metadata_sources: vec![],
+                additions: ArchiveInput::new(vec![ApplicationInput {
+                    application_id: 0x0400_0000_0010_0000,
+                    platform: Platform::Switch2,
+                    programs: vec![ProgramInput {
+                        program_id: 0x0400_0000_0010_0000,
+                        kind: ProgramKind::Primary,
+                        content_id: None,
+                        npdm: None,
+                    }],
+                    snapshots: vec![unknown],
+                }]),
+            },
+            &options,
+            IntegrityPolicy::Strict,
+        )
+        .unwrap();
+        let dump = f.dir.join("with-unknown");
+        crate::cli::run(
+            vec![
+                "extract".into(),
+                f.original.to_string_lossy().into_owned(),
+                dump.to_string_lossy().into_owned(),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        let exact = f.dir.join("with-unknown-exact.nx");
+        restore_extraction(&dump, &exact, &options).unwrap();
+        assert_eq!(
+            std::fs::read(&exact).unwrap(),
+            std::fs::read(&f.original).unwrap()
+        );
+        let summary = inspect_archive(&exact, &options, IntegrityPolicy::Strict).unwrap();
+        assert_eq!(summary.applications[0].snapshots.len(), 2);
+        assert!(summary.applications[0]
+            .snapshots
+            .iter()
+            .any(|s| s.snapshot_type == SnapshotType::Unknown));
+        std::fs::write(dump.join("base/romfs/data.bin"), b"edited").unwrap();
+        let modified = f.dir.join("with-unknown-modified.nx");
+        let error = restore_extraction(&dump, &modified, &options).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("snapshots absent from the extracted declarations"));
+        assert!(!modified.exists());
+        assert!(dump.join(RESTORATION_FILE).is_file());
+    }
+
+    #[test]
+    fn invalid_recipe_needs_explicit_opt_out_for_normal_tree_rebuild() {
+        let f = fixture();
+        let recipe = f.extracted.join(RESTORATION_FILE);
+        std::fs::write(&recipe, b"corrupt recipe").unwrap();
+        let output = f.dir.join("normal.nx");
+        let args = vec![
+            "pack-tree".into(),
+            f.extracted.to_string_lossy().into_owned(),
+            output.to_string_lossy().into_owned(),
+            "--platform".into(),
+            "switch2".into(),
+            "--no-trail".into(),
+        ];
+        let error = crate::cli::run(args.clone(), None, None).unwrap_err();
+        assert!(error.to_string().contains("--ignore-restore"));
+        assert!(!output.exists());
+        let mut args = args;
+        args.push("--ignore-restore".into());
+        crate::cli::run(args, None, None).unwrap();
+        inspect_archive(&output, &WriterOptions::default(), IntegrityPolicy::Strict).unwrap();
+        assert_eq!(std::fs::read(recipe).unwrap(), b"corrupt recipe");
+    }
+
+    #[test]
+    fn require_restore_reports_failure_and_keeps_extracted_files() {
+        let f = fixture();
+        let output = f.dir.join("required");
+        let messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = messages.clone();
+        let result = crate::cli::run(
+            vec![
+                "extract".into(),
+                f.original.to_string_lossy().into_owned(),
+                output.to_string_lossy().into_owned(),
+                "--require-restore".into(),
+                "--temp-mib".into(),
+                "0".into(),
+            ],
+            Some(Arc::new(move |_, line| {
+                captured.lock().unwrap().push(line.to_owned())
+            })),
+            None,
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("required restoration recipe"));
+        assert!(output.join("base/exefs/main").is_file());
+        assert!(!output.join(RESTORATION_FILE).exists());
+        assert!(messages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s == "@RESTORE_STATUS\tfailed"));
+        let ok = f.dir.join("required-ok");
+        let captured = messages.clone();
+        crate::cli::run(
+            vec![
+                "extract".into(),
+                f.original.to_string_lossy().into_owned(),
+                ok.to_string_lossy().into_owned(),
+                "--require-restore".into(),
+            ],
+            Some(Arc::new(move |_, line| {
+                captured.lock().unwrap().push(line.to_owned())
+            })),
+            None,
+        )
+        .unwrap();
+        assert!(ok.join(RESTORATION_FILE).is_file());
+        assert!(messages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s == "@RESTORE_STATUS\tcreated"));
+        let conflict = f.dir.join("conflicting-flags");
+        assert!(crate::cli::run(
+            vec![
+                "extract".into(),
+                f.original.to_string_lossy().into_owned(),
+                conflict.to_string_lossy().into_owned(),
+                "--require-restore".into(),
+                "--no-restore".into()
+            ],
+            None,
+            None
+        )
+        .is_err());
+        assert!(!conflict.exists());
+    }
+
+    #[test]
     fn checksum_truncation_and_existing_outputs_never_publish_or_overwrite() {
         let f = fixture();
         let options = WriterOptions::default();
@@ -1527,6 +1694,16 @@ mod tests {
             );
             assert!(output.join("base/exefs/main").is_file());
             assert!(!output.join(RESTORATION_FILE).exists());
+            let expected_status = if warning {
+                "@RESTORE_STATUS\tfailed"
+            } else {
+                "@RESTORE_STATUS\tdisabled"
+            };
+            assert!(messages
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == expected_status));
             assert_eq!(
                 messages
                     .lock()

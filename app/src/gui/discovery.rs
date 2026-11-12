@@ -36,49 +36,83 @@ fn display_text(nacp: &[u8]) -> (String, String) {
 }
 
 fn extracted(path: &Path, selected: &BTreeSet<String>) -> Option<Source> {
-    if path.join(nxformat_packer::RESTORATION_FILE).is_file() {
-        let declarations = nxformat_packer::inspect_restoration(path, &Default::default()).ok()?;
-        let contents = declarations
-            .snapshots
-            .iter()
-            .filter(|s| selected.is_empty() || selected.contains(&s.root))
-            .map(|s| Content {
-                platform: format!("{:?}", s.platform),
-                kind: match s.snapshot_type {
-                    SnapshotType::Base => "base",
-                    SnapshotType::Dlc => "dlc",
-                    SnapshotType::StandaloneUpdate => "standalone",
-                    _ => "update",
-                }
-                .into(),
-                application: s.application_id,
-                version: s.numeric_version,
-                display: s
-                    .presentation
-                    .get("display-version")
-                    .cloned()
-                    .unwrap_or_default(),
-                name: s.presentation.get("title").cloned().unwrap_or_default(),
-                publisher: s.presentation.get("publisher").cloned().unwrap_or_default(),
-            })
-            .collect();
-        return Some(Source {
-            path: path.to_owned(),
-            kind: SourceKind::Extracted,
-            tree_roots: selected.iter().cloned().collect(),
-            supported: true,
-            selected: true,
-            contents,
-            ..Default::default()
-        });
+    let has_restore_recipe = path.join(nxformat_packer::RESTORATION_FILE).is_file();
+    let mut restoration_issue = None;
+    if has_restore_recipe {
+        match nxformat_packer::inspect_restoration(path, &Default::default()) {
+            Ok(declarations) => {
+                let contents = declarations
+                    .snapshots
+                    .iter()
+                    .filter(|s| selected.is_empty() || selected.contains(&s.root))
+                    .map(|s| Content {
+                        platform: format!("{:?}", s.platform),
+                        kind: match s.snapshot_type {
+                            SnapshotType::Base => "base",
+                            SnapshotType::Dlc => "dlc",
+                            SnapshotType::StandaloneUpdate => "standalone",
+                            _ => "update",
+                        }
+                        .into(),
+                        application: s.application_id,
+                        version: s.numeric_version,
+                        display: s
+                            .presentation
+                            .get("display-version")
+                            .cloned()
+                            .unwrap_or_default(),
+                        name: s.presentation.get("title").cloned().unwrap_or_default(),
+                        publisher: s.presentation.get("publisher").cloned().unwrap_or_default(),
+                    })
+                    .collect();
+                return Some(Source {
+                    path: path.to_owned(),
+                    kind: SourceKind::Extracted,
+                    tree_roots: selected.iter().cloned().collect(),
+                    supported: true,
+                    selected: true,
+                    has_restore_recipe: true,
+                    contents,
+                    ..Default::default()
+                });
+            }
+            Err(error) => {
+                restoration_issue = Some(format!(
+                "Invalid restoration recipe: {error}. Choose normal tree import explicitly; exact restoration and recipe-only metadata will be unavailable."
+            ));
+            }
+        }
     }
-    let mut candidates = import::discover(path, &import::ImportLimits::default()).ok()?;
+    let mut candidates = match import::discover(path, &import::ImportLimits::default()) {
+        Ok(candidates) => candidates,
+        Err(error) if restoration_issue.is_some() => {
+            return Some(Source {
+                path: path.to_owned(),
+                kind: SourceKind::Extracted,
+                has_restore_recipe,
+                restoration_invalid: true,
+                issue: format!(
+                    "{} Tree discovery failed: {error}",
+                    restoration_issue.unwrap()
+                ),
+                ..Default::default()
+            })
+        }
+        Err(_) => return None,
+    };
     let package_has_base = candidates.iter().any(|c| c.relative_root == "base");
     if !selected.is_empty() {
         candidates.retain(|c| selected.contains(&c.relative_root));
     }
     if candidates.is_empty() {
-        return None;
+        return restoration_issue.map(|issue| Source {
+            path: path.to_owned(),
+            kind: SourceKind::Extracted,
+            has_restore_recipe,
+            restoration_invalid: true,
+            issue,
+            ..Default::default()
+        });
     }
     let mut source = Source {
         path: path.to_owned(),
@@ -165,6 +199,15 @@ fn extracted(path: &Path, selected: &BTreeSet<String>) -> Option<Source> {
             "No base game found (no exefs/main.npdm). Add the base game, or use an import manifest for this layout."
         }
         .into();
+    }
+    source.has_restore_recipe = has_restore_recipe;
+    if let Some(issue) = restoration_issue {
+        source.restoration_invalid = true;
+        source.selected = false;
+        if !source.issue.is_empty() {
+            source.issue.push(' ');
+        }
+        source.issue.push_str(&issue);
     }
     Some(source)
 }

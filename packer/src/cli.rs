@@ -137,7 +137,7 @@ fn hex(b: &[u8]) -> String {
 fn usage() -> &'static str {
     "nxconvert inspect-tree TREE 2048|3072|none\n\
 nxconvert inspect-tree PACKAGE MANIFEST KEY\n\
-nxconvert pack-tree PACKAGE OUTPUT.nx [--platform switch1|switch2] [--tree-root RELATIVE_ROOT]...\n\
+nxconvert pack-tree PACKAGE OUTPUT.nx [--platform switch1|switch2] [--tree-root RELATIVE_ROOT]... [--ignore-restore]\n\
 nxconvert pack-tree PACKAGE MANIFEST OUTPUT.nx RECEIPT [--latest] [--dlc KEY]\n\
 nxconvert pack-nup INPUT.nup OUTPUT.nx --platform switch1|switch2 [--skip-dlc]\n\
 nxconvert check-nup INPUT.nup ARCHIVE.nx [--skip-dlc] (every NUP file is in the NX: paths, NACP, and bytes read back and hashed)\n\
@@ -150,7 +150,7 @@ nxconvert contents ARCHIVE.nx (@APP, @SNAPSHOT, @STORAGE, @RESOURCE, @RECIPE, @R
 nxconvert restore EXTRACTED_FOLDER NEW_ARCHIVE.nx (uses .nxrestore.zst; pack-tree detects it automatically)\n\
 nxconvert extract-exefs ARCHIVE.nx SNAPSHOT_IDENTITY NEW_FOLDER\n\
 nxconvert extract-ncas ARCHIVE.nx NEW_FOLDER (raw native NCA files, no package reconstruction)\n\
-nxconvert extract ARCHIVE.nx NEW_FOLDER [--no-restore | --portable-restore] (every snapshot as a dump: base, updates/<version>, dlc/<title>/<version>)\n\
+nxconvert extract ARCHIVE.nx NEW_FOLDER [--no-restore | --portable-restore] [--require-restore] (every snapshot as a dump: base, updates/<version>, dlc/<title>/<version>)\n\
 nxconvert add ARCHIVE.nx SOURCE... [--no-recipe [--omit-firmware]] (add updates and DLC in place, with rebuild recipes by default)\n\
 nxconvert add-tree ARCHIVE.nx PACKAGE [--platform switch1|switch2] [--update-version N] (add extracted trees in place: updates/<version>/ and dlc/ folders, or with --update-version one update folder holding exefs/ and romfs/)\n\
 nxconvert remove ARCHIVE.nx SNAPSHOT_IDENTITY... (remove in place)\n\
@@ -192,6 +192,8 @@ struct Options {
     /// assumptions or receipt next to the archive.
     no_trail: bool,
     no_restore: bool,
+    require_restore: bool,
+    ignore_restore: bool,
     portable_restore: bool,
     /// add-tree: the folder is one update tree of this version.
     update_version: Option<u32>,
@@ -228,6 +230,14 @@ fn parse(args: Vec<String>) -> Result<(Vec<String>, Options), Box<dyn std::error
         }
         if a == "--portable-restore" {
             o.portable_restore = true;
+            continue;
+        }
+        if a == "--require-restore" {
+            o.require_restore = true;
+            continue;
+        }
+        if a == "--ignore-restore" {
+            o.ignore_restore = true;
             continue;
         }
         if a == "--no-restore" {
@@ -1129,6 +1139,7 @@ fn extract_all(
     raw: bool,
     restore: bool,
     mode: RestorationMode,
+    require_restore: bool,
 ) -> Result<(usize, Vec<String>), Box<dyn std::error::Error>> {
     // Final extracted files are not staging data. A zero temporary budget
     // may disable the optional recipe without disabling read-only extraction.
@@ -1181,7 +1192,10 @@ fn extract_all(
                     dlc_title(path, s, &extraction_options),
                     s.numeric_version
                 ),
-                _ => continue,
+                _ => {
+                    partial.push(format!("Snapshot {} has an unsupported type and was not exported; only unchanged exact restoration can preserve it.", hex(&s.identity)));
+                    continue;
+                }
             };
             let folder = format!("{prefix}{folder}");
             if raw && tree {
@@ -1257,11 +1271,21 @@ fn extract_all(
                 stats.recipe_bytes,
                 stats.referenced_bytes
             );
+            println!("@RESTORE_STATUS\tcreated");
             Ok(())
         })();
         if let Err(error) = recipe_result {
+            println!("@RESTORE_STATUS\tfailed");
+            if require_restore {
+                return Err(format!("required restoration recipe was not created: {error}. Extracted files were kept.").into());
+            }
             partial.push(format!("Restoration recipe not created: {error}. Extracted files were kept; exact NX/package restoration is unavailable."));
         }
+    }
+    if raw {
+        println!("@RESTORE_STATUS\tnot-applicable");
+    } else if !restore {
+        println!("@RESTORE_STATUS\tdisabled");
     }
     Ok((jobs.len(), partial))
 }
@@ -1882,6 +1906,7 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
                 } else {
                     RestorationMode::Compact
                 },
+                o.require_restore,
             )?;
             drop(watch);
             for note in &partial {
@@ -2165,6 +2190,14 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             "--portable-restore applies to extract and cannot be combined with --no-restore".into(),
         );
     }
+    if o.require_restore && (args.first().map(String::as_str) != Some("extract") || o.no_restore) {
+        return Err(
+            "--require-restore applies to extract and cannot be combined with --no-restore".into(),
+        );
+    }
+    if o.ignore_restore && args.first().map(String::as_str) != Some("pack-tree") {
+        return Err("--ignore-restore applies to pack-tree only".into());
+    }
     if o.no_restore && args.first().map(String::as_str) != Some("extract") {
         return Err("--no-restore applies to extract only".into());
     }
@@ -2225,13 +2258,14 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 3
         && args[0] == "pack-tree"
         && Path::new(&args[1]).join(RESTORATION_FILE).exists()
+        && !o.ignore_restore
     {
         size_budgets(None, &o, &mut limits, &mut options)?;
         options.cancellation = command_token(&o);
+        let declarations = inspect_restoration(&args[1], &options).map_err(|error| format!("Invalid restoration recipe: {error}. Use --ignore-restore only to explicitly rebuild the extracted files without exact restoration or recipe-only metadata."))?;
         let all_selected = if o.tree_roots.is_empty() {
             true
         } else {
-            let declarations = inspect_restoration(&args[1], &options)?;
             let roots: std::collections::BTreeSet<_> = declarations
                 .snapshots
                 .iter()
@@ -2244,13 +2278,16 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         }
         let watch = ProgressWatch::counter(o.frontend, &options.progress);
         eprintln!("Edited restoration stages only original metadata and source resources, alongside the new NX and writer staging; no original-size capsule is created. --temp-mib bounds temporary space.");
-        let stats = restore_extraction(&args[1], &args[2], &options)?;
+        let stats = restore_extraction(&args[1], &args[2], &options).map_err(|error| format!("{error}. To explicitly rebuild the extracted files without this recipe, use pack-tree with --ignore-restore; exact original restoration and recipe-only metadata will be unavailable."))?;
         drop(watch);
         println!(
             "Restored NX: unchanged={} files={} bytes={} metadata_staged_bytes={}",
             stats.unchanged, stats.files, stats.archive_bytes, stats.metadata_staged_bytes
         );
         return Ok(());
+    }
+    if o.ignore_restore {
+        eprintln!("Ignoring restoration recipe by explicit request; normal tree import cannot preserve exact original NX/package bytes or metadata available only in that recipe.");
     }
     if args.len() == 3 && args[0] == "pack-tree" {
         if o.latest || !o.dlc.is_empty() {

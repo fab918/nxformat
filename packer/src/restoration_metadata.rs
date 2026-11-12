@@ -204,6 +204,7 @@ pub(super) fn recover(
             },
         )))
     };
+    let mut covered = HashSet::new();
     for d in &declarations.snapshots {
         let snapshot = if let Some(s) = by_id.get(&d.key) {
             *s
@@ -228,6 +229,9 @@ pub(super) fn recover(
             || snapshot.snapshot.snapshot_type != d.snapshot_type as u8
         {
             return Err(bad("retained metadata scope disagrees with declarations"));
+        }
+        if !covered.insert(snapshot.snapshot.identity) {
+            return Err(bad("duplicate retained snapshot declaration"));
         }
         let metadata = if let Some(refs) = &snapshot.snapshot.meta_refs {
             let mut localized = Vec::new();
@@ -278,6 +282,9 @@ pub(super) fn recover(
                 selected.push((d.platform, d.application_id, d.key.clone()));
             }
         }
+    }
+    if covered.len() != archive.snapshots.len() {
+        return Err(invalid("edited restoration cannot preserve snapshots absent from the extracted declarations (including Unknown snapshots); unchanged exact restoration remains available"));
     }
     for program in &archive.programs {
         if program.has_content_id {

@@ -60,6 +60,9 @@ struct Content {
 struct Source {
     kind: SourceKind,
     tree_roots: Vec<String>,
+    has_restore_recipe: bool,
+    restoration_invalid: bool,
+    ignore_restore: bool,
     nup_platform: Option<Platform>,
     icon: Option<Vec<u8>>,
     path: PathBuf,
@@ -359,6 +362,44 @@ mod tests {
         app.sources[0].selected = false;
         let games = app.games();
         assert!(!app.native_package(&games[0]) && app.firmware_bytes(&games[0]) == 0);
+    }
+
+    #[test]
+    fn corrupt_restoration_recipe_keeps_extracted_files_visible_and_needs_opt_in() {
+        use nxformat_packer::{
+            cli, import::synthetic, inspect_archive, CancellationToken, IntegrityPolicy,
+            WriterOptions,
+        };
+        let dir =
+            std::env::temp_dir().join(format!("nxconvert-invalid-restore-{}", std::process::id()));
+        let dump = dir.join("dump");
+        synthetic::executable_tree(&dump.join("base"), 0x0400_0000_0010_0000, 3).unwrap();
+        let recipe = dump.join(nxformat_packer::RESTORATION_FILE);
+        std::fs::write(&recipe, b"invalid recipe").unwrap();
+        let sources = super::discovery::scan(vec![dump], &CancellationToken::default()).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert!(sources[0].supported);
+        assert!(sources[0].has_restore_recipe && sources[0].restoration_invalid);
+        assert!(!sources[0].selected);
+        assert!(sources[0].issue.contains("Invalid restoration recipe"));
+        assert_eq!(sources[0].contents[0].application, 0x0400_0000_0010_0000);
+        let mut app = App {
+            sources,
+            output_dir: Some(dir.clone()),
+            ..Default::default()
+        };
+        app.convert();
+        assert!(app.queue.is_empty());
+        app.sources[0].ignore_restore = true;
+        app.sources[0].selected = true;
+        let output = app.games().remove(0).output.unwrap();
+        app.convert();
+        let job = app.queue.pop_front().unwrap();
+        assert!(job.args.iter().any(|a| a == "--ignore-restore"));
+        cli::run(job.args, None, Some(CancellationToken::default())).unwrap();
+        inspect_archive(&output, &WriterOptions::default(), IntegrityPolicy::Strict).unwrap();
+        assert_eq!(std::fs::read(recipe).unwrap(), b"invalid recipe");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -926,6 +967,7 @@ impl App {
                 .filter(|s| {
                     s.selected
                         && s.supported
+                        && (!s.restoration_invalid || s.ignore_restore)
                         && s.contents
                             .iter()
                             .any(|c| c.kind == "base" || c.kind == "standalone")
@@ -1034,7 +1076,9 @@ impl App {
                 .sources
                 .iter()
                 .map(|&i| &self.sources[i])
-                .filter(|s| s.selected && s.supported)
+                .filter(|s| {
+                    s.selected && s.supported && (!s.restoration_invalid || s.ignore_restore)
+                })
                 .collect();
             let source_bytes = selected
                 .iter()
@@ -1072,6 +1116,9 @@ impl App {
                 args.extend(["--platform".into(), platform.into()]);
             }
             if game.kind == SourceKind::Extracted {
+                if selected[0].ignore_restore {
+                    args.push("--ignore-restore".into());
+                }
                 for root in &selected[0].tree_roots {
                     args.extend(["--tree-root".into(), root.clone()]);
                 }
@@ -1124,7 +1171,8 @@ impl App {
                     continue;
                 }
                 if previous.supported && source.supported {
-                    source.selected = previous.selected;
+                    source.selected =
+                        previous.selected && (!source.restoration_invalid || source.ignore_restore);
                 }
                 let key = text(&source.path);
                 if self.appearances.contains_key(&key) {

@@ -384,3 +384,17 @@ source resources in addition to the declared game-file paths.
 Edited restoration uses a compact metadata/resource store instead of a temporary
 NX the size of the original. `--temp-mib` covers that store and writer staging;
 `metadata_staged_bytes` in the completion log reports the store's actual size.
+
+### Restoration failure and recovery controls
+
+- `extract ... --require-restore` requires successful recipe publication; failure
+  returns a nonzero exit status and keeps successfully extracted files.
+- Extraction reports `@RESTORE_STATUS\tcreated|failed|disabled|not-applicable` for
+  machine consumers; recipe creation remains optional by default.
+- `pack-tree FOLDER NEW.nx --ignore-restore` explicitly uses normal tree import,
+  leaving an existing recipe untouched. Exact NX/package replay and recipe-only
+  native metadata are unavailable in this mode. The desktop exposes this choice
+  and keeps discoverable files visible when recipe inspection fails.
+- Unknown/unexported snapshots block edited restoration; unchanged exact replay
+  preserves them. Multiple RomFS sections in a content NCA or BKTR base are
+  rejected explicitly rather than exporting only the first section.

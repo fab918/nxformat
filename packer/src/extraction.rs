@@ -14,6 +14,23 @@ fn parse(reader: &mut NativeReader<'_>) -> Result<ParsedNca, WriterError> {
         .map_err(|_| bad("invalid or encrypted native NCA header"))
 }
 
+/// Multiple RomFS sections have no supported combined export view.
+fn romfs_slot(nca: &ParsedNca) -> Result<Option<usize>, WriterError> {
+    let mut slots = nca
+        .summary
+        .sections
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.fs_type == 0);
+    let first = slots.next().map(|(i, _)| i);
+    if slots.next().is_some() {
+        return Err(invalid(
+            "multiple RomFS sections are unsupported; export raw NCAs",
+        ));
+    }
+    Ok(first)
+}
+
 /// Resolve the Program actually supplied by a snapshot. A data-only update
 /// inherits it through exact RequiredBase identities, never by version/name.
 pub(super) fn content_file<'a>(
@@ -595,7 +612,7 @@ fn native_view(
     let mut base_file = File::open(path)?;
     let mut patch = snapshot_file_reader(&mut patch_file, archive, index, options)?;
     let nca = parse(&mut patch)?;
-    let Some(slot) = nca.summary.sections.iter().position(|s| s.fs_type == 0) else {
+    let Some(slot) = romfs_slot(&nca)? else {
         if nca.summary.content_type != native::NcaContentType::Program {
             return Err(invalid("native Data NCA has no RomFS section"));
         }
@@ -665,12 +682,12 @@ fn native_view(
                 "BKTR base has unsupported sparse or compressed storage",
             ));
         }
-        let section = parsed
-            .summary
-            .sections
-            .iter()
-            .find(|s| s.fs_type == 0 && !s.has_patch_info)
+        let base_slot = romfs_slot(&parsed)?
             .ok_or_else(|| invalid("BKTR base must have a standalone RomFS section"))?;
+        let section = &parsed.summary.sections[base_slot];
+        if section.has_patch_info {
+            return Err(invalid("BKTR base must have a standalone RomFS section"));
+        }
         base_start = section.start;
         for (i, m) in mappings.iter().enumerate().filter(|(_, m)| !m.patch) {
             let end = mappings.get(i + 1).map_or(len, |m| m.start);
@@ -944,6 +961,49 @@ mod tests {
         r.base = None;
         r.seek(SeekFrom::Start(0)).unwrap();
         assert!(r.read(&mut out).is_err());
+    }
+
+    #[test]
+    fn multiple_romfs_sections_are_rejected_explicitly() {
+        let spec = native::synthetic::TitleSpec::application(0x0100_0000_0001_0000, 0, 1);
+        let (_, mut bytes) = native::synthetic::title_entries(&spec)
+            .into_iter()
+            .find(|(_, b)| b[0x205] == 0)
+            .unwrap_or_else(|| panic!("synthetic NCA parse failed"));
+        let size = bytes.len() as u64;
+        let parsed =
+            native::nca::parse_nca(&mut Source::new(Cursor::new(bytes.clone()), size), 0, size)
+                .unwrap_or_else(|_| panic!("synthetic NCA parse failed"));
+        let slot = romfs_slot(&parsed).unwrap().unwrap();
+        let section = &parsed.summary.sections[slot];
+        let body = bytes[section.start as usize..section.end as usize].to_vec();
+        let fs = bytes[0x400 + slot * 0x200..0x600 + slot * 0x200].to_vec();
+        let start = bytes.len();
+        bytes.extend_from_slice(&body);
+        let end = bytes.len();
+        bytes[0x260..0x264].copy_from_slice(&((start / 0x200) as u32).to_le_bytes());
+        bytes[0x264..0x268].copy_from_slice(&((end / 0x200) as u32).to_le_bytes());
+        bytes[0x800..0xa00].copy_from_slice(&fs);
+        bytes[0x2c0..0x2e0].copy_from_slice(&sha256(&fs));
+        bytes[0x208..0x210].copy_from_slice(&(end as u64).to_le_bytes());
+        let nca = native::nca::parse_nca(
+            &mut Source::new(Cursor::new(bytes), end as u64),
+            0,
+            end as u64,
+        )
+        .unwrap_or_else(|_| panic!("synthetic NCA parse failed"));
+        assert_eq!(
+            nca.summary
+                .sections
+                .iter()
+                .filter(|s| s.fs_type == 0)
+                .count(),
+            2
+        );
+        assert!(romfs_slot(&nca)
+            .unwrap_err()
+            .to_string()
+            .contains("multiple RomFS sections"));
     }
 
     #[test]

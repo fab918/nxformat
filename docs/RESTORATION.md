@@ -151,3 +151,36 @@ benchmark reports physical/logical archive sizes, creation time, compression
 attempts, exhaustive searches and literal fallback blocks. Run it with Python
 3.14 and `google-crc32c` as described in the script. It uses bounded payload memory
 and cleans up its temporary source, extracted data and recipe automatically.
+
+## Unsupported snapshots and explicit recovery
+
+Some snapshot types, including `Unknown`, have no extracted-tree representation.
+Extraction warns when they are skipped. The recipe still preserves them for an
+unchanged byte-exact roundtrip. Edited restoration checks that every original
+snapshot is represented by the declarations and rejects reconstruction otherwise;
+it never silently drops an unexported snapshot.
+
+When the restoration recipe is invalid, `pack-tree` fails by default and leaves
+it intact. Explicitly use `pack-tree FOLDER NEW.nx --ignore-restore` to use normal
+tree discovery/import without the recipe. This can preserve only the exported
+files, not original NX/package bytes or native metadata stored only in the recipe.
+Layouts which need explicit declarations still require an import manifest.
+The desktop keeps discoverable files visible with an invalid-recipe warning and
+requires **Rebuild normally without the restoration recipe** before selecting
+that source. Valid recipe folders expose the same explicit normal-import choice.
+
+## Machine status and required recipes
+
+After successfully extracting game files, the CLI emits one tab-separated line:
+`@RESTORE_STATUS` followed by `created`, `failed`, `disabled` (`--no-restore`), or
+`not-applicable` (raw NCA export). `created` confirms the recipe was published;
+`@RESTORATION` also reports its path, size and referenced bytes. These lines are
+also delivered to an in-process CLI output callback.
+
+The default exit status still permits a successful extraction with recipe failure,
+keeping the extracted files and warning about the missing recipe. Automation that
+requires reversible extraction should use `extract GAME.nx FOLDER --require-restore`:
+a recipe failure then returns an error/nonzero exit status, still emits `failed`,
+and retains extracted files. It can be combined with `--portable-restore`, but not
+with `--no-restore`. An extraction failure itself returns an error before this
+recipe status is emitted.

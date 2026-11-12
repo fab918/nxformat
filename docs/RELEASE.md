@@ -1,11 +1,16 @@
 # Unreleased
 
+- Reject edited restoration that would omit unexported snapshots, and reject
+  multiple RomFS sections explicitly. Keep extracted folders discoverable when
+  recipe inspection fails, with explicit normal-import recovery via
+  `--ignore-restore` or the desktop checkbox. Add machine-readable restoration
+  status and `--require-restore` for scripts requiring a successful recipe.
+
 - Edited restoration now stages only original metadata and source resources;
   no sparse or full-size original NX capsule is created. Existing recipes and
   the NX format are unchanged. Compact and portable recipe tests verify that
   a 16 MiB payload repacks with one output's space plus 128 KiB, while preserving
   native metadata and shared resources.
-
 
 - Preserve native NACP, localized icons/titles, opaque metadata, execution
   metadata, source resources and the selected application metadata snapshot
