@@ -1,5 +1,7 @@
 //! Native additions inside the existing repack transaction. No base extraction.
 use super::*;
+#[path = "extraction.rs"]
+pub(super) mod extraction;
 use crate::native::container::{PartitionEntry, Source};
 use crate::native::{self, ContentMetaType, InventoryOptions, Severity, SourceReport};
 use std::io;
@@ -1455,18 +1457,43 @@ pub fn extract_exefs(
     result
 }
 
-/// Export a stored tree snapshot (converted from a NUP or a dump folder) as
-/// plain files: the whole snapshot root, usually exefs/ and romfs/.
+/// Export a snapshot as plain files: a stored tree or verified native ExeFS/RomFS.
+/// Native BKTR content uses its exact base dependency. Unsupported layouts fail.
 pub fn extract_tree(
     path: impl AsRef<Path>,
     identity: [u8; 32],
     destination: impl AsRef<Path>,
     options: &WriterOptions,
 ) -> Result<(), WriterError> {
+    extract_snapshot(
+        path.as_ref(),
+        identity,
+        destination.as_ref(),
+        options,
+        false,
+    )
+}
+
+/// Export native snapshot NCA files byte for byte without rebuilding a package.
+pub fn extract_raw_ncas(
+    path: impl AsRef<Path>,
+    identity: [u8; 32],
+    destination: impl AsRef<Path>,
+    options: &WriterOptions,
+) -> Result<(), WriterError> {
+    extract_snapshot(path.as_ref(), identity, destination.as_ref(), options, true)
+}
+
+fn extract_snapshot(
+    path: &Path,
+    identity: [u8; 32],
+    destination: &Path,
+    options: &WriterOptions,
+    raw: bool,
+) -> Result<(), WriterError> {
     validate_options(options)?;
     cancelled(options)?;
-    let destination = destination.as_ref();
-    let mut file = File::open(path.as_ref())?;
+    let mut file = File::open(path)?;
     let mut budget = MemoryBudget {
         current: 0,
         peak: 0,
@@ -1478,18 +1505,23 @@ pub fn extract_tree(
         .iter()
         .find(|s| s.snapshot.identity == identity)
         .ok_or_else(|| invalid("snapshot identity is absent"))?;
-    // A tree DLC keeps its add-on title ID where native content keeps a content ID.
-    if !snapshot.snapshot.addon && snapshot.snapshot.content_id != [0; 16] {
-        return Err(invalid("the snapshot stores NCA files, not a file tree"));
+    // Native and materialized snapshots have distinct identity fields.
+    let native = !snapshot.snapshot.addon && snapshot.snapshot.content_id != [0; 16];
+    if raw && !native {
+        return Err(invalid("snapshot contains an extracted tree, not raw NCAs"));
     }
     std::fs::create_dir(destination)?;
-    let result = export_tree(
-        &mut file,
-        &archive,
-        snapshot.snapshot.root,
-        destination,
-        options,
-    )
+    let result = if native && !raw {
+        extraction::extract_native(path, &archive, snapshot, destination, &budget, options)
+    } else {
+        export_tree(
+            &mut file,
+            &archive,
+            snapshot.snapshot.root,
+            destination,
+            options,
+        )
+    }
     .and_then(|()| cancelled(options));
     if result.is_err() {
         let _ = std::fs::remove_dir_all(destination);
@@ -1549,35 +1581,14 @@ fn native_exefs(
     if snapshot.snapshot.content_id == [0; 16] {
         return Err(invalid("the snapshot has no ExeFS"));
     }
-    let inventory_options = InventoryOptions::default();
+    let inventory_options = InventoryOptions {
+        max_strict_section_bytes: InventoryOptions::default()
+            .max_strict_section_bytes
+            .min(budget.limit.saturating_sub(budget.current) / 4),
+        ..InventoryOptions::default()
+    };
     let metadata_budget = Rc::new(Cell::new(budget.limit.saturating_sub(budget.current)));
-    let report = inspect_base(
-        path,
-        file,
-        archive,
-        snapshot,
-        &inventory_options,
-        options,
-        &mut NativeAddStats::default(),
-        &metadata_budget,
-    )?;
-    let program = report
-        .metas
-        .iter()
-        .find(|m| m.meta.meta_content_id == Some(snapshot.snapshot.content_id))
-        .and_then(|m| {
-            m.meta
-                .programs
-                .iter()
-                .find(|p| Some(p.program_id) == snapshot.program_id)
-        })
-        .ok_or_else(|| invalid("the snapshot has no standalone Program NCA to extract"))?;
-    let name = format!("{}.nca", crate::import::hex(&program.content_id));
-    let index = snapshot_entries(archive, snapshot)?
-        .into_iter()
-        .find(|(path, _)| path.eq_ignore_ascii_case(&name))
-        .map(|(_, index)| index)
-        .ok_or_else(|| bad("snapshot Program NCA is absent"))?;
+    let (index, _) = extraction::content_file(path, archive, snapshot, budget, options)?;
     let size = archive.files[index as usize].size;
     let mut reader = snapshot_file_reader(file, archive, index, options)?;
     let mut source = Source::new(&mut reader, size).with_metadata_budget(metadata_budget);
@@ -1599,12 +1610,15 @@ fn native_exefs(
 }
 
 fn export_exefs_file(
-    reader: &mut NativeReader<'_>,
+    reader: &mut impl Read,
     target: &Path,
     size: u64,
     digest: Option<[u8; 32]>,
     options: &WriterOptions,
 ) -> Result<(), WriterError> {
+    if size > options.max_file_size {
+        return Err(limit_error("extracted file exceeds configured size limit"));
+    }
     let mut output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1613,7 +1627,8 @@ fn export_exefs_file(
     let mut remaining = size;
     let mut hash = Sha256::new();
     while remaining != 0 {
-        let n = reader.read_native(&mut buffer[..remaining.min(128 * 1024) as usize])?;
+        cancelled(options)?;
+        let n = reader.read(&mut buffer[..remaining.min(128 * 1024) as usize])?;
         if n == 0 {
             return Err(bad("snapshot file is truncated"));
         }

@@ -319,3 +319,107 @@ Extracted-tree imports ignore well-formed AppleDouble `._name` sidecars when
 These host metadata files are excluded from discovery, content snapshots and
 source verification. Similarly named game files without the matching metadata
 structure remain part of the import. Original source files are never removed.
+
+## Extracting files and rebuilding packages
+
+`nxconvert contents ARCHIVE.nx` emits `@STORAGE <identity> tree|native` for each
+snapshot. NXConvert shows the same distinction before extraction.
+
+- `nxconvert extract ARCHIVE.nx NEW_FOLDER` exports every snapshot. Materialized
+  trees preserve all their stored files. Native decrypted Program NCAs export
+  ExeFS and RomFS; DLC Data NCAs export RomFS. IVFC integrity is checked across
+  the complete virtual section before exporting its RomFS files. BKTR relocations
+  combine update and base section bytes using the exact `RequiredBase` snapshot
+  identity and Program association; no version is guessed.
+- `nxconvert extract-ncas ARCHIVE.nx NEW_FOLDER` exports the stored NCA files byte
+  for byte, with NX file SHA-256 verification. It needs no rebuild recipe and
+  reports any skipped materialized trees. A native update's complete stored NCA
+  view can also include inherited base NCAs.
+- `nxconvert rebuild ARCHIVE.nx EXISTING_FOLDER [RECIPE_ID...]` reconstructs original
+  packages when the archive contains recipes. Available originals appear under
+  **Original files → Rebuild…** in the desktop application. Without recipes, raw
+  NCA export remains available for native snapshots.
+
+Extraction uses `base/`, `updates/<numeric version>/`, and
+`dlc/<title id>/<numeric version>/`. Multi-application archives prepend
+`switch1/<application id>/` or `switch2/<application id>/`; the platform is part
+of application identity. Program and identity suffixes prevent collisions between
+multiple titles, Programs or base variants. Filesystem
+traversal rejects cycles, unsafe paths, case collisions and out-of-range files.
+File payloads and IVFC levels are streamed. Native transport buffers, BKTR tables,
+RomFS metadata, paths and traversal nodes are bounded by the configured memory
+budget (`--memory-mib`) and hard traversal limits.
+
+Supported native layouts are decrypted DNCA, IVFC RomFS, internal RAW/zero/LZ4
+compressed storage and single-root BKTR relocation bucket trees. Encrypted content,
+advanced/multilevel BKTR trees, unknown compression codecs, sparse RomFS, ambiguous
+multi-Data DLC and missing exact
+bases are rejected. Failures or cancellation remove the new extraction folder;
+existing destinations are never overwritten. The desktop application and CLI
+show these limitations and package reconstruction availability before extraction.
+
+### Reversible extraction with `.nxrestore.zst`
+
+Full extraction also writes a compact Zstd level 13 restoration recipe inside the
+folder. `pack-tree FOLDER NEW.nx` detects it automatically; `restore FOLDER NEW.nx`
+is the explicit equivalent. Dropping the whole folder into NXConvert does the
+same thing. Keep the recipe beside the exported snapshots.
+
+An unchanged extraction restores the NX byte for byte, retaining NCA/BKTR storage
+and all embedded original-package recipes. After editing, the same paths are
+repacked as materialized views with the saved application/Program/version
+associations; the original DNSP byte-exact reconstruction is no longer promised
+and stale package recipes are not embedded. See [RESTORATION.md](RESTORATION.md)
+for the format, limits and tested roundtrips.
+
+`extract ... --no-restore` skips the optional restoration recipe. The desktop
+application exposes the same choice. Failure to create a recipe warns and keeps
+the already extracted files; failure while extracting the files still removes
+incomplete output. ExeFS-only Program NCAs are exported with an explicit missing
+RomFS notice, and data-only updates use their exact inherited Program dependency.
+
+`extract ... --portable-restore` keeps original compressed block bytes, making
+exact restoration independent of the Zstd encoder version. Both recipe modes
+warn that additional disk use may approach the source NX size. The flags
+`--portable-restore` and `--no-restore` are mutually exclusive. Modified repacks
+preserve original NACP, localized artwork and titles, execution metadata and
+source resources in addition to the declared game-file paths.
+Edited restoration uses a compact metadata/resource store instead of a temporary
+NX the size of the original. `--temp-mib` covers that store and writer staging;
+`metadata_staged_bytes` in the completion log reports the store's actual size.
+
+### Restoration failure and recovery controls
+
+- `extract ... --require-restore` requires successful recipe publication; failure
+  returns a nonzero exit status and keeps successfully extracted files.
+- Extraction reports `@RESTORE_STATUS\tcreated|failed|disabled|not-applicable` for
+  machine consumers; recipe creation remains optional by default.
+- `pack-tree FOLDER NEW.nx --ignore-restore` explicitly uses normal tree import,
+  leaving an existing recipe untouched. Exact NX/package replay and recipe-only
+  native metadata are unavailable in this mode. The desktop exposes this choice
+  and keeps discoverable files visible when recipe inspection fails.
+- Unknown/unexported snapshots block edited restoration; unchanged exact replay
+  preserves them. Multiple RomFS sections in a content NCA or BKTR base are
+  rejected explicitly rather than exporting only the first section.
+
+### Independent import declarations from extraction
+
+Full filesystem extraction also writes `extracted.nximport`, using the existing
+`NXIMPORT 1` text grammar. It records explicit platforms, application/Program
+associations, roots, snapshot kinds, versions and dependencies, including paths
+such as `base-<program id>` and platform/application-prefixed collections.
+This file is generated with `--no-restore` too, and remains available if optional
+restoration-recipe creation fails. Raw NCA export does not create this tree manifest.
+
+When no recipe is present, `pack-tree FOLDER NEW.nx` automatically uses this
+manifest. With a bad or deliberately unused recipe, use
+`pack-tree FOLDER NEW.nx --ignore-restore`. The desktop discovers these exports
+from the independent declarations, without guessing ownership from directory names.
+The complete declaration set is imported; partial `--tree-root` selection needs
+an explicit manifest. A supplied `--platform` must agree with every declaration.
+
+Normal import preserves the materialized game paths and associations; original
+native metadata/resources stored only in `.nxrestore.zst` and byte-exact original
+package replay still require that recipe. Keep both metadata files unchanged for
+an unchanged exact roundtrip; the recipe includes its own original declarations.
+The independent manifest is never deleted by `--no-trail`.

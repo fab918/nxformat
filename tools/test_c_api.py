@@ -31,7 +31,7 @@ def main() -> int:
             if a.static:
                 cmd = ['cl', '/nologo', '/MD', '/DNXFORMAT_STATIC', f'/I{a.include_dir}', str(source),
                        f'/Fe{exe}', str(lib_dir / 'nxformat.lib'),
-                       'ws2_32.lib', 'userenv.lib', 'ntdll.lib', 'bcrypt.lib', 'advapi32.lib', 'kernel32.lib']
+                       'ws2_32.lib', 'userenv.lib', 'ntdll.lib', 'bcrypt.lib', 'advapi32.lib', 'kernel32.lib', 'synchronization.lib']
             else:
                 cmd = ['cl', '/nologo', '/MD', f'/I{a.include_dir}', str(source), f'/Fe{exe}',
                        str(lib_dir / 'nxformat.dll.lib')]

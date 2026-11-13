@@ -298,7 +298,7 @@ impl App {
                             let source = &mut self.sources[index];
                             ui.horizontal(|ui| {
                                 ui.add_enabled(
-                                    source.supported,
+                                    source.supported && (!source.restoration_invalid || source.ignore_restore),
                                     egui::Checkbox::without_text(&mut source.selected),
                                 );
                                 ui.vertical(|ui| {
@@ -346,6 +346,11 @@ impl App {
                             }
                             if !source.issue.is_empty() {
                                 ui.colored_label(ui.visuals().warn_fg_color, &source.issue);
+                            }
+                            if source.has_restore_recipe {
+                                let response = ui.add_enabled(source.supported, egui::Checkbox::new(&mut source.ignore_restore, "Rebuild normally without the restoration recipe"));
+                                let response = response.on_hover_text("Use the extracted game files only. Exact original NX/package restoration and native metadata stored only in the recipe are unavailable.");
+                                if response.changed() && source.restoration_invalid { source.selected = source.ignore_restore && source.supported; }
                             }
                         }
                         let firmware_bytes = self.firmware_bytes(game);
@@ -679,7 +684,7 @@ impl App {
                 .button("Extract all…")
                 .on_hover_text(
                     "Export every snapshot in the layout of a dump: base, updates/<version> \
-                     and dlc/<title>/<version>. Content kept as NCA files only gives its ExeFS.",
+                     and dlc/<title>/<version>, including native RomFS and BKTR updates.",
                 )
                 .clicked()
             {
@@ -689,13 +694,40 @@ impl App {
                         .file_stem()
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "archive".into());
-                    action = Some((
-                        "Extracting archive".into(),
-                        vec!["extract".into(), path.clone(), text(&folder.join(stem))],
-                    ));
+                    let mut args = vec!["extract".into(), path.clone(), text(&folder.join(stem))];
+                    if !self.restore_recipe {
+                        args.push("--no-restore".into());
+                    } else if self.portable_restore {
+                        args.push("--portable-restore".into());
+                    }
+                    action = Some(("Extracting archive".into(), args));
                 }
             }
         });
+        ui.checkbox(&mut self.restore_recipe, "Keep restoration recipe after extraction")
+            .on_hover_text("Create .nxrestore.zst after extracting. If recipe creation fails, the extracted files are kept and a warning is shown.");
+        ui.add_enabled(self.restore_recipe, egui::Checkbox::new(&mut self.portable_restore, "Portable restoration (independent of encoder version)"))
+            .on_hover_text("Preserve original compressed blocks instead of recompressing them. The recipe may approach the original NX size.");
+        if self.restore_recipe {
+            ui.label(theme::muted(format!("Allow roughly {} of additional space for the recipe, besides extracted files. Compact mode may be much smaller but needs a compatible Zstd encoder for exact restoration.", bytes(archive.size))));
+        }
+        ui.label(theme::muted("The optional compressed .nxrestore.zst recipe in the folder lets you drop the whole folder back to restore the exact NX and its original package recipes. Edited files are repacked at the same relative paths; original-package reconstruction is then unavailable."));
+        if archive.snapshots.iter().any(|s| s.native) {
+            ui.label("Native NCA content: extraction reads ExeFS and RomFS and verifies IVFC integrity. BKTR updates require their exact base. Unsupported layouts or missing bases stop extraction and remove its output.");
+            ui.label(theme::muted("Native extraction supports decrypted IVFC content and internal RAW/zero/LZ4 compression. Advanced bucket trees, unknown compression codecs and sparse RomFS are not supported. Memory limits may reject large metadata tables."));
+            if !archive.originals.is_empty() {
+                ui.label("Original package reconstruction is available below under Original files → Rebuild…");
+            } else {
+                ui.label("No original package reconstruction data is stored in this archive.");
+            }
+            if ui.button("Export raw NCAs…").on_hover_text("Export the stored NCA files byte for byte, without rebuilding a package. Extracted tree snapshots are skipped.").clicked() {
+                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                    let stem = archive.path.file_stem().unwrap_or_default().to_string_lossy();
+                    action = Some(("Exporting raw NCAs".into(), vec!["extract-ncas".into(), path.clone(), text(&folder.join(format!("{stem}-ncas")))]));
+                }
+            }
+        }
+
         if archive.reclaimable > 0 {
             ui.label(theme::muted(format!(
                 "{} can be reclaimed by compaction",
@@ -707,6 +739,11 @@ impl App {
             ui.strong("Archive contents");
             ui.add_space(6.0);
             for snapshot in &archive.snapshots {
+                ui.label(theme::muted(if snapshot.native {
+                    "Native NCA snapshot · ExeFS / RomFS"
+                } else {
+                    "Extracted tree · stored files"
+                }));
                 theme::card().inner_margin(14).show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.horizontal(|ui| {
@@ -811,10 +848,9 @@ impl App {
         if let Some((label, mut args)) = action {
             if label == "open" {
                 self.choose_archive();
-            } else if args
-                .first()
-                .is_some_and(|cmd| cmd == "extract-exefs" || cmd == "extract")
-            {
+            } else if args.first().is_some_and(|cmd| {
+                cmd == "extract-exefs" || cmd == "extract" || cmd == "extract-ncas"
+            }) {
                 args.push("--frontend".into());
                 self.push(label, args, Purpose::Export);
             } else {

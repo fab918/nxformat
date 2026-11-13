@@ -35,13 +35,20 @@ const NATIVE_EXTENSION: u32 = 0x0001_0005;
 const RECIPE_EXTENSION: u32 = 0x0001_0006;
 /// All rebuild recipes of one archive together stay well inside the Catalog.
 pub const MAX_EMBEDDED_RECIPE_BYTES: u64 = 8 * 1024 * 1024;
+#[path = "restoration.rs"]
+mod restoration;
+pub use restoration::{
+    create_restoration, create_restoration_with_mode, inspect_restoration, restore_extraction,
+    RestorationMode, RestorationStats, RESTORATION_FILE,
+};
+
 #[path = "native_add.rs"]
 mod native_add;
 #[path = "reclaim.rs"]
 mod reclaim;
 pub use native_add::{
-    add_native_content, add_native_contents, extract_exefs, extract_tree, read_original_icon,
-    read_snapshot_file_range, NativeAddRequest, NativeAddStats,
+    add_native_content, add_native_contents, extract_exefs, extract_raw_ncas, extract_tree,
+    read_original_icon, read_snapshot_file_range, NativeAddRequest, NativeAddStats,
 };
 pub(crate) use native_add::{add_native_contents_with_recipes, verify_extracted_source_files};
 
@@ -475,21 +482,38 @@ fn checked_range(
     }
     Ok(start..end)
 }
-fn read_exact_at(file: &mut File, offset: u64, bytes: &mut [u8]) -> Result<(), WriterError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileExt;
-        file.read_exact_at(bytes, offset)?;
+// Read-only archive access also supports a compact restoration metadata store.
+trait ArchiveRead {
+    fn archive_len(&self) -> Result<u64, WriterError>;
+    fn read_at(&mut self, offset: u64, bytes: &mut [u8]) -> Result<(), WriterError>;
+}
+impl ArchiveRead for File {
+    fn archive_len(&self) -> Result<u64, WriterError> {
+        Ok(self.metadata()?.len())
     }
-    #[cfg(not(unix))]
-    {
-        file.seek(SeekFrom::Start(offset))?;
-        file.read_exact(bytes)?;
+    fn read_at(&mut self, offset: u64, bytes: &mut [u8]) -> Result<(), WriterError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            self.read_exact_at(bytes, offset)?;
+        }
+        #[cfg(not(unix))]
+        {
+            self.seek(SeekFrom::Start(offset))?;
+            self.read_exact(bytes)?;
+        }
+        Ok(())
     }
-    Ok(())
+}
+fn read_exact_at(
+    file: &mut impl ArchiveRead,
+    offset: u64,
+    bytes: &mut [u8],
+) -> Result<(), WriterError> {
+    file.read_at(offset, bytes)
 }
 fn read_vec_at(
-    file: &mut File,
+    file: &mut impl ArchiveRead,
     offset: u64,
     size: u64,
     max: u64,
@@ -509,7 +533,7 @@ fn read_vec_at(
     Ok(result)
 }
 fn hash_range(
-    file: &mut File,
+    file: &mut impl ArchiveRead,
     offset: u64,
     size: u64,
     options: &WriterOptions,
@@ -552,7 +576,7 @@ struct SourceHeader {
     active_slot: usize,
 }
 
-fn zero_range(file: &mut File, offset: u64, size: u64) -> Result<(), WriterError> {
+fn zero_range(file: &mut impl ArchiveRead, offset: u64, size: u64) -> Result<(), WriterError> {
     let mut remaining = size;
     let mut at = offset;
     let mut buffer = [0u8; 4096];
@@ -602,8 +626,11 @@ fn decode_slot(bytes: &[u8]) -> Result<Option<SourceHeader>, WriterError> {
     }))
 }
 
-fn parse_header(file: &mut File, options: &WriterOptions) -> Result<SourceHeader, WriterError> {
-    let physical_size = file.metadata()?.len();
+fn parse_header(
+    file: &mut impl ArchiveRead,
+    options: &WriterOptions,
+) -> Result<SourceHeader, WriterError> {
+    let physical_size = file.archive_len()?;
     if !(DATA_START..=MAX_ARCHIVE_SIZE).contains(&physical_size) {
         return Err(bad("source archive size is outside supported bounds"));
     }
@@ -731,7 +758,7 @@ fn parse_header(file: &mut File, options: &WriterOptions) -> Result<SourceHeader
         offset: u64,
         size: u64,
         what: &str,
-        file: &mut File,
+        file: &mut impl ArchiveRead,
     ) -> Result<(), WriterError> {
         let expected = align_up(*cursor, 16)?;
         if offset != expected {
@@ -814,7 +841,7 @@ fn parse_header(file: &mut File, options: &WriterOptions) -> Result<SourceHeader
 }
 
 fn parse_media(
-    file: &mut File,
+    file: &mut impl ArchiveRead,
     h: SourceHeader,
     archive: u8,
 ) -> Result<Vec<SourceMedia>, WriterError> {
@@ -897,7 +924,7 @@ fn parse_media(
 }
 
 fn parse_blocks(
-    file: &mut File,
+    file: &mut impl ArchiveRead,
     h: SourceHeader,
     options: &WriterOptions,
     budget: &mut MemoryBudget,
@@ -1035,7 +1062,7 @@ fn catalog_string(
 }
 
 fn parse_manifest(
-    file: &mut File,
+    file: &mut impl ArchiveRead,
     h: SourceHeader,
     blocks: &[SourceBlock],
     options: &WriterOptions,
@@ -2548,7 +2575,7 @@ fn validate_snapshot_identities_within(
 }
 
 fn parse_archive(
-    file: &mut File,
+    file: &mut impl ArchiveRead,
     archive_id: u8,
     options: &WriterOptions,
     budget: &mut MemoryBudget,

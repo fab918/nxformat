@@ -60,6 +60,9 @@ struct Content {
 struct Source {
     kind: SourceKind,
     tree_roots: Vec<String>,
+    has_restore_recipe: bool,
+    restoration_invalid: bool,
+    ignore_restore: bool,
     nup_platform: Option<Platform>,
     icon: Option<Vec<u8>>,
     path: PathBuf,
@@ -82,6 +85,7 @@ enum SourceKind {
 #[derive(Clone, Default)]
 struct Snapshot {
     identity: String,
+    native: bool,
     kind: String,
     application: u64,
     title: u64,
@@ -361,6 +365,88 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_restoration_recipe_keeps_extracted_files_visible_and_needs_opt_in() {
+        use nxformat_packer::{
+            cli, import::synthetic, inspect_archive, CancellationToken, IntegrityPolicy,
+            WriterOptions,
+        };
+        let dir =
+            std::env::temp_dir().join(format!("nxconvert-invalid-restore-{}", std::process::id()));
+        let dump = dir.join("dump");
+        synthetic::executable_tree(&dump.join("base"), 0x0400_0000_0010_0000, 3).unwrap();
+        let recipe = dump.join(nxformat_packer::RESTORATION_FILE);
+        std::fs::write(&recipe, b"invalid recipe").unwrap();
+        let sources = super::discovery::scan(vec![dump], &CancellationToken::default()).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert!(sources[0].supported);
+        assert!(sources[0].has_restore_recipe && sources[0].restoration_invalid);
+        assert!(!sources[0].selected);
+        assert!(sources[0].issue.contains("Invalid restoration recipe"));
+        assert_eq!(sources[0].contents[0].application, 0x0400_0000_0010_0000);
+        let mut app = App {
+            sources,
+            output_dir: Some(dir.clone()),
+            ..Default::default()
+        };
+        app.convert();
+        assert!(app.queue.is_empty());
+        app.sources[0].ignore_restore = true;
+        app.sources[0].selected = true;
+        let output = app.games().remove(0).output.unwrap();
+        app.convert();
+        let job = app.queue.pop_front().unwrap();
+        assert!(job.args.iter().any(|a| a == "--ignore-restore"));
+        cli::run(job.args, None, Some(CancellationToken::default())).unwrap();
+        inspect_archive(&output, &WriterOptions::default(), IntegrityPolicy::Strict).unwrap();
+        assert_eq!(std::fs::read(recipe).unwrap(), b"invalid recipe");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn standalone_manifest_discovers_and_rebuilds_multi_program_export_without_recipe() {
+        use nxformat_packer::{
+            cli, import, inspect_archive, CancellationToken, IntegrityPolicy, WriterOptions,
+        };
+        const APP: u64 = 0x0400_0000_0010_0000;
+        let dir =
+            std::env::temp_dir().join(format!("nxconvert-manifest-export-{}", std::process::id()));
+        let dump = dir.join("dump");
+        let mut manifest = "NXIMPORT\t1\n".to_owned();
+        for i in 0..2 {
+            let program = APP + i;
+            let root = format!("switch2/{APP:016x}/base-{program:016x}");
+            import::synthetic::executable_tree(&dump.join(&root), program, 3).unwrap();
+            let kind = if i == 0 { "primary" } else { "auxiliary" };
+            manifest.push_str(&format!("snapshot\tp{i}\t{root}\tswitch2\t{APP:016x}\t{program:016x}\t{kind}\tbase\t0\tcomplete\tmaterialized-v1\tmeta-acid3072-v1\n"));
+        }
+        std::fs::write(dump.join(import::EXTRACTION_MANIFEST), manifest).unwrap();
+        assert!(import::discover(&dump, &Default::default())
+            .unwrap()
+            .is_empty());
+        let sources =
+            super::discovery::scan(vec![dump.clone()], &CancellationToken::default()).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert!(sources[0].supported && sources[0].selected);
+        assert!(!sources[0].has_restore_recipe);
+        assert_eq!(sources[0].contents.len(), 2);
+        let mut app = App {
+            sources,
+            output_dir: Some(dir.clone()),
+            ..Default::default()
+        };
+        let output = app.games().remove(0).output.unwrap();
+        app.convert();
+        let job = app.queue.pop_front().unwrap();
+        cli::run(job.args, None, Some(CancellationToken::default())).unwrap();
+        let summary =
+            inspect_archive(&output, &WriterOptions::default(), IntegrityPolicy::Strict).unwrap();
+        assert_eq!(summary.applications[0].programs.len(), 2);
+        assert_eq!(summary.applications[0].snapshots.len(), 2);
+        assert!(dump.join(import::EXTRACTION_MANIFEST).is_file());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn nup_sources_convert_with_updates_dlc_and_metadata() {
         use super::{
             cli, discovery, Appearance, CancellationToken, IntegrityPolicy, Platform, WriterOptions,
@@ -470,6 +556,40 @@ mod tests {
                 &options
             )
             .is_err());
+            let reversible = dir.join(format!("{app_id:016x}-reversible"));
+            cli::run(
+                vec![
+                    "extract".into(),
+                    output.to_string_lossy().into_owned(),
+                    reversible.to_string_lossy().into_owned(),
+                ],
+                None,
+                None,
+            )
+            .unwrap();
+            let sources =
+                discovery::scan(vec![reversible.clone()], &CancellationToken::default()).unwrap();
+            assert_eq!(sources.len(), 1);
+            assert!(sources[0].kind == super::SourceKind::Extracted);
+            assert!(sources[0].supported);
+            assert!(sources[0].contents.iter().all(|c| c.application == app_id));
+            assert!(sources[0]
+                .contents
+                .iter()
+                .any(|c| c.name == "Custom NUP title"));
+            let roundtrip = dir.join(format!("{app_id:016x}-restored.nx"));
+            cli::run(
+                vec![
+                    "pack-tree".into(),
+                    reversible.to_string_lossy().into_owned(),
+                    roundtrip.to_string_lossy().into_owned(),
+                    "--no-trail".into(),
+                ],
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(std::fs::read(&roundtrip).unwrap(), before);
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -670,6 +790,8 @@ struct App {
     level: i32,
     no_compress: bool,
     recipe: bool,
+    restore_recipe: bool,
+    portable_restore: bool,
     include_firmware: bool,
     omitted_firmware: HashSet<String>,
     nup_platforms: HashMap<PathBuf, Platform>,
@@ -697,6 +819,8 @@ impl Default for App {
             level: 1,
             no_compress: false,
             recipe: true,
+            restore_recipe: true,
+            portable_restore: false,
             include_firmware: true,
             omitted_firmware: HashSet::new(),
             nup_platforms: HashMap::new(),
@@ -887,6 +1011,7 @@ impl App {
                 .filter(|s| {
                     s.selected
                         && s.supported
+                        && (!s.restoration_invalid || s.ignore_restore)
                         && s.contents
                             .iter()
                             .any(|c| c.kind == "base" || c.kind == "standalone")
@@ -995,7 +1120,9 @@ impl App {
                 .sources
                 .iter()
                 .map(|&i| &self.sources[i])
-                .filter(|s| s.selected && s.supported)
+                .filter(|s| {
+                    s.selected && s.supported && (!s.restoration_invalid || s.ignore_restore)
+                })
                 .collect();
             let source_bytes = selected
                 .iter()
@@ -1033,6 +1160,9 @@ impl App {
                 args.extend(["--platform".into(), platform.into()]);
             }
             if game.kind == SourceKind::Extracted {
+                if selected[0].ignore_restore {
+                    args.push("--ignore-restore".into());
+                }
                 for root in &selected[0].tree_roots {
                     args.extend(["--tree-root".into(), root.clone()]);
                 }
@@ -1085,7 +1215,8 @@ impl App {
                     continue;
                 }
                 if previous.supported && source.supported {
-                    source.selected = previous.selected;
+                    source.selected =
+                        previous.selected && (!source.restoration_invalid || source.ignore_restore);
                 }
                 let key = text(&source.path);
                 if self.appearances.contains_key(&key) {
@@ -1376,6 +1507,7 @@ impl App {
                 ["SNAPSHOT", identity, kind, application, title, version, display, name, ..] => {
                     archive.snapshots.push(Snapshot {
                         identity: identity.into(),
+                        native: false,
                         kind: kind.into(),
                         application: u64::from_str_radix(application, 16).unwrap_or(0),
                         title: u64::from_str_radix(title, 16).unwrap_or(0),
@@ -1383,6 +1515,15 @@ impl App {
                         display: display.into(),
                         name: name.into(),
                     })
+                }
+                ["STORAGE", identity, storage, ..] => {
+                    if let Some(snapshot) = archive
+                        .snapshots
+                        .iter_mut()
+                        .find(|s| s.identity == *identity)
+                    {
+                        snapshot.native = storage == "native";
+                    }
                 }
                 ["RECIPE", id, _, size, _, name, ..] => archive.originals.push(Original {
                     id: id.into(),

@@ -1,3 +1,60 @@
+# Unreleased
+
+- Extract internally compressed native RomFS using bounded RAW/zero/LZ4 reads,
+  including supported BKTR updates. Verify the underlying IVFC data and reachable
+  hash blocks; retain original compressed storage literally for exact restoration.
+  Full macOS conformance uses the Intel runner pool, retaining arm64 coverage in
+  the other macOS jobs, after hosted arm64 capacity failures before job startup.
+
+- Qualify multi-application extraction paths by platform and application ID.
+  Export an independent `extracted.nximport` so multi-Program and collection
+  exports can be imported without restoration recipes, including in the desktop.
+  Reuse decoded source-block buffers during recipe creation instead of reading
+  and allocating the original block a second time. NX serialization is unchanged.
+
+- Reject edited restoration that would omit unexported snapshots, and reject
+  multiple RomFS sections explicitly. Keep extracted folders discoverable when
+  recipe inspection fails, with explicit normal-import recovery via
+  `--ignore-restore` or the desktop checkbox. Add machine-readable restoration
+  status and `--require-restore` for scripts requiring a successful recipe.
+
+- Edited restoration now stages only original metadata and source resources;
+  no sparse or full-size original NX capsule is created. Existing recipes and
+  the NX format are unchanged. Compact and portable recipe tests verify that
+  a 16 MiB payload repacks with one output's space plus 128 KiB, while preserving
+  native metadata and shared resources.
+
+- Preserve native NACP, localized icons/titles, opaque metadata, execution
+  metadata, source resources and the selected application metadata snapshot
+  during edited restoration. Verify retained payloads while streaming them.
+- Warn about worst-case recipe disk use before extraction and add optional
+  `--portable-restore` / desktop portable mode for encoder-independent replay.
+  The NX and existing restoration stream layouts are unchanged.
+
+- Keep successfully extracted files when optional restoration-recipe creation
+  fails. Add `extract --no-restore` and a desktop checkbox, enabled by default.
+- Bound encoder discovery to four exhaustive searches per archive and cache
+  successful parameters; unmatched frames always retain original literal bytes.
+- Extract verified ExeFS from Programs without RomFS and resolve data-only
+  updates through exact Program dependencies.
+
+- Full extraction keeps `.nxrestore.zst`, compressed at Zstd level 13. Unchanged
+  repacks restore the exact NX and retain embedded original-package recipes.
+  Edited repacks keep file paths and snapshot associations, with no promise to
+  rebuild original packages after modifications. NX format compatibility is
+  unchanged.
+- Compact restoration uses path IDs, an aggregate inventory fingerprint and
+  derived IVFC hash runs: the tested 30XX recipe shrank from 8.7 MB to 1.8 MB.
+
+- Fix issue #9: native extraction now includes verified RomFS, BKTR update views
+  and DLC instead of silently exporting ExeFS alone. Multi-Program and version
+  destinations are kept distinct.
+- Show snapshot storage types, native extraction limitations and original-package
+  reconstruction availability. Add **Export raw NCAs…** / `extract-ncas` to export
+  stored NCA files without package reconstruction.
+- Add bounded traversal, streaming IVFC verification and regression coverage for
+  mixed base/patch reads, corruption, paths, memory limits and native roundtrips.
+
 # NXFormat 1.0.3
 
 NXFormat 1.0.3 fixes importing extracted game folders copied through macOS and

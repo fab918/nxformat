@@ -13,6 +13,9 @@ pub struct ProgramSpec {
     pub build_id: [u8; 32],
     /// Add a RomFS section whose PatchInfo carries a BKTR header.
     pub bktr: bool,
+    /// Exercise internal RAW/zero/LZ4 RomFS storage below the filesystem.
+    pub compressed_romfs: bool,
+    /// Zero omits the Program RomFS section (ExeFS-only fixture).
     pub romfs_bytes: usize,
     /// Optional artificial NPDM for native-loader association tests. This does
     /// not make the generated NSO executable or prove emulator compatibility.
@@ -64,6 +67,7 @@ impl TitleSpec {
                 program_id: app,
                 build_id: [seed; 32],
                 bktr: false,
+                compressed_romfs: false,
                 romfs_bytes: 4096,
                 npdm: None,
             }),
@@ -162,6 +166,7 @@ struct Section {
     hash_type: u8,
     hash_data: [u8; 0xF8],
     bktr: bool,
+    compression: [u8; 40],
     body: Vec<u8>,
 }
 
@@ -190,6 +195,7 @@ fn pfs_section(files: &[(String, Vec<u8>)]) -> Section {
         hash_type: 2,
         hash_data: h,
         bktr: false,
+        compression: [0; 40],
         body,
     }
 }
@@ -227,7 +233,7 @@ fn romfs(files: &[(String, Vec<u8>)]) -> Vec<u8> {
         if files.is_empty() { u32::MAX } else { 0 },
     );
     put_u32(&mut dir_meta, 16, u32::MAX);
-    put_u32(&mut dir_meta, 20, u32::MAX);
+    put_u32(&mut dir_meta, 20, 0);
     let hash_table = u32::MAX.to_le_bytes().to_vec();
     let mut out = vec![0u8; 0x50];
     let mut cursor = 0x50usize;
@@ -291,6 +297,7 @@ fn ivfc_section(image: Vec<u8>, bktr: bool) -> Section {
         hash_type: 3,
         hash_data: h,
         bktr,
+        compression: [0; 40],
         body,
     }
 }
@@ -301,6 +308,29 @@ fn nca(content_type: u8, program_id: u64, sections: Vec<Section>, encrypted: boo
         let start = align(out.len(), 0x200);
         out.resize(start, 0);
         out.extend_from_slice(&s.body);
+        let virtual_size = align(s.body.len(), 0x200);
+        let relocation_offset = align(virtual_size, 0x4000);
+        if s.bktr {
+            // Real, single-root BKTR fixture. The base supplies zero padding
+            // between the IVFC hash table and RomFS; payload comes from patch.
+            out.resize(start + relocation_offset + 0x8000, 0);
+            let root = start + relocation_offset;
+            put_u32(&mut out, root + 4, 1);
+            put_u64(&mut out, root + 8, virtual_size as u64);
+            let bucket = root + 0x4000;
+            put_u32(&mut out, bucket + 4, 3);
+            put_u64(&mut out, bucket + 8, virtual_size as u64);
+            let data_offset = u64::from_le_bytes(s.hash_data[0x28..0x30].try_into().unwrap());
+            let table_size = u64::from_le_bytes(s.hash_data[0x18..0x20].try_into().unwrap());
+            for (i, (offset, patch)) in [(0, 1), (table_size, 0), (data_offset, 1)]
+                .iter()
+                .enumerate()
+            {
+                put_u64(&mut out, bucket + 16 + i * 20, *offset);
+                put_u64(&mut out, bucket + 24 + i * 20, *offset);
+                put_u32(&mut out, bucket + 32 + i * 20, *patch);
+            }
+        }
         let end = align(out.len(), 0x200);
         out.resize(end, 0);
         put_u32(&mut out, 0x240 + i * 16, (start / 0x200) as u32);
@@ -312,9 +342,14 @@ fn nca(content_type: u8, program_id: u64, sections: Vec<Section>, encrypted: boo
         out[fs + 4] = if encrypted { 3 } else { 1 };
         out[fs + 8..fs + 0x100].copy_from_slice(&s.hash_data);
         if s.bktr {
+            put_u64(&mut out, fs + 0x100, relocation_offset as u64);
+            put_u64(&mut out, fs + 0x108, 0x8000);
             out[fs + 0x110..fs + 0x114].copy_from_slice(b"BKTR");
+            put_u32(&mut out, fs + 0x114, 1);
+            put_u32(&mut out, fs + 0x118, 3);
             out[fs + 0x130..fs + 0x134].copy_from_slice(b"BKTR");
         }
+        out[fs + 0x178..fs + 0x1a0].copy_from_slice(&s.compression);
         let digest = sha256(&out[fs..fs + 0x200]);
         out[0x280 + i * 32..0x2A0 + i * 32].copy_from_slice(&digest);
     }
@@ -360,6 +395,9 @@ pub fn title_entries_custom(
     for p in spec.program.iter().chain(&spec.extra_programs) {
         let mut nso = vec![0u8; 0x100];
         nso[..4].copy_from_slice(b"NSO0");
+        if p.npdm.as_ref().is_some_and(|n| n.len() > 4) {
+            nso = crate::import::synthetic::nso(p.build_id[0], false);
+        }
         nso[0x40..0x60].copy_from_slice(&p.build_id);
         let mut sections = vec![pfs_section(&[
             ("main".into(), nso),
@@ -369,7 +407,16 @@ pub fn title_entries_custom(
             ),
         ])];
         let image = romfs(&[("data.bin".into(), vec![spec.seed; p.romfs_bytes])]);
-        sections.push(ivfc_section(image, p.bktr));
+        if p.romfs_bytes != 0 {
+            if p.compressed_romfs {
+                let (stored, info) = compressed_storage(&image);
+                let mut section = ivfc_section(stored, p.bktr);
+                section.compression = info;
+                sections.push(section);
+            } else {
+                sections.push(ivfc_section(image, p.bktr));
+            }
+        }
         contents.push((1, nca(0, p.program_id, sections, enc)));
     }
     if let Some(c) = &spec.control {
@@ -516,4 +563,87 @@ pub fn dxci(partitions: &[(&str, Entries)]) -> Vec<u8> {
     put_u64(&mut out, 0x138, root_header as u64);
     out.extend_from_slice(&root);
     out
+}
+
+/// Artificial mixed-codec storage. RAW headers, zero runs and literal/run LZ4
+/// encode known fixture bytes only; this is not a production compressor.
+pub fn compressed_storage(image: &[u8]) -> (Vec<u8>, [u8; 40]) {
+    const NODE: usize = 0x4000;
+    const CAP: usize = (NODE - 16) / 24;
+    let mut out = Vec::new();
+    let mut entries = Vec::new();
+    let head = image.len().min(512);
+    let mut blocks = vec![(0, &image[..head])];
+    blocks.extend(image[head..].chunks(65536).scan(head, |at, b| {
+        let start = *at;
+        *at += b.len();
+        Some((start, b))
+    }));
+    for (start, bytes) in blocks {
+        if bytes.is_empty() {
+            continue;
+        }
+        let at = align(out.len(), 16);
+        out.resize(at, 0);
+        let (codec, stored) = if bytes.iter().all(|&b| b == 0) {
+            (1, Vec::new())
+        } else if bytes.len() >= 32 && bytes.iter().all(|&b| b == bytes[0]) {
+            // One literal, one overlapping run, then the required last literals.
+            let mut block = vec![0x1f, bytes[0], 1, 0];
+            let mut extra = bytes.len() - 6 - 4 - 15;
+            while extra >= 255 {
+                block.push(255);
+                extra -= 255;
+            }
+            block.push(extra as u8);
+            block.push(0x50);
+            block.extend_from_slice(&bytes[bytes.len() - 5..]);
+            (3, block)
+        } else {
+            (0, bytes.to_vec())
+        };
+        let n = stored.len();
+        out.extend_from_slice(&stored);
+        entries.push((
+            start as u64,
+            at as u64,
+            codec,
+            if codec == 0 { u32::MAX } else { n as u32 },
+        ));
+    }
+    let offset = align(out.len(), 16);
+    out.resize(offset, 0);
+    let leaves = entries.len().div_ceil(CAP);
+    assert!(leaves > 0 && leaves <= (NODE - 16) / 8);
+    out.resize(offset + (leaves + 1) * NODE, 0);
+    put_u32(&mut out, offset + 4, leaves as u32);
+    put_u64(&mut out, offset + 8, image.len() as u64);
+    for leaf in 0..leaves {
+        let first = leaf * CAP;
+        let n = (entries.len() - first).min(CAP);
+        let at = offset + (leaf + 1) * NODE;
+        put_u64(&mut out, offset + 16 + leaf * 8, entries[first].0);
+        put_u32(&mut out, at, leaf as u32);
+        put_u32(&mut out, at + 4, n as u32);
+        put_u64(
+            &mut out,
+            at + 8,
+            entries.get(first + n).map_or(image.len() as u64, |e| e.0),
+        );
+        for i in 0..n {
+            let e = entries[first + i];
+            let row = at + 16 + i * 24;
+            put_u64(&mut out, row, e.0);
+            put_u64(&mut out, row + 8, e.1);
+            out[row + 16] = e.2;
+            put_u32(&mut out, row + 20, e.3);
+        }
+    }
+    let mut info = [0u8; 40];
+    put_u64(&mut info, 0, offset as u64);
+    put_u64(&mut info, 8, ((leaves + 1) * NODE) as u64);
+    info[16..20].copy_from_slice(b"BKTR");
+    put_u32(&mut info, 20, 1);
+    put_u32(&mut info, 24, entries.len() as u32);
+    (out, info)
 }

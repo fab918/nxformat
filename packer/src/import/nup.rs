@@ -1420,6 +1420,7 @@ fn stage_nup_bounded(
         external: super::External {
             files: external,
             metadata,
+            ..Default::default()
         },
         manifest,
         skipped_addons: skipped,

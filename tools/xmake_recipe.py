@@ -71,7 +71,7 @@ package("nxformat")
             package:add("links", "nxformat_static")
             package:add("defines", "NXFORMAT_STATIC")
             if package:is_plat("windows") then
-                package:add("syslinks", "ws2_32", "userenv", "ntdll", "bcrypt", "advapi32", "kernel32")
+                package:add("syslinks", "ws2_32", "userenv", "ntdll", "bcrypt", "advapi32", "kernel32", "synchronization")
             elseif package:is_plat("linux") then
                 package:add("syslinks", "pthread", "dl", "m")
             elseif package:is_plat("android") then

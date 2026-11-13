@@ -1,7 +1,10 @@
 name: NXFormat tests and conformance
 
 on:
+  # PR branches are covered by pull_request; avoid scheduling the same
+  # matrix twice and exhausting the hosted macOS runner pool.
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -14,8 +17,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Hosted arm64 capacity has cancelled this job before runner startup.
+        # Other jobs keep macos-latest (arm64); full conformance also covers Intel.
         os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    # Preserve the required check name while using an available Intel pool.
+    runs-on: ${{ matrix.os == 'macos-latest' && 'macos-15-intel' || matrix.os }}
     env:
       # On Windows the conformance scripts build with MSVC, not MinGW.
       CXX: ${{ matrix.os == 'windows-latest' && 'cl' || '' }}

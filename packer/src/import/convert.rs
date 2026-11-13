@@ -480,6 +480,17 @@ pub(crate) struct External {
     pub files: BTreeMap<String, Vec<(String, tree::SourceFile)>>,
     /// Control metadata of snapshots that have no NACP, by snapshot key.
     pub metadata: BTreeMap<String, PackageMetadata>,
+    /// Exact metadata recovered from a restoration recipe, consumed per view.
+    pub restored_metadata: std::cell::RefCell<BTreeMap<String, RestoredMetadata>>,
+    pub source_resources: std::cell::RefCell<Vec<crate::SourceResourceInput>>,
+    pub program_content_ids: BTreeMap<(u8, u64, u64), [u8; 16]>,
+    pub retained_memory_bytes: u64,
+}
+
+pub(crate) struct RestoredMetadata {
+    pub metadata: Option<crate::SnapshotMetadata>,
+    pub display_version: Option<String>,
+    pub native: crate::SnapshotNativeMetadata,
 }
 
 /// Title, publisher, display version and icons a package records itself,
@@ -725,8 +736,9 @@ fn convert_inner(
     }
     let mut views = BTreeMap::<String, TreeView>::new();
     let mut identities = BTreeMap::<String, [u8; 32]>::new();
-    let mut input_memory =
-        manifest.bytes().len() as u64 * 8 + manifest.snapshots.len() as u64 * 4096;
+    let mut input_memory = manifest.bytes().len() as u64 * 8
+        + manifest.snapshots.len() as u64 * 4096
+        + external.retained_memory_bytes;
     let mut total_work = 0u64;
     let mut total_bytes = 0u64;
     let mut initial = None;
@@ -914,22 +926,31 @@ fn convert_inner(
                 return Err(invalid("duplicate DLC scope"));
             }
             let mut snapshot = view.writer_snapshot(resolved)?;
-            let control = match control_metadata(&package_guard, &declaration, limits)? {
-                Some((metadata, version, bytes)) => Some((Some(metadata), version, bytes)),
-                None => external
-                    .metadata
-                    .get(key)
-                    .map(|m| m.snapshot_metadata(limits)),
-            };
-            if let Some((metadata, display_version, bytes)) = control {
-                input_memory = input_memory
-                    .checked_add(bytes)
-                    .ok_or_else(|| limit("inventory memory overflow"))?;
-                if input_memory > limits.max_inventory_bytes {
-                    return Err(limit("global import inventory budget"));
+            if let Some(restored) = external.restored_metadata.borrow_mut().remove(key) {
+                snapshot.metadata = restored.metadata;
+                snapshot.display_version = restored.display_version;
+                snapshot.native.required_firmware = restored.native.required_firmware;
+                if snapshot.native.npdm.is_none() {
+                    snapshot.native.npdm = restored.native.npdm;
                 }
-                snapshot.metadata = metadata;
-                snapshot.display_version = display_version;
+            } else {
+                let control = match control_metadata(&package_guard, &declaration, limits)? {
+                    Some((metadata, version, bytes)) => Some((Some(metadata), version, bytes)),
+                    None => external
+                        .metadata
+                        .get(key)
+                        .map(|m| m.snapshot_metadata(limits)),
+                };
+                if let Some((metadata, display_version, bytes)) = control {
+                    input_memory = input_memory
+                        .checked_add(bytes)
+                        .ok_or_else(|| limit("inventory memory overflow"))?;
+                    if input_memory > limits.max_inventory_bytes {
+                        return Err(limit("global import inventory budget"));
+                    }
+                    snapshot.metadata = metadata;
+                    snapshot.display_version = display_version;
+                }
             }
             group.1.push(snapshot);
             views.insert(key.clone(), view);
@@ -962,7 +983,10 @@ fn convert_inner(
                         .map(|(program_id, kind)| ProgramInput {
                             program_id,
                             kind,
-                            content_id: None,
+                            content_id: external
+                                .program_content_ids
+                                .get(&(platform, application_id, program_id))
+                                .copied(),
                             npdm: None,
                         })
                         .collect(),
@@ -976,7 +1000,22 @@ fn convert_inner(
             .checked_sub(input_memory)
             .ok_or_else(|| limit("combined import/writer memory budget"))?;
         if initial.is_none() && !in_place {
-            let stats = crate::write_archive(ArchiveInput::new(applications), &work, &bounded)
+            let mut input = ArchiveInput::new(applications);
+            // Resources may belong to an application first written in a later
+            // dependency pass. Only attach them once their owner is present.
+            let mut held_resources = external.source_resources.borrow_mut();
+            let resources = std::mem::take(&mut *held_resources);
+            for resource in resources {
+                if input.applications.iter().any(|a| {
+                    a.platform == resource.platform && a.application_id == resource.application_id
+                }) {
+                    input.source_resources.push(resource);
+                } else {
+                    held_resources.push(resource);
+                }
+            }
+            drop(held_resources);
+            let stats = crate::write_archive(input, &work, &bounded)
                 .map_err(|e| context(e, "write initial tree"))?;
             peak = stats.peak_temporary_disk_bytes;
             initial = Some(stats);
@@ -992,12 +1031,25 @@ fn convert_inner(
                 .max_temporary_disk_bytes
                 .checked_sub(bytes)
                 .ok_or_else(|| limit("combined staged/repack disk budget"))?;
+            let mut input = ArchiveInput::new(applications);
+            let mut held_resources = external.source_resources.borrow_mut();
+            let resources = std::mem::take(&mut *held_resources);
+            for resource in resources {
+                if input.applications.iter().any(|a| {
+                    a.platform == resource.platform && a.application_id == resource.application_id
+                }) {
+                    input.source_resources.push(resource);
+                } else {
+                    held_resources.push(resource);
+                }
+            }
+            drop(held_resources);
             let stats = crate::repack_archive(
                 &work,
                 &work,
                 RepackPlan {
                     remove_snapshots: Vec::new(),
-                    additions: ArchiveInput::new(applications),
+                    additions: input,
                     metadata_sources: Vec::new(),
                 },
                 &bounded,
@@ -1037,6 +1089,13 @@ fn convert_inner(
         .max_memory_bytes
         .checked_sub(input_memory)
         .ok_or_else(|| limit("combined verification memory budget"))?;
+    if !external.restored_metadata.borrow().is_empty()
+        || !external.source_resources.borrow().is_empty()
+    {
+        return Err(invalid(
+            "restoration metadata or resources have no written owner",
+        ));
+    }
     let pairs: Vec<_> = views.iter().map(|(key, v)| (identities[key], v)).collect();
     let mut verification_limits = limits.clone();
     verification_limits.max_inventory_bytes =
