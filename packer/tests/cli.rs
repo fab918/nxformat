@@ -127,3 +127,161 @@ fn nup_cli_honors_the_callers_cancellation_before_staging() {
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn extracted_multi_program_creates_independent_program_snapshots() {
+    use nxformat_packer::{
+        import::{self, structures::NpdmProfile},
+        inspect_archive, IntegrityPolicy, WriterOptions,
+    };
+    let dir = std::env::temp_dir().join(format!("nxformat-cli-program-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let source = dir.join("game");
+    let output = dir.join("game.nx");
+    let app = 0x0400_0000_0000_1000;
+    for (root, program, build) in [
+        ("base", app, 0x41),
+        ("base/program1", app | 1, 0x42),
+        ("updates/65536", app, 0x43),
+        ("updates/65536/program1", app | 1, 0x44),
+    ] {
+        let exefs = source.join(root).join("exefs");
+        std::fs::create_dir_all(&exefs).unwrap();
+        std::fs::write(
+            exefs.join("main.npdm"),
+            import::synthetic::npdm(program, NpdmProfile::MetaAcid3072V1),
+        )
+        .unwrap();
+        std::fs::write(exefs.join("main"), import::synthetic::nso(build, true)).unwrap();
+    }
+    let ordinary = source.join("base/data/program_data");
+    std::fs::create_dir_all(&ordinary).unwrap();
+    std::fs::write(ordinary.join("readme.bin"), b"ordinary content").unwrap();
+    let (sink, _) = collect();
+    cli::run(
+        vec![
+            "pack-tree".into(),
+            source.display().to_string(),
+            output.display().to_string(),
+            "--platform".into(),
+            "switch2".into(),
+        ],
+        Some(sink),
+        None,
+    )
+    .unwrap();
+    let summary =
+        inspect_archive(&output, &WriterOptions::default(), IntegrityPolicy::Strict).unwrap();
+    assert_eq!(summary.applications.len(), 1);
+    assert_eq!(summary.applications[0].programs.len(), 2);
+    assert_eq!(summary.applications[0].snapshots.len(), 4);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn switch2_edition_extracted_tree_keeps_upgrade_and_dlc_together() {
+    use nxformat_packer::{
+        import::{self, structures::NpdmProfile},
+        inspect_archive, IntegrityPolicy, ProgramKind, SnapshotType, WriterOptions,
+    };
+    let dir = std::env::temp_dir().join(format!(
+        "nxformat-cli-switch2-edition-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let source = dir.join("game");
+    let output = dir.join("game.nx");
+    let old = 0x0100_4d30_0c5a_e000;
+    let upgraded = 0x0400_4d30_0c5a_e001;
+    for (root, id, build) in [("base", old, 0x41), ("updates/65536", upgraded, 0x42)] {
+        let exefs = source.join(root).join("exefs");
+        std::fs::create_dir_all(&exefs).unwrap();
+        std::fs::write(
+            exefs.join("main.npdm"),
+            import::synthetic::npdm(id, NpdmProfile::MetaAcid3072V1),
+        )
+        .unwrap();
+        std::fs::write(exefs.join("main"), import::synthetic::nso(build, true)).unwrap();
+    }
+    let dlc = source.join(format!("dlc/{:016x}/0/romfs", old + 0x1001));
+    std::fs::create_dir_all(&dlc).unwrap();
+    std::fs::write(dlc.join("extra.bin"), b"upgrade data").unwrap();
+    let (sink, _) = collect();
+    cli::run(
+        vec![
+            "pack-tree".into(),
+            source.display().to_string(),
+            output.display().to_string(),
+            "--platform".into(),
+            "switch2".into(),
+        ],
+        Some(sink),
+        None,
+    )
+    .unwrap();
+    let archive =
+        inspect_archive(&output, &WriterOptions::default(), IntegrityPolicy::Strict).unwrap();
+    assert_eq!(archive.applications.len(), 1);
+    let app = &archive.applications[0];
+    assert_eq!(app.application_id, old);
+    assert!(app
+        .programs
+        .iter()
+        .any(|p| p.program_id == old && p.kind == ProgramKind::Auxiliary));
+    assert!(app
+        .programs
+        .iter()
+        .any(|p| p.program_id == upgraded && p.kind == ProgramKind::Primary));
+    assert!(app
+        .snapshots
+        .iter()
+        .any(|s| s.snapshot_type == SnapshotType::Dlc));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn standalone_switch2_edition_tree_uses_verified_dlc_family() {
+    use nxformat_packer::{
+        import::{self, structures::NpdmProfile},
+        inspect_archive, IntegrityPolicy, WriterOptions,
+    };
+    let dir = std::env::temp_dir().join(format!(
+        "nxformat-cli-standalone-edition-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let source = dir.join("game");
+    let output = dir.join("game.nx");
+    let old = 0x0100_4d30_0c5a_e000;
+    let upgraded = 0x0400_4d30_0c5a_e001;
+    let exefs = source.join("updates/65536/exefs");
+    std::fs::create_dir_all(&exefs).unwrap();
+    std::fs::write(
+        exefs.join("main.npdm"),
+        import::synthetic::npdm(upgraded, NpdmProfile::MetaAcid3072V1),
+    )
+    .unwrap();
+    std::fs::write(exefs.join("main"), import::synthetic::nso(0x46, true)).unwrap();
+    let dlc = source.join(format!("dlc/{:016x}/0/romfs", old + 0x1001));
+    std::fs::create_dir_all(&dlc).unwrap();
+    std::fs::write(dlc.join("extra.bin"), b"upgrade only").unwrap();
+    let (sink, _) = collect();
+    cli::run(
+        vec![
+            "pack-tree".into(),
+            source.display().to_string(),
+            output.display().to_string(),
+            "--platform".into(),
+            "switch2".into(),
+        ],
+        Some(sink),
+        None,
+    )
+    .unwrap();
+    let archive =
+        inspect_archive(&output, &WriterOptions::default(), IntegrityPolicy::Strict).unwrap();
+    assert_eq!(archive.applications.len(), 1);
+    assert_eq!(archive.applications[0].application_id, old);
+    assert_eq!(archive.applications[0].programs[0].program_id, upgraded);
+    let _ = std::fs::remove_dir_all(dir);
+}

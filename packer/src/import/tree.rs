@@ -460,6 +460,7 @@ pub(crate) struct NamespaceWatch {
     root: Arc<Root>,
     selected: String,
     expected: [u8; 32],
+    program_views: BTreeSet<String>,
 }
 fn namespace_row(hash: &mut Sha256, path: &str, entry: &super::secure::Entry) {
     hash.update(&(path.len() as u32).to_le_bytes());
@@ -475,10 +476,12 @@ impl NamespaceWatch {
         limits: &ImportLimits,
         token: &crate::CancellationToken,
     ) -> Result<(), WriterError> {
+        #[allow(clippy::too_many_arguments)]
         fn walk(
             root: &Root,
             source: &str,
             logical: &str,
+            program_views: &BTreeSet<String>,
             hash: &mut Sha256,
             count: &mut (usize, u64),
             limits: &ImportLimits,
@@ -512,8 +515,14 @@ impl NamespaceWatch {
                     format!("{source}/{name}")
                 };
                 namespace_row(hash, &path, &entry);
+                if logical.is_empty() && program_views.contains(&path) {
+                    if !entry.dir {
+                        return Err(invalid("child Program view is not a directory"));
+                    }
+                    continue;
+                }
                 if entry.dir {
-                    walk(root, &at, &path, hash, count, limits, token)?;
+                    walk(root, &at, &path, program_views, hash, count, limits, token)?;
                 }
             }
             count.1 -= scratch;
@@ -524,6 +533,7 @@ impl NamespaceWatch {
             &self.root,
             &self.selected,
             "",
+            &self.program_views,
             &mut hash,
             &mut (0, 0),
             limits,
@@ -696,6 +706,7 @@ pub(crate) fn inspect_pinned_with(
     } else {
         declaration.root.clone()
     };
+    let program_views = declaration.program_views.clone();
     let mut view = TreeView {
         scope: ContentScope {
             source_kind: SourceKind::ExtractedTree,
@@ -721,6 +732,7 @@ pub(crate) fn inspect_pinned_with(
             root: root.clone(),
             selected: selected.clone(),
             expected: [0; 32],
+            program_views,
         },
     };
     let mut folded = BTreeSet::new();
@@ -764,6 +776,12 @@ pub(crate) fn inspect_pinned_with(
                 format!("{source}/{name}")
             };
             namespace_row(namespace, &path, &entry);
+            if logical.is_empty() && view.declaration.program_views.contains(&path) {
+                if !entry.dir {
+                    return Err(invalid("child Program view is not a directory"));
+                }
+                continue;
+            }
             let charge = 1024 + path.len() as u64 * 4 + at.len() as u64 * 2;
             view.accounted_bytes = view
                 .accounted_bytes

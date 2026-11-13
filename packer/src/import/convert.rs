@@ -881,6 +881,7 @@ fn convert_inner(
                         crate::writer::pending_dependency_target(
                             parent.declaration.snapshot_type,
                             parent.declaration.numeric_version,
+                            parent.scope.program_id.value,
                         )
                     }
                     None => return Err(invalid("dependency on an add-on of the same pass")),
