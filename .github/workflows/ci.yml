@@ -193,6 +193,15 @@ jobs:
         run: |
           app/target/release/nxconvert --version
           app/target/release/nxconvert contents tests/fixtures/dlc_only_application.nx | grep -q '^@SIZE'
+      - name: Upload NXConvert for PR testing
+        uses: actions/upload-artifact@v4
+        with:
+          name: nxconvert-${{ matrix.os }}
+          path: |
+            app/target/release/nxconvert
+            app/target/release/nxconvert.exe
+          if-no-files-found: error
+          retention-days: 14
 
   coverage-fuzz:
     runs-on: ubuntu-latest
