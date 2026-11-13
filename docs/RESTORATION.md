@@ -120,6 +120,23 @@ Level 13 compression reserves additional encoder workspace. A memory budget too
 small for the recipe fails explicitly. RAW NCA export (`extract-ncas`) remains
 available without creating a restoration recipe.
 
+For archives of at least 64 MiB, recipe compression uses up to four workers
+automatically, or the count selected with `--workers`. An additional 128 MiB
+per worker is reserved within `--memory-mib`; the count is reduced when needed.
+Small archives, `--workers 1`, or a budget that cannot fit two workers use the
+serial encoder. Both paths retain level 13, an 8 MiB window and a checksum.
+The compressed recipe bytes can differ, while its decoded instructions and the
+byte-exact restored NX remain unchanged. Game data in the original NX is not
+recompressed by this optimization.
+
+An indicative Windows x64 run on the existing 1 GiB foreign-Zstd fixture took
+12.958 s before this change and 8.008 s with four workers and a 2048 MiB budget
+(about 1.6x). The decoded recipe SHA-256 and exact restored NX matched. This was
+one sequential sample per configuration, with warm caches and concurrent real
+game validation; it is not a general speed guarantee. The fixture is generated
+by `benchmarks/restore_unreproducible.py`. The `restoration_bench` example accepts
+`NX_BENCH_WORKERS` and `NX_BENCH_MEMORY_MIB` to compare serial and parallel runs.
+
 ## Extraction without a restoration recipe
 
 Recipe creation remains enabled by default. Use
@@ -136,6 +153,18 @@ Program NCAs without a RomFS section export their verified ExeFS and report that
 RomFS is absent. Data-only updates resolve an inherited Program through exact
 RequiredBase identities and the same application/Program association. Unsupported
 BKTR layouts still fail explicitly.
+
+BKTR updates with SHA-256/IVFC-protected metadata are supported. Before using
+their relocation tables, extraction verifies the descriptor SHA-256, its full
+IVFC tree, and coverage of both declared BKTR tables. Unknown metadata hash
+types and sparse RomFS remain unsupported. Native LZ4 entries may carry
+nonzero ABI padding; codecs, bounds and ordering remain validated.
+
+Reversible exports preserve files inside `romfs/` and `data/` even when they are genuine
+`.DS_Store` or AppleDouble files shipped in the game. Identified host metadata
+outside those content namespaces is still ignored. Normal tree imports keep
+their existing host-metadata filtering policy. This distinction prevents
+restoration recipes and edited repacks from dropping original game bytes.
 
 ## Bounded encoder discovery
 

@@ -17,7 +17,7 @@ accelerated-sha = ["dep:sha2"]
 [dependencies]
 same-file = "=1.0.6"
 sha2 = { version = "=0.10.9", optional = true }
-zstd = { version = "=0.14.3", default-features = false, features = ["experimental"] }
+zstd = { version = "=0.14.3", default-features = false, features = ["experimental", "zstdmt"] }
 
 [dev-dependencies]
 

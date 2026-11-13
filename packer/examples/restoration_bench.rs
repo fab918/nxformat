@@ -6,7 +6,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() != 3 && !(args.len() == 4 && args[3] == "--verify") {
         return Err("usage: restoration_bench ARCHIVE.nx EXTRACTED_FOLDER [--verify]".into());
     }
-    let options = WriterOptions::default();
+    let mut options = WriterOptions::default();
+    if let Ok(workers) = std::env::var("NX_BENCH_WORKERS") {
+        options.compression_workers = workers.parse()?;
+    }
+    if let Ok(memory) = std::env::var("NX_BENCH_MEMORY_MIB") {
+        options.max_memory_bytes = memory.parse::<u64>()? * 1024 * 1024;
+    }
     let summary = inspect_archive(&args[1], &options, IntegrityPolicy::Strict)?;
     let application = &summary.applications[0];
     let snapshot = &application.snapshots[0];

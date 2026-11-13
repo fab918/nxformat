@@ -14,6 +14,45 @@ pub const RESTORATION_FILE: &str = ".nxrestore.zst";
 const MAGIC: &[u8; 8] = b"NXRSTR02";
 const CHUNK: usize = 128 * 1024;
 const MAX_TEXT: u64 = 16 * 1024 * 1024;
+const RECIPE_WORKSPACE: u64 = 128 * 1024 * 1024;
+// Covers each additional encoder, its 8 MiB job/history buffers and thread stack.
+const RECIPE_WORKER_WORKSPACE: u64 = 128 * 1024 * 1024;
+
+fn recipe_workers(options: &WriterOptions, retained: u64, archive_bytes: u64) -> u32 {
+    if archive_bytes < 64 * 1024 * 1024 || options.compression_workers == 1 {
+        return 0;
+    }
+    let requested = if options.compression_workers == 0 {
+        std::thread::available_parallelism().map_or(1, |n| n.get().min(4) as u32)
+    } else {
+        u32::from(options.compression_workers)
+    };
+    let affordable = options
+        .max_memory_bytes
+        .saturating_sub(retained.saturating_add(RECIPE_WORKSPACE))
+        / RECIPE_WORKER_WORKSPACE;
+    let workers = requested.min(affordable.min(8) as u32);
+    // One background worker costs extra memory without parallel compression.
+    if workers >= 2 {
+        workers
+    } else {
+        0
+    }
+}
+
+fn recipe_encoder(
+    file: File,
+    workers: u32,
+) -> io::Result<zstd::stream::write::Encoder<'static, File>> {
+    let mut encoder = zstd::stream::write::Encoder::new(file, 13)?;
+    encoder.window_log(23)?;
+    encoder.include_checksum(true)?;
+    if workers > 0 {
+        encoder.set_parameter(zstd::zstd_safe::CParameter::JobSize(8 * 1024 * 1024))?;
+        encoder.multithread(workers)?;
+    }
+    Ok(encoder)
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct RestoreRange {
@@ -185,6 +224,20 @@ fn fingerprint(nodes: &[Node]) -> [u8; 32] {
         hash.update(&n.digest);
     }
     hash.finish()
+}
+
+fn game_metadata_paths(nodes: &[Node]) -> std::collections::BTreeSet<String> {
+    nodes
+        .iter()
+        .filter(|n| {
+            !n.dir
+                && n.path
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|name| name == ".DS_Store" || name.starts_with("._"))
+        })
+        .map(|n| n.path.clone())
+        .collect()
 }
 
 fn compression(bytes: &[u8], level: i32, window: u32) -> Result<Vec<u8>, WriterError> {
@@ -528,7 +581,7 @@ pub fn create_restoration_with_mode(
     if destination.exists() {
         return Err(invalid("restoration recipe already exists"));
     }
-    let root = SourceRoot::open(directory)?;
+    let root = SourceRoot::open(directory)?.with_game_metadata();
     let inventory = nodes(&root, options)?;
     let mut nx = File::open(archive_path)?;
     let original_hash = hash_file(&mut nx, options)?;
@@ -584,13 +637,11 @@ pub fn create_restoration_with_mode(
         .flat_map(|v| v.iter())
         .map(|r| 128 + r.path.len() as u64 * 2)
         .sum();
-    if budget
+    let retained = budget
         .current
         .saturating_add(inventory_memory)
-        .saturating_add(range_memory)
-        .saturating_add(128 * 1024 * 1024)
-        > options.max_memory_bytes
-    {
+        .saturating_add(range_memory);
+    if retained.saturating_add(RECIPE_WORKSPACE) > options.max_memory_bytes {
         return Err(limit_error(
             "Zstd level 13 restoration workspace exceeds memory budget",
         ));
@@ -602,9 +653,7 @@ pub fn create_restoration_with_mode(
             .unwrap_or(Path::new(".")),
         OsStr::new(".nxrestore"),
     )?;
-    let mut encoder = zstd::stream::write::Encoder::new(file, 13)?;
-    encoder.window_log(23)?;
-    encoder.include_checksum(true)?;
+    let encoder = recipe_encoder(file, recipe_workers(options, retained, archive.file_size))?;
     let mut out = HashWrite {
         inner: encoder,
         hash: Sha256::new(),
@@ -781,7 +830,7 @@ pub fn inspect_restoration(
     directory: impl AsRef<Path>,
     options: &WriterOptions,
 ) -> Result<crate::import::DeclarationManifest, WriterError> {
-    let root = SourceRoot::open(directory.as_ref())?;
+    let root = SourceRoot::open(directory.as_ref())?.with_game_metadata();
     let mut decoder = zstd::stream::read::Decoder::new(root.open_relative(RESTORATION_FILE)?)?;
     decoder.window_log_max(23)?;
     let mut header = [0; 48];
@@ -816,7 +865,7 @@ pub fn restore_extraction(
     if destination.exists() {
         return Err(invalid("restoration output already exists"));
     }
-    let root = SourceRoot::open(directory)?;
+    let root = SourceRoot::open(directory)?.with_game_metadata();
     let recipe = root.open_relative(RESTORATION_FILE)?;
     let recipe_bytes = recipe.metadata()?.len();
     let mut decoder = zstd::stream::read::Decoder::new(BufReader::new(recipe))?;
@@ -873,6 +922,9 @@ pub fn restore_extraction(
             digest,
         });
     }
+    // Keep only metadata-like names recorded by this recipe. New Finder files
+    // remain ignored, and legacy recipes retain their original inventory view.
+    let root = root.with_game_metadata_paths(game_metadata_paths(&expected));
     let current = nodes(&root, options)?;
     let unchanged = fingerprint(&current) == expected_fingerprint;
     if unchanged && original_size > options.max_temporary_disk_bytes {
@@ -1112,7 +1164,9 @@ pub fn restore_extraction(
         )?;
         drop(resource_ranges);
         drop(output);
-        let recovered = metadata::recover(&guard.path, &metadata_store, &declarations, options)?;
+        let mut recovered =
+            metadata::recover(&guard.path, &metadata_store, &declarations, options)?;
+        recovered.external.game_metadata_paths = game_metadata_paths(&expected);
         let mut bounded = options.clone();
         bounded.max_temporary_disk_bytes = options
             .max_temporary_disk_bytes
@@ -1181,10 +1235,219 @@ pub fn restore_extraction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recipe_workers_respect_memory_and_serial_requests() {
+        let mut options = WriterOptions {
+            compression_workers: 8,
+            ..Default::default()
+        };
+        for mib in [64, 128, 256, 384, 512, 1024, 2048] {
+            options.max_memory_bytes = mib * 1024 * 1024;
+            let retained = 8 * 1024 * 1024;
+            let workers = recipe_workers(&options, retained, 1024 * 1024 * 1024);
+            assert!(workers == 0 || (2..=8).contains(&workers));
+            if workers > 0 {
+                assert!(
+                    retained + RECIPE_WORKSPACE + u64::from(workers) * RECIPE_WORKER_WORKSPACE
+                        <= options.max_memory_bytes
+                );
+            }
+            assert_eq!(recipe_workers(&options, retained, 1024), 0);
+        }
+        options.compression_workers = 1;
+        assert_eq!(recipe_workers(&options, 0, 1024 * 1024 * 1024), 0);
+    }
+
+    #[test]
+    fn parallel_portable_recipe_restores_large_archive_exactly() {
+        let f = fixture();
+        let source = f.dir.join("source");
+        let mut payload = File::create(source.join("romfs/large.bin")).unwrap();
+        let mut state = 91u64;
+        let mut chunk: Vec<u8> = (0..262144)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        for index in 0..260u64 {
+            chunk[..8].copy_from_slice(&index.to_le_bytes());
+            payload.write_all(&chunk).unwrap();
+        }
+        drop(payload);
+        let large = f.dir.join("large.nx");
+        let extracted = f.dir.join("parallel");
+        crate::cli::run(
+            vec![
+                "pack-tree".into(),
+                source.to_string_lossy().into_owned(),
+                large.to_string_lossy().into_owned(),
+                "--platform".into(),
+                "switch2".into(),
+                "--no-trail".into(),
+                "--workers".into(),
+                "1".into(),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(std::fs::metadata(&large).unwrap().len() >= 64 * 1024 * 1024);
+        crate::cli::run(
+            vec![
+                "extract".into(),
+                large.to_string_lossy().into_owned(),
+                extracted.to_string_lossy().into_owned(),
+                "--portable-restore".into(),
+                "--require-restore".into(),
+                "--workers".into(),
+                "2".into(),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        let restored = f.dir.join("parallel-restored.nx");
+        let options = WriterOptions::default();
+        assert!(
+            restore_extraction(&extracted, &restored, &options)
+                .unwrap()
+                .unchanged
+        );
+        assert_eq!(
+            hash_file(&mut File::open(large).unwrap(), &options).unwrap(),
+            hash_file(&mut File::open(restored).unwrap(), &options).unwrap()
+        );
+    }
+
     struct Fixture {
         dir: std::path::PathBuf,
         original: std::path::PathBuf,
         extracted: std::path::PathBuf,
+    }
+    #[test]
+    fn shipped_ds_store_survives_exact_and_edited_restoration() {
+        let f = fixture();
+        let mut bytes = b"\0\0\0\x01Bud1shipped game resource".to_vec();
+        bytes.extend((0..4096).map(|i| (i % 251) as u8));
+        let archive = f.dir.join("with-ds-store.nx");
+        let dump = f.dir.join("ds-store-dump");
+        let run = |args| crate::cli::run(args, None, None).unwrap();
+        // Write authoritative game bytes directly, bypassing ordinary import's
+        // host-metadata filter, as a native NCA's file table does.
+        let app = 0x0400_0000_0010_0000;
+        let npdm = crate::import::synthetic::npdm(
+            app,
+            crate::import::structures::NpdmProfile::MetaAcid3072V1,
+        );
+        let root = DirectoryInput::new(vec![
+            EntryInput::directory(
+                "exefs",
+                DirectoryInput::new(vec![
+                    EntryInput::file(
+                        "main",
+                        FileInput::from_bytes(crate::import::synthetic::nso(3, true)),
+                    ),
+                    EntryInput::file("main.npdm", FileInput::from_bytes(npdm.clone())),
+                ]),
+            ),
+            EntryInput::directory(
+                "romfs",
+                DirectoryInput::new(vec![
+                    EntryInput::file(
+                        "data.bin",
+                        FileInput::from_bytes(b"original game data".to_vec()),
+                    ),
+                    EntryInput::directory(
+                        "resources",
+                        DirectoryInput::new(vec![EntryInput::file(
+                            ".DS_Store",
+                            FileInput::from_bytes(bytes.to_vec()),
+                        )]),
+                    ),
+                ]),
+            ),
+        ]);
+        crate::write_archive(
+            ArchiveInput::new(vec![ApplicationInput {
+                application_id: app,
+                platform: Platform::Switch2,
+                programs: vec![ProgramInput {
+                    program_id: app,
+                    kind: ProgramKind::Primary,
+                    content_id: None,
+                    npdm: None,
+                }],
+                snapshots: vec![SnapshotInput {
+                    native: SnapshotNativeMetadata {
+                        npdm: Some(MediaInput::from_bytes(MediaType::Npdm, npdm)),
+                        required_firmware: None,
+                    },
+                    program_id: Some(app),
+                    snapshot_type: SnapshotType::Base,
+                    numeric_version: 0,
+                    content_id: None,
+                    addon_title_id: None,
+                    build_id: Some([3; 32]),
+                    display_version: None,
+                    dependencies: vec![],
+                    metadata: None,
+                    root,
+                }],
+            }]),
+            &archive,
+            &WriterOptions::default(),
+        )
+        .unwrap();
+        run(vec![
+            "extract".into(),
+            archive.to_string_lossy().into_owned(),
+            dump.to_string_lossy().into_owned(),
+            "--require-restore".into(),
+        ]);
+        assert_eq!(
+            std::fs::read(dump.join("base/romfs/resources/.DS_Store")).unwrap(),
+            bytes
+        );
+        // Finder metadata added after export was not part of the game. It
+        // must not change exact replay or enter the edited game namespace.
+        std::fs::write(
+            dump.join("base/romfs/.DS_Store"),
+            b"\0\0\0\x01Bud1new host metadata",
+        )
+        .unwrap();
+        let restored = f.dir.join("ds-store-restored.nx");
+        let options = WriterOptions::default();
+        assert!(
+            restore_extraction(&dump, &restored, &options)
+                .unwrap()
+                .unchanged
+        );
+        assert_eq!(
+            hash_file(&mut File::open(&archive).unwrap(), &options).unwrap(),
+            hash_file(&mut File::open(restored).unwrap(), &options).unwrap()
+        );
+        std::fs::write(dump.join("base/romfs/data.bin"), b"resized mod").unwrap();
+        let edited = f.dir.join("ds-store-edited.nx");
+        assert!(
+            !restore_extraction(&dump, &edited, &options)
+                .unwrap()
+                .unchanged
+        );
+        let again = f.dir.join("ds-store-again");
+        run(vec![
+            "extract".into(),
+            edited.to_string_lossy().into_owned(),
+            again.to_string_lossy().into_owned(),
+            "--no-restore".into(),
+        ]);
+        assert_eq!(
+            std::fs::read(again.join("base/romfs/resources/.DS_Store")).unwrap(),
+            bytes
+        );
+        assert!(!again.join("base/romfs/.DS_Store").exists());
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
