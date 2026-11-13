@@ -485,6 +485,8 @@ pub(crate) struct External {
     pub source_resources: std::cell::RefCell<Vec<crate::SourceResourceInput>>,
     pub program_content_ids: BTreeMap<(u8, u64, u64), [u8; 16]>,
     pub retained_memory_bytes: u64,
+    /// Original game-owned names that resemble host metadata in an exact export.
+    pub game_metadata_paths: BTreeSet<String>,
 }
 
 pub(crate) struct RestoredMetadata {
@@ -695,7 +697,11 @@ fn convert_inner(
         ));
     }
     let manifest = manifest.revalidated(limits)?;
-    let package_guard = std::sync::Arc::new(super::secure::Root::open(package)?);
+    let mut package_root = super::secure::Root::open(package)?;
+    if !external.restored_metadata.borrow().is_empty() {
+        package_root = package_root.with_game_metadata_paths(external.game_metadata_paths.clone());
+    }
+    let package_guard = std::sync::Arc::new(package_root);
     let parent = destination
         .parent()
         .filter(|p| !p.as_os_str().is_empty())

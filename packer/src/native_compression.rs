@@ -95,8 +95,10 @@ impl<R: Read + Seek> Reader<R> {
                 if !matches!(codec, 0 | 1 | 3) {
                     return Err(invalid("unsupported NCA compression codec"));
                 }
-                if node[at + 17..at + 20].iter().any(|&b| b != 0)
-                    || start >= end
+                // The three bytes between the u8 codec and i32 physical size
+                // are ABI padding in CompressedStorage::Entry. Real LZ4 NCAs
+                // use nonzero bytes here; only the codec controls decoding.
+                if start >= end
                     || (i == 0 && start != starts[leaf])
                     || entries.last().is_some_and(|e: &Entry| e.start >= start)
                 {
@@ -299,6 +301,30 @@ mod tests {
             assert_eq!(b, expected[at as usize..at as usize + 512]);
         }
         assert!(reader.seek(SeekFrom::End(1)).is_err());
+    }
+    #[test]
+    fn native_entry_padding_does_not_change_decoded_data() {
+        let expected = image();
+        let (mut bytes, info) = native::synthetic::compressed_storage(&expected);
+        let table = u64_at(&info, 0) as usize;
+        let leaf = table + NODE;
+        for index in 0..u32_at(&bytes, leaf + 4) as usize {
+            let at = leaf + 16 + index * 24;
+            bytes[at + 17..at + 20].copy_from_slice(&[8, 0xa5, 0x5a]);
+        }
+        let size = bytes.len() as u64;
+        let mut reader = Reader::new(
+            Cursor::new(bytes),
+            0,
+            size,
+            &info,
+            8 * 1024 * 1024,
+            CancellationToken::default(),
+        )
+        .unwrap();
+        let mut actual = Vec::new();
+        reader.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, expected);
     }
     #[test]
     fn corrupt_tables_bad_codec_limits_and_lz4_are_rejected() {
