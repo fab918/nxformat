@@ -595,6 +595,81 @@ fn switch2_multi_base_rejects_unrelated_and_unverified_packages() {
 }
 
 #[test]
+fn real_producer_edition_layouts_preserve_legacy_and_ounce_programs() {
+    let dir = work("producer-edition-layouts");
+    let nup = dir.join("edition.nup");
+    let out = dir.join("edition.nx");
+    let options = WriterOptions::default();
+    for mixed in [false, true] {
+        let mut packages = vec![base(OUNCE)];
+        if mixed {
+            let mut legacy = base(OUNCE & !0xfff);
+            legacy.exefs = Some(vec![
+                Node::File("main", super::super::synthetic::nso(0x42, false)),
+                Node::File("main.npdm", npdm(LEGACY, NpdmProfile::MetaAcid2048V1)),
+            ]);
+            packages.push(legacy);
+        }
+        for name in ["control", "logo", "legal", "meta"] {
+            packages[0].extras.push(Node::Dir(
+                name,
+                vec![Node::File("preserved.bin", vec![42; 17])],
+            ));
+        }
+        packages.push(addon(LEGACY));
+        let mut bytes = build(&packages, true);
+        if !mixed {
+            // The producer left the RomFS child slots but zeroed its count.
+            let romfs = u32_at(&bytes, SUPERBLOCK + 0x30 + 0x10) as usize;
+            let dirs_at = SUPERBLOCK + 0x30 + packages.len() * PACKAGE;
+            bytes[dirs_at + romfs * DIRECTORY + 12..dirs_at + romfs * DIRECTORY + 16].fill(0);
+            let size = u64_at(&bytes, 0x10) as usize;
+            let digest = crate::hash::sha256(&bytes[SUPERBLOCK..SUPERBLOCK + size]);
+            bytes[0x18..0x38].copy_from_slice(&digest);
+        }
+        fs::write(&nup, bytes).unwrap();
+        assert_eq!(
+            inspect_nup(&nup, &limits(), &options.cancellation)
+                .unwrap()
+                .application_id,
+            LEGACY
+        );
+        for stream in [false, true] {
+            convert_nup(
+                &nup,
+                &out,
+                &NupOptions {
+                    stream,
+                    ..nup_options()
+                },
+                &limits(),
+                &options,
+            )
+            .unwrap();
+            assert_eq!(
+                check_nup(&nup, &out, false, &limits(), &options)
+                    .unwrap()
+                    .snapshots,
+                packages.len()
+            );
+            let archive = inspect_archive(&out, &options, IntegrityPolicy::Strict).unwrap();
+            assert!(archive.applications[0]
+                .programs
+                .iter()
+                .any(|p| p.program_id == OUNCE && p.kind == crate::ProgramKind::Primary));
+            if mixed {
+                assert!(archive.applications[0]
+                    .programs
+                    .iter()
+                    .any(|p| p.program_id == LEGACY));
+            }
+            fs::remove_file(&out).unwrap();
+        }
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn indexed_updates_require_the_exact_declared_program() {
     let dir = work("indexed-update-program-proof");
     let nup = dir.join("indexed.nup");

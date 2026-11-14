@@ -174,6 +174,18 @@ other base files remain available. DLC uses its declared add-on title ID.
 Executable add-ons and unresolved or ambiguous package relationships are rejected.
 Future NUP versions require explicit support.
 
+Switch 2 Edition packages may combine a native Ounce Program with a legacy
+Program 0 whose NPDM retains its Switch 1 identity. Each NPDM is validated
+against its own structural profile and family; the upgrade DLC selects the
+primary Ounce Program. A lone Ounce base with its matching legacy upgrade DLC
+is supported too. Root `control`, `logo`, `legal` and `meta` directories are
+preserved under `data/` with their original directory names.
+
+If a producer zeroed a declared RomFS root's child count, the importer can
+recover an interior child-table gap only when it has one unambiguous RomFS
+owner and its entries have no other parent. Bounds, names, cycles and file
+hashes are still checked; unexplained gaps and overlaps remain errors.
+
 Packages with an additional `program1` through `program15` directory, each
 containing its own `exefs/main.npdm`, are imported as separate auxiliary Programs.
 Their `exefs/`, `romfs/` and `data/` paths are scoped to that Program, rather

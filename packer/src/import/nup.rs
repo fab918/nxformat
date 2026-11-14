@@ -436,6 +436,68 @@ fn validate_child_table(
     Ok(())
 }
 
+/// Recover a producer's missing RomFS root count only when the unclaimed
+/// slots have one unambiguous owner and name nodes with no other parent.
+/// Never discard those entries: doing so would publish an empty game tree.
+fn recover_empty_romfs(
+    dirs: &mut [Directory],
+    children: &[u32],
+    packages: &[Package],
+) -> Result<(), WriterError> {
+    let mut ranges: Vec<_> = dirs
+        .iter()
+        .filter(|d| d.child_count != 0)
+        .map(|d| {
+            (
+                d.first_child as usize,
+                d.first_child as usize + d.child_count as usize,
+            )
+        })
+        .collect();
+    ranges.sort_unstable();
+    let mut gaps = Vec::new();
+    let mut end = 0;
+    for (first, next) in &ranges {
+        if *first < end || *next > children.len() {
+            return Ok(());
+        }
+        if *first > end {
+            gaps.push((end, *first));
+        }
+        end = *next;
+    }
+    let referenced: BTreeSet<_> = ranges
+        .iter()
+        .flat_map(|(a, b)| children[*a..*b].iter().copied())
+        .collect();
+    for (first, end) in gaps {
+        let candidates: BTreeSet<_> = packages
+            .iter()
+            .filter_map(|p| {
+                let i = p.romfs as usize;
+                dirs.get(i)
+                    .filter(|d| {
+                        d.name == "romfs" && d.child_count == 0 && d.first_child as usize == first
+                    })
+                    .map(|_| i)
+            })
+            .collect();
+        if candidates.len() != 1 {
+            continue;
+        }
+        let nodes = &children[first..end];
+        let unique: BTreeSet<_> = nodes.iter().copied().collect();
+        if unique.len() != nodes.len() || nodes.iter().any(|n| referenced.contains(n)) {
+            return Err(bad("ambiguous missing RomFS child count"));
+        }
+        // Tree walking still checks bounds, names, cycles and file hashes.
+        dirs[*candidates.iter().next().unwrap()].child_count = (end - first)
+            .try_into()
+            .map_err(|_| bad("recovered RomFS child count overflows"))?;
+    }
+    Ok(())
+}
+
 fn read_toc(file: &mut File, limits: &ImportLimits) -> Result<(Toc, u64), WriterError> {
     let physical = file.metadata()?.len();
     let mut sb = [0u8; SUPERBLOCK];
@@ -569,6 +631,7 @@ fn read_toc(file: &mut File, limits: &ImportLimits) -> Result<(Toc, u64), Writer
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
         .collect();
+    recover_empty_romfs(&mut dirs, &children, &packages)?;
     validate_child_table(&dirs, &children, &packages)?;
     Ok((
         Toc {
@@ -659,6 +722,7 @@ impl Toc {
         let mut root_seen = BTreeSet::new();
         let mut data = None;
         let mut children = Vec::new();
+        let mut ancillary = Vec::new();
         for &node in &self.children[root.first_child as usize..end as usize] {
             if !root_seen.insert(node) {
                 return Err(bad("duplicate package root entry"));
@@ -670,6 +734,10 @@ impl Toc {
                     }
                     if child_program_name(&dir.name) {
                         children.push((node, dir.name.clone()));
+                        continue;
+                    }
+                    if matches!(dir.name.as_str(), "control" | "logo" | "legal" | "meta") {
+                        ancillary.push((node, format!("data/{}", dir.name)));
                         continue;
                     }
                 }
@@ -707,7 +775,10 @@ impl Toc {
             tree.dirs.insert(logical.into());
             self.walk(dir, logical, &mut tree, &mut seen, 1, limits)?;
         }
-        for (dir, name) in children {
+        if !ancillary.is_empty() {
+            tree.dirs.insert("data".to_owned());
+        }
+        for (dir, name) in children.into_iter().chain(ancillary) {
             if !tree.dirs.insert(name.clone()) {
                 return Err(bad("duplicate child Program directory"));
             }
@@ -1293,7 +1364,9 @@ fn nup_upgrade_plan(
 
 /// Some real Switch 2 NUPs contain one `base` TOC record per native Program,
 /// rather than one base record with nested `programN` directories. Accept this
-/// only when every base has a verified Ounce NPDM in the *same* Program family.
+/// only when every base has a verified NPDM in the same Program family.
+/// Index 0 may carry the legacy 01-prefixed Program with a 2048-bit profile;
+/// indexed Ounce Programs must retain their exact 04-prefixed identities.
 /// This is an import association; it does not change the NX on-disk format.
 #[derive(Debug)]
 struct NupMultiBasePlan {
@@ -1301,11 +1374,15 @@ struct NupMultiBasePlan {
     primary_program: u64,
     ounce_application: u64,
     programs: BTreeMap<u64, usize>,
+    legacy_program: Option<u64>,
 }
 
 impl NupMultiBasePlan {
     fn program(&self, p: &Package) -> Option<u64> {
         match p.kind {
+            0 if p.title_id == self.ounce_application && self.legacy_program.is_some() => {
+                self.legacy_program
+            }
             0 => self
                 .programs
                 .contains_key(&p.title_id)
@@ -1318,7 +1395,13 @@ impl NupMultiBasePlan {
                     return None;
                 }
                 let program = self.ounce_application | (suffix & 0xf);
-                self.programs.contains_key(&program).then_some(program)
+                self.programs.contains_key(&program).then_some(
+                    if program == self.ounce_application {
+                        self.legacy_program.unwrap_or(program)
+                    } else {
+                        program
+                    },
+                )
             }
             _ => None,
         }
@@ -1346,7 +1429,17 @@ fn nup_multi_base_plan(
     token: &crate::CancellationToken,
 ) -> Result<Option<NupMultiBasePlan>, WriterError> {
     let bases: Vec<_> = toc.packages.iter().filter(|p| p.kind == 0).collect();
-    if bases.len() <= 1 {
+    let single_edition = bases.len() == 1
+        && bases[0].title_id >> 56 == 4
+        && (1..=15).contains(&(bases[0].title_id & 0xfff))
+        && toc.packages.iter().any(|p| {
+            p.kind == 2
+                && p.title_id
+                    == ((bases[0].title_id & 0x00ff_ffff_ffff_f000) | 0x0100_0000_0000_0000)
+                        + 0x1000
+                        + (bases[0].title_id & 0xfff)
+        });
+    if bases.len() <= 1 && !single_edition {
         return Ok(None);
     }
     let family = bases[0].title_id & !0xfff;
@@ -1356,6 +1449,8 @@ fn nup_multi_base_plan(
         ));
     }
     let mut programs = BTreeMap::new();
+    let legacy = (family & 0x00ff_ffff_ffff_ffff) | 0x0100_0000_0000_0000;
+    let mut legacy_program = None;
     for p in bases {
         cancelled(token)?;
         if p.flags != 0 || p.title_id & !0xfff != family || p.title_id & 0xfff > 15 {
@@ -1370,20 +1465,25 @@ fn nup_multi_base_plan(
                 p.ordinal, p.title_id
             )));
         };
-        if profile != super::structures::NpdmProfile::MetaAcid3072V1 || program != p.title_id {
+        let legacy_anchor = p.title_id == family
+            && program == legacy
+            && profile == super::structures::NpdmProfile::MetaAcid2048V1;
+        if legacy_anchor {
+            legacy_program = Some(program);
+        } else if profile != super::structures::NpdmProfile::MetaAcid3072V1 || program != p.title_id
+        {
             return Err(bad(&format!(
                 "base package #{} ({:016x}) NPDM Program ID does not match its TOC title ID",
                 p.ordinal, p.title_id
             )));
         }
-        if programs.insert(program, p.ordinal).is_some() {
+        if programs.insert(p.title_id, p.ordinal).is_some() {
             return Err(bad("duplicate Switch 2 base Program ID"));
         }
     }
-    if !programs.contains_key(&family) {
+    if !programs.contains_key(&family) && !single_edition {
         return Err(unsupported("multi-base NUP has no Program index 0 anchor"));
     }
-    let legacy = (family & 0x00ff_ffff_ffff_ffff) | 0x0100_0000_0000_0000;
     let mut has_legacy_addon = false;
     let mut has_native_addon = false;
     let mut upgrade_index = None;
@@ -1392,6 +1492,7 @@ fn nup_multi_base_plan(
         primary_program: family,
         ounce_application: family,
         programs,
+        legacy_program,
     };
     for p in &toc.packages {
         cancelled(token)?;
@@ -1408,9 +1509,12 @@ fn nup_multi_base_plan(
                 ));
             }
             if let Some((program, profile)) = nup_program_id(path, toc, p, limits, token)? {
-                if profile != super::structures::NpdmProfile::MetaAcid3072V1
-                    || Some(program) != provisional.program(p)
-                {
+                let expected_profile = if program >> 56 == 1 {
+                    super::structures::NpdmProfile::MetaAcid2048V1
+                } else {
+                    super::structures::NpdmProfile::MetaAcid3072V1
+                };
+                if profile != expected_profile || Some(program) != provisional.program(p) {
                     return Err(bad(&format!(
                         "update package #{} ({:016x}) NPDM does not match its Switch 2 Program index",
                         p.ordinal, p.title_id
@@ -1449,8 +1553,12 @@ fn nup_multi_base_plan(
         ));
     }
     Ok(Some(NupMultiBasePlan {
-        application: if has_legacy_addon { legacy } else { family },
-        primary_program: upgrade_index.unwrap_or(family),
+        application: if has_legacy_addon || legacy_program.is_some() {
+            legacy
+        } else {
+            family
+        },
+        primary_program: upgrade_index.unwrap_or(legacy_program.unwrap_or(family)),
         ..provisional
     }))
 }
@@ -2099,7 +2207,12 @@ fn stage_nup_bounded(
             Err(_) => ("none", application),
         };
         if let Some(expected) = multi_program {
-            if primary_program != expected || profile != "meta-acid3072-v1" {
+            let expected_profile = if expected >> 56 == 1 {
+                "meta-acid2048-v1"
+            } else {
+                "meta-acid3072-v1"
+            };
+            if primary_program != expected || profile != expected_profile {
                 return Err(bad(&format!(
                     "Switch 2 package #{} ({:016x}) must use its verified Program {:016x}",
                     p.ordinal, p.title_id, expected
@@ -2116,7 +2229,7 @@ fn stage_nup_bounded(
             let native_multi_base = multi
                 .as_ref()
                 .is_some_and(|plan| plan.program(p) == Some(primary_program))
-                && profile == "meta-acid3072-v1";
+                && matches!(profile, "meta-acid2048-v1" | "meta-acid3072-v1");
             if !native_standalone && !native_multi_base {
                 return Err(bad("NPDM Program does not match the declared application"));
             }
