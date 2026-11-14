@@ -1,5 +1,7 @@
 # Reversible extraction
 
+Applies to **NXFormat / NXConvert 1.0.4**.
+
 `nxconvert extract GAME.nx NEW_FOLDER` writes the game files plus
 `NEW_FOLDER/.nxrestore.zst`. Keep that file with the extracted folder.
 
@@ -313,10 +315,12 @@ configured memory limit; the full decompressed section is never staged. The
 same file paths feed normal edited repacking. Unknown compression types, sparse
 and metadata-hashed storage and unsupported tree shapes still fail explicitly.
 
-A compact restoration recipe retains original LZ4 storage bytes literally rather
-than guessing an encoder configuration. This preserves exact original NX/package
-replay, but the recipe may approach source size for these snapshots. The NX format
-and restoration opcodes do not change. An unchanged roundtrip remains byte exact.
+A compact restoration recipe derives supported original LZ4 storage from
+extracted file bytes, using the reconstruction rules described above. Bytes that
+cannot be derived remain literal, so recipe size depends on the source layout.
+Recipes using derived LZ4 instructions use `NXRSTR03` and require NXConvert 1.0.4
+to restore; existing `NXRSTR02` recipes remain readable. The NX archive format is
+unchanged, and an unchanged roundtrip remains byte exact.
 
 Opt-in read-only tests can inspect local native inputs without publishing game
 files: set `NXFORMAT_COMPRESSED_PROBES` to a TSV containing label, package path,

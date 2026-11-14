@@ -1,6 +1,6 @@
 # NXConvert commands and integration
 
-Applies to **NXFormat / NXConvert 1.0.3**.
+Applies to **NXFormat / NXConvert 1.0.4**.
 
 NXConvert is a native application and command-line tool. Start `nxconvert`
 without arguments to open the window; use `nxconvert --help` for the current

@@ -1,8 +1,38 @@
-# Unreleased
+# NXFormat 1.0.4
+
+NXFormat 1.0.4 improves Switch 2 Edition and multi-Program imports, handles
+incomplete sparse native bases with their matching updates, and makes extracted
+games reversible with compact restoration recipes. The NX wire versions remain
+`(0,2)` and `(0,3)`; existing C/C++ readers and the C ABI are unchanged.
+
+## What is new in 1.0.4
+
+- Import Switch 2 Editions with legacy and native Programs, indexed updates and
+  ordinary DLC. Validate each Program using its own NPDM and preserve exact
+  Program/version dependencies rather than guessing from package names.
+- Import extracted `program/<index>` dumps using shared CNMT and per-Program
+  NPDM/control metadata, including Xenoblade Edition layouts.
+- Preserve root `control.nacp` and mixed legacy/standard NUP metadata records.
+  Use explicit package titles when a NACP title table is opaque or invalid,
+  without changing the original metadata bytes.
+- Recover omitted RomFS child counts in interior or trailing child-table gaps
+  only when ownership is unambiguous. Reject multiple missing directory counts
+  instead of moving nested files into the RomFS root.
+- Support rewritten incomplete sparse native bases only with an independently
+  validated matching update executable, including R-Type Dimensions III.
+- Keep compact restoration enabled by default. Reconstruct native LZ4 storage
+  from extracted content where possible, retaining only necessary literals;
+  the tested R-Type recipe decreased from about 961 MB to 11 MB.
+  Recipes with derived LZ4 instructions use `NXRSTR03` and require NXConvert
+  1.0.4 to restore; existing `NXRSTR02` recipes remain readable.
+- Make archive details scroll, simplify Back navigation and restoration help,
+  and make operation errors easier to read.
+
+## Extraction and restoration
 
 - Extract internally compressed native RomFS using bounded RAW/zero/LZ4 reads,
   including supported BKTR updates. Verify the underlying IVFC data and reachable
-  hash blocks; retain original compressed storage literally for exact restoration.
+  hash blocks; retain compressed bytes literally when they cannot be reconstructed.
   Full macOS conformance uses the Intel runner pool, retaining arm64 coverage in
   the other macOS jobs, after hosted arm64 capacity failures before job startup.
 
@@ -29,7 +59,7 @@
   during edited restoration. Verify retained payloads while streaming them.
 - Use compact restoration recipes by default; the full-copy portable creation
   mode and its desktop checkbox have been removed. Existing literal recipes
-  remain readable. The NX and restoration stream layouts are unchanged.
+  remain readable. NX archive layouts are unchanged.
 
 - Keep successfully extracted files when optional restoration-recipe creation
   fails. Add `extract --no-restore` and a desktop checkbox, enabled by default.
@@ -55,14 +85,12 @@
 - Add bounded traversal, streaming IVFC verification and regression coverage for
   mixed base/patch reads, corruption, paths, memory limits and native roundtrips.
 
-# NXFormat 1.0.3
+## Changes in 1.0.3
 
 NXFormat 1.0.3 fixes importing extracted game folders copied through macOS and
 large conversions that failed with "Too many open files" on macOS.
 The fix applies to NXConvert's desktop application, command-line tool and C API.
 The NX wire formats and C/C++ reader API are unchanged.
-
-## What is new in 1.0.3
 
 - Raise the process's open-file limit at startup (macOS defaults to 256), close
   each NUP or source file as soon as it is read, and bound the pinned directory
@@ -133,7 +161,7 @@ The NX wire formats and C/C++ reader API are unchanged.
 
 NXConvert does not decrypt content or provide keys or game files. Emulator
 compatibility depends on the emulator integration and the selected content.
-This release is **NXFormat / NXConvert 1.0.3**, with separate 4096-byte header
+This release is **NXFormat / NXConvert 1.0.4**, with separate 4096-byte header
 pages. The exact binary header fields are defined in the format specification.
 
 ## Packages
@@ -146,7 +174,7 @@ pages. The exact binary header fields are defined in the format specification.
 | Android arm64 | Shared/static libraries and headers, no desktop app |
 
 Release archives include CMake package configuration. `SHA256SUMS` is published
-as a separate attachment. `nxformat-xmake-1.0.3.zip` contains the xmake package
+as a separate attachment. `nxformat-xmake-1.0.4.zip` contains the xmake package
 repository populated with those archive hashes. Extract it and register the
 local directory with xmake. Publication adds no commits to the source repository.
 
