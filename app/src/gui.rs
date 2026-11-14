@@ -978,7 +978,7 @@ impl Default for App {
             no_compress: false,
             recipe: true,
             restore_recipe: true,
-            portable_restore: true,
+            portable_restore: false,
             include_firmware: true,
             omitted_firmware: HashSet::new(),
             nup_platforms: HashMap::new(),
