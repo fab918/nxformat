@@ -11,7 +11,7 @@ games reversible with compact restoration recipes. The NX wire versions remain
   ordinary DLC. Validate each Program using its own NPDM and preserve exact
   Program/version dependencies rather than guessing from package names.
 - Import extracted `program/<index>` dumps using shared CNMT and per-Program
-  NPDM/control metadata, including Xenoblade Edition layouts.
+  NPDM/control metadata, including mixed legacy/native Edition layouts.
 - Preserve root `control.nacp` and mixed legacy/standard NUP metadata records.
   Use explicit package titles when a NACP title table is opaque or invalid,
   without changing the original metadata bytes.
@@ -19,10 +19,10 @@ games reversible with compact restoration recipes. The NX wire versions remain
   only when ownership is unambiguous. Reject multiple missing directory counts
   instead of moving nested files into the RomFS root.
 - Support rewritten incomplete sparse native bases only with an independently
-  validated matching update executable, including R-Type Dimensions III.
+  validated matching update executable.
 - Keep compact restoration enabled by default. Reconstruct native LZ4 storage
   from extracted content where possible, retaining only necessary literals;
-  the tested R-Type recipe decreased from about 961 MB to 11 MB.
+  one measured recipe decreased from about 961 MB to 11 MB.
   Recipes with derived LZ4 instructions use `NXRSTR03` and require NXConvert
   1.0.4 to restore; existing `NXRSTR02` recipes remain readable.
 - Make archive details scroll, simplify Back navigation and restoration help,
@@ -74,7 +74,7 @@ games reversible with compact restoration recipes. The NX wire versions remain
   rebuild original packages after modifications. NX format compatibility is
   unchanged.
 - Compact restoration uses path IDs, an aggregate inventory fingerprint and
-  derived IVFC hash runs: the tested 30XX recipe shrank from 8.7 MB to 1.8 MB.
+  derived IVFC hash runs: one measured recipe shrank from 8.7 MB to 1.8 MB.
 
 - Fix issue #9: native extraction now includes verified RomFS, BKTR update views
   and DLC instead of silently exporting ExeFS alone. Multi-Program and version

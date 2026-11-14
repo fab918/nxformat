@@ -31,7 +31,7 @@ modified NX because their original byte hashes no longer describe its content.
 No original DNSP reconstruction is promised after editing. The source extraction
 and its recipe are kept, so reverting the edits allows exact restoration again.
 
-Unchanged roundtrip validation on 30XX restores the exact 820,011,768-byte NX and
+Unchanged roundtrip validation on a reference archive restores the exact 820,011,768-byte NX and
 its three original DNSP packages. Editing one DLC RomFS file, including its size,
 then repacking and reextracting changes exactly that path among 11,953 files.
 
@@ -63,7 +63,7 @@ Already exported raw base content is reused without decoding or describing it
 again. This requires no extra LZ4 dependency, source-size temporary copy or
 duplicate compressed-data sidecar.
 
-On R-Type Dimensions III (base 1.0.1 plus update 1.0.4), the 4,032,943,808-byte NX
+On a reference native package set (base plus update), the 4,032,943,808-byte NX
 exported 7,862,031,843 bytes of files. This reduced the compact recipe from
 961,057,921 to **10,969,404 bytes** (98.86% smaller). Exact restoration matched the
 original NX SHA-256 and both original DNSP recipes verified, with the default
@@ -106,7 +106,7 @@ sorted path/type/size/content-hash inventory detects edits; per-file and per-blo
 hash copies are omitted because the inventory fingerprint, recipe footer and
 final original-NX SHA-256 provide the required checks.
 
-On the 30XX test archive this reduced an initial 8,692,673-byte recipe to
+On the reference test archive this reduced an initial 8,692,673-byte recipe to
 **1,804,114 bytes**, about 79% smaller. Exact size depends on the archive, including
 unmapped content, stale generations, metadata and source resources. The recipe
 is not assumed to contain metadata only.
@@ -132,7 +132,7 @@ the desktop checkbox can disable recipe creation. Existing recipes that retain
 original blocks as literals remain readable, including recipes produced by the
 former portable mode; the restoration stream format is unchanged.
 
-On the local Kirby Switch 2 roundtrip, a 15,969,850,688-byte NX extracted to
+On a measured Switch 2 roundtrip, a 15,969,850,688-byte NX extracted to
 17,773,456,082 bytes of files and a **6,559,628-byte compact recipe**. A repeated
 extraction with periodic file-size sampling peaked at 17,780,015,710 bytes
 of file content, including its temporary recipe; no original-size NX copy was
