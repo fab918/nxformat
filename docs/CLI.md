@@ -160,6 +160,25 @@ does not authenticate Nintendo signatures or validate every native RomFS/BKTR
 execution path. NX `IntegrityPolicy::Strict` independently checks NX payloads and
 file digests. See [SECURITY.md](SECURITY.md) for Fast/Strict editing policies.
 
+## Extracted dumps with separate Programs
+
+Extracted dumps also support separate `program/0` through `program/15` trees:
+at the package root, under `base/`, under `updates/<version>/`, and under
+`dlc/<title>/<version>/` with an optional `base/` wrapper. A CNMT descriptor in
+the package's `meta/` or a sibling Program's `meta/` supplies the application,
+type and numeric version; conflicting names/metadata are rejected. Each
+executable Program must match its CNMT index and validated NPDM. The interface
+and `pack-tree` use the same associations, including explicit tree selections.
+
+Legacy and Ounce Programs remain separate, with their own control metadata.
+Ancillary `control/`, `logo/`, `legal/` and `meta/` trees are preserved below
+`data/`. DLC minimum application versions from CNMT become dependencies;
+an absent required version is rejected. Without a supplied base, extracted
+updates use the existing automatic-import contract: the selected trees must
+already contain complete materialized files. CNMT does not prove that property,
+and the importer cannot reconstruct missing base data from directory names.
+Use an explicit import manifest for layouts or associations outside this policy.
+
 ## NUP migration
 
 ```text
@@ -173,6 +192,38 @@ replaces the base ExeFS when supplied and shadows individual RomFS/data paths;
 other base files remain available. DLC uses its declared add-on title ID.
 Executable add-ons and unresolved or ambiguous package relationships are rejected.
 Future NUP versions require explicit support.
+
+Switch 2 Edition packages may combine a native Ounce Program with a legacy
+Program 0 whose NPDM retains its Switch 1 identity. Each NPDM is validated
+against its own structural profile and family; the upgrade DLC selects the
+primary Ounce Program. A lone Ounce base with its matching legacy upgrade DLC
+is supported too. Root `control`, `logo`, `legal` and `meta` directories are
+preserved under `data/` with their original directory names.
+
+If a producer zeroed a declared RomFS root's child count, the importer can
+recover an interior child-table gap only when it has one unambiguous RomFS
+owner and its entries have no other parent. Bounds, names, cycles and file
+hashes are still checked; unexplained gaps and overlaps remain errors.
+
+Packages with an additional `program1` through `program15` directory, each
+containing its own `exefs/main.npdm`, are imported as separate auxiliary Programs.
+Their `exefs/`, `romfs/` and `data/` paths are scoped to that Program, rather
+than added to the primary Program's files. The Program IDs must be in the same
+native Program family and match their directory index.
+
+For a Switch 2 Edition of an existing Switch 1 game, an NX application ID may
+start with `01` while its upgraded Ounce Program starts with `04`. The importer
+recognizes this relationship only when a validated Switch 2 NPDM confirms the
+same lower application-ID bits. When the legacy base is supplied, it becomes
+an auxiliary Program, the Ounce update is the primary standalone-update
+Program, and its complete materialized view declares a `requires` dependency
+on the latest applicable legacy update, or on the base when there is no update.
+DLC remains attached to the legacy application ID. Without
+a base, an Ounce standalone update can use that legacy application ID only if
+an included upgrade-pack DLC has the exact matching add-on index. An unrelated
+update title ID or mismatched native Program ID is rejected. These relationships
+use existing NX Catalog Program and dependency records and do not change the
+on-disk version or reader.
 
 Before extraction, declared expansion is checked against import and temporary-disk
 limits. Runtime accounting covers decoded files, native metadata and copy fallback
@@ -234,6 +285,8 @@ dependency TAB key TAB required-base|requires TAB target-key
 compose TAB key TAB replace-delete-v1 TAB base-key TAB base-identity-hex64
 remove TAB key TAB exact-path
 exclude TAB key TAB exact-path
+program-view TAB key TAB programN
+data-view TAB key TAB control|logo|legal|meta
 build TAB key TAB expected-build-id-hex64
 content TAB key TAB content-id-hex32
 addon TAB key TAB addon-title-id-hex16
@@ -241,6 +294,21 @@ title|publisher|display-version TAB key TAB declared-text
 nacp TAB key TAB relative-control.nacp
 icon TAB key TAB native-language-name TAB relative-icon-path
 ```
+
+Use `program-view` on a primary executable snapshot to declare a child
+`program1` through `program15` directory. An additional `snapshot` record must
+declare that exact child root as an auxiliary Program of the same application
+and version, with its own Program ID and NPDM. For example, a source rooted at
+`base` may have both `base/exefs/main.npdm` (primary) and
+`base/program1/exefs/main.npdm` (auxiliary). `program-view` prevents the primary
+snapshot from absorbing or duplicating the child Program's files. These are
+import declarations only: the NX 1.0 wire format and reader are unchanged.
+
+`data-view` explicitly maps one ancillary directory from the selected source
+root to `data/<name>` in that snapshot. Its files remain part of the imported
+content and source verification; missing directories and destination collisions
+are rejected. This declaration changes only source interpretation, not NX bytes
+or the reader API.
 
 DLC needs a source content ID or a declared add-on title ID. Executable or partial
 DLC is unsupported. Declared text remains provenance; native display metadata is
@@ -378,10 +446,11 @@ the already extracted files; failure while extracting the files still removes
 incomplete output. ExeFS-only Program NCAs are exported with an explicit missing
 RomFS notice, and data-only updates use their exact inherited Program dependency.
 
-`extract ... --portable-restore` keeps original compressed block bytes, making
-exact restoration independent of the Zstd encoder version. Both recipe modes
-warn that additional disk use may approach the source NX size. The flags
-`--portable-restore` and `--no-restore` are mutually exclusive. Modified repacks
+Compact reconstruction is the only recipe creation mode. It references extracted
+file ranges and retains metadata or original blocks only when needed for exact
+replay. Recipe size depends on the archive; exact recompression requires a
+compatible Zstd encoder. Recipes from the former portable mode remain readable.
+Modified repacks
 preserve original NACP, localized artwork and titles, execution metadata and
 source resources in addition to the declared game-file paths.
 Edited restoration uses a compact metadata/resource store instead of a temporary

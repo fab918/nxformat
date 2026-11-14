@@ -173,7 +173,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.heading("Sources");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Clear").clicked() {
+                if theme::back_button(ui).clicked() {
                     self.sources.clear();
                     self.textures.clear();
                     self.appearances.clear();
@@ -497,22 +497,66 @@ impl App {
 
     /// The last status line and the command log.
     fn activity(&self, ui: &mut egui::Ui) {
+        let color = |level| match level {
+            LogLevel::Error => Color32::from_rgb(255, 157, 150),
+            LogLevel::Warning => Color32::from_rgb(240, 202, 126),
+            LogLevel::Success => Color32::from_rgb(164, 218, 174),
+            LogLevel::Info => theme::TEXT,
+        };
         if !self.status.is_empty() {
             ui.add_space(10.0);
-            ui.add(egui::Label::new(theme::muted(&self.status).small()).wrap());
+            ui.add(
+                egui::Label::new(RichText::new(&self.status).color(color(log_level(&self.status))))
+                    .wrap()
+                    .selectable(true),
+            );
         }
         if !self.log.is_empty() {
+            let last_error = self
+                .log
+                .iter()
+                .rposition(|line| log_level(line) == LogLevel::Error);
             egui::CollapsingHeader::new(
-                theme::muted(format!("Activity ({})", self.log.len())).small(),
+                RichText::new(format!("Activity ({})", self.log.len())).color(
+                    if last_error.is_some() {
+                        color(LogLevel::Error)
+                    } else {
+                        TEXT
+                    },
+                ),
             )
+            .id_salt(("activity-console", last_error))
+            .default_open(last_error.is_some())
             .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(110.0)
-                    .stick_to_bottom(true)
+                if ui.small_button("Copy log").clicked() {
+                    ui.ctx().copy_text(self.log.join("\n"));
+                }
+                egui::Frame::NONE
+                    .fill(theme::BG)
+                    .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                    .corner_radius(8)
+                    .inner_margin(10)
                     .show(ui, |ui| {
-                        for line in &self.log {
-                            ui.label(RichText::new(line).monospace().small());
-                        }
+                        ui.set_min_width(ui.available_width());
+                        egui::ScrollArea::vertical()
+                            .id_salt("activity-lines")
+                            .max_height(220.0)
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 6.0;
+                                for line in &self.log {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(line)
+                                                .monospace()
+                                                .size(13.0)
+                                                .color(color(log_level(line))),
+                                        )
+                                        .wrap()
+                                        .selectable(true),
+                                    );
+                                }
+                            });
                     });
             });
         }
@@ -600,54 +644,59 @@ impl App {
         let mut action = None;
         theme::card().inner_margin(16).show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.horizontal(|ui| {
-                if let Some(texture) = &self.archive_cover {
-                    ui.add(
-                        egui::Image::new(texture)
-                            .fit_to_exact_size(egui::vec2(80.0, 80.0))
-                            .corner_radius(12),
-                    );
-                } else {
-                    theme::brand(ui, 80.0);
-                }
-                ui.vertical(|ui| {
-                    let title = archive
-                        .metadata
-                        .as_ref()
-                        .map(|m| m.title.clone())
-                        .filter(|title| !title.is_empty())
-                        .or_else(|| {
-                            archive
-                                .snapshots
-                                .iter()
-                                .find(|s| !s.name.is_empty())
-                                .map(|s| s.name.clone())
-                        })
-                        .unwrap_or_else(|| file_name(&archive.path));
-                    ui.heading(title);
-                    if let Some(metadata) = archive
-                        .metadata
-                        .as_ref()
-                        .filter(|m| !m.publisher.is_empty())
-                    {
-                        ui.label(theme::muted(&metadata.publisher));
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), 40.0),
+                egui::Layout::left_to_right(egui::Align::Max),
+                |ui| {
+                    if let Some(texture) = &self.archive_cover {
+                        ui.add(
+                            egui::Image::new(texture)
+                                .fit_to_exact_size(egui::vec2(80.0, 80.0))
+                                .corner_radius(12),
+                        );
+                    } else {
+                        theme::brand(ui, 80.0);
                     }
-                    ui.label(theme::muted(format!(
-                        "{} · {} snapshots",
-                        bytes(archive.size),
-                        archive.snapshots.len()
-                    )));
-                    ui.add(
-                        egui::Label::new(theme::muted(file_name(&archive.path)).small()).truncate(),
-                    )
-                    .on_hover_text(&path);
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Open another…").clicked() {
-                        action = Some(("open".into(), vec![]));
+                    let text_width = (ui.available_width() - 108.0).max(120.0);
+                    ui.vertical(|ui| {
+                        ui.set_width(text_width);
+                        let title = archive
+                            .metadata
+                            .as_ref()
+                            .map(|m| m.title.clone())
+                            .filter(|title| !title.is_empty())
+                            .or_else(|| {
+                                archive
+                                    .snapshots
+                                    .iter()
+                                    .find(|s| !s.name.is_empty())
+                                    .map(|s| s.name.clone())
+                            })
+                            .unwrap_or_else(|| file_name(&archive.path));
+                        ui.heading(title);
+                        if let Some(metadata) = archive
+                            .metadata
+                            .as_ref()
+                            .filter(|m| !m.publisher.is_empty())
+                        {
+                            ui.label(theme::muted(&metadata.publisher));
+                        }
+                        ui.label(theme::muted(format!(
+                            "{} · {} snapshots",
+                            bytes(archive.size),
+                            archive.snapshots.len()
+                        )));
+                        ui.add(
+                            egui::Label::new(theme::muted(file_name(&archive.path)).small())
+                                .truncate(),
+                        )
+                        .on_hover_text(&path);
+                    });
+                    if theme::back_button(ui).clicked() {
+                        action = Some(("back".into(), vec![]));
                     }
-                });
-            });
+                },
+            );
         });
         ui.add_space(18.0);
         ui.horizontal_wrapped(|ui| {
@@ -697,21 +746,15 @@ impl App {
                     let mut args = vec!["extract".into(), path.clone(), text(&folder.join(stem))];
                     if !self.restore_recipe {
                         args.push("--no-restore".into());
-                    } else if self.portable_restore {
-                        args.push("--portable-restore".into());
                     }
                     action = Some(("Extracting archive".into(), args));
                 }
             }
         });
-        ui.checkbox(&mut self.restore_recipe, "Keep restoration recipe after extraction")
-            .on_hover_text("Create .nxrestore.zst after extracting. If recipe creation fails, the extracted files are kept and a warning is shown.");
-        ui.add_enabled(self.restore_recipe, egui::Checkbox::new(&mut self.portable_restore, "Portable restoration (independent of encoder version)"))
-            .on_hover_text("Preserve original compressed blocks instead of recompressing them. The recipe may approach the original NX size.");
-        if self.restore_recipe {
-            ui.label(theme::muted(format!("Allow roughly {} of additional space for the recipe, besides extracted files. Compact mode may be much smaller but needs a compatible Zstd encoder for exact restoration.", bytes(archive.size))));
-        }
-        ui.label(theme::muted("The optional compressed .nxrestore.zst recipe in the folder lets you drop the whole folder back to restore the exact NX and its original package recipes. Edited files are repacked at the same relative paths; original-package reconstruction is then unavailable."));
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.restore_recipe, "Keep restoration recipe");
+            theme::info(ui, &["Compact restoration recipe", "When extracting, save instructions to recreate the original NX from the extracted files later. The recipe avoids copying game data when it can reconstruct it exactly.", "Some original data may still need to be retained, so size depends on the archive. This does not change the NX you already have."]);
+        });
         if archive.snapshots.iter().any(|s| s.native) {
             ui.label("Native NCA content: extraction reads ExeFS and RomFS and verifies IVFC integrity. BKTR updates require their exact base. Unsupported layouts or missing bases stop extraction and remove its output.");
             ui.label(theme::muted("Native extraction supports decrypted IVFC content and internal RAW/zero/LZ4 compression. Advanced bucket trees, unknown compression codecs and sparse RomFS are not supported. Memory limits may reject large metadata tables."));
@@ -735,15 +778,10 @@ impl App {
             )));
         }
         ui.add_space(16.0);
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.scope(|ui| {
             ui.strong("Archive contents");
             ui.add_space(6.0);
             for snapshot in &archive.snapshots {
-                ui.label(theme::muted(if snapshot.native {
-                    "Native NCA snapshot · ExeFS / RomFS"
-                } else {
-                    "Extracted tree · stored files"
-                }));
                 theme::card().inner_margin(14).show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.horizontal(|ui| {
@@ -769,11 +807,16 @@ impl App {
                             ));
                             ui.label(
                                 theme::muted(format!(
-                                    "{:016X}",
+                                    "{:016X} · {}",
                                     if snapshot.kind == "base" {
                                         snapshot.application
                                     } else {
                                         snapshot.title
+                                    },
+                                    if snapshot.native {
+                                        "Native NCA"
+                                    } else {
+                                        "Extracted files"
                                     }
                                 ))
                                 .small(),
@@ -839,15 +882,12 @@ impl App {
                 });
             }
         });
-        if ui.button("Back to sources").clicked() {
-            self.archive = None;
-            self.archive_cover = None;
-            self.appearances.remove(ARCHIVE_ARTWORK);
-        }
         self.activity(ui);
         if let Some((label, mut args)) = action {
-            if label == "open" {
-                self.choose_archive();
+            if label == "back" {
+                self.archive = None;
+                self.archive_cover = None;
+                self.appearances.remove(ARCHIVE_ARTWORK);
             } else if args.first().is_some_and(|cmd| {
                 cmd == "extract-exefs" || cmd == "extract" || cmd == "extract-ncas"
             }) {
@@ -1000,7 +1040,10 @@ impl eframe::App for App {
                     if busy {
                         self.progress_view(ui);
                     } else if self.archive.is_some() {
-                        self.archive_view(ui);
+                        egui::ScrollArea::vertical()
+                            .id_salt("archive-page")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.archive_view(ui));
                     } else if self.sources.is_empty() {
                         self.empty(ui, false);
                     } else {

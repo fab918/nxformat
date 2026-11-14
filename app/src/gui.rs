@@ -152,6 +152,30 @@ enum Message {
     Done(Result<(), String>),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LogLevel {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+fn log_level(line: &str) -> LogLevel {
+    let text = line.trim_start().to_ascii_uppercase();
+    if text.starts_with("ERROR:") || text.starts_with("ERROR ") {
+        LogLevel::Error
+    } else if text.starts_with("WARNING") || text.starts_with("WARN:") {
+        LogLevel::Warning
+    } else if text.starts_with("PASS ")
+        || text.starts_with("SAVED ")
+        || text.starts_with("REBUILT ")
+    {
+        LogLevel::Success
+    } else {
+        LogLevel::Info
+    }
+}
+
 struct Running {
     job: Job,
     rx: mpsc::Receiver<Message>,
@@ -296,6 +320,57 @@ fn title_from_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn command_failure_keeps_its_cause_without_marking_stderr_diagnostics_as_errors() {
+        use super::*;
+        let (tx, rx) = mpsc::channel();
+        tx.send(Message::Line(true, "BUDGETS max_nodes=100000".into()))
+            .unwrap();
+        tx.send(Message::Line(
+            true,
+            "WARNING: restoration data could not be created".into(),
+        ))
+        .unwrap();
+        tx.send(Message::Done(Err(
+            "source file is truncated: romfs/game.bin".into(),
+        )))
+        .unwrap();
+        let mut app = App {
+            running: Some(Running {
+                job: Job {
+                    label: "Converting game".into(),
+                    args: vec![],
+                    purpose: Purpose::Pack,
+                    display: None,
+                    metadata: None,
+                    source_bytes: None,
+                },
+                rx,
+                cancel: CancellationToken::default(),
+                total: 0,
+                done: 0,
+                lines: vec![],
+                started: Instant::now(),
+            }),
+            ..Default::default()
+        };
+        app.poll(&egui::Context::default());
+        assert!(!app.busy());
+        assert_eq!(log_level(&app.log[0]), LogLevel::Info);
+        assert_eq!(log_level(&app.log[1]), LogLevel::Warning);
+        assert_eq!(
+            app.log
+                .iter()
+                .filter(|line| log_level(line) == LogLevel::Error)
+                .count(),
+            1
+        );
+        assert!(app
+            .status
+            .contains("source file is truncated: romfs/game.bin"));
+        assert_eq!(log_level(&app.status), LogLevel::Error);
+    }
+
     use super::{title_from_path, App, Content, Source};
     use std::path::Path;
 
@@ -698,6 +773,89 @@ mod tests {
         assert!(!snapshots.iter().any(|s| s.numeric_version == 131072));
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn indexed_dump_discovery_and_gui_conversion_share_native_associations() {
+        use nxformat_packer::{
+            import::{
+                self,
+                structures::NpdmProfile,
+                synthetic::{npdm, nso},
+            },
+            inspect_archive, IntegrityPolicy, ProgramKind, WriterOptions,
+        };
+        use std::fs;
+        const APP: u64 = 0x0100_4530_19aa_8000;
+        const OUNCE: u64 = 0x0400_4530_19aa_8001;
+        let dir =
+            std::env::temp_dir().join(format!("nxconvert-indexed-dump-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let package = dir.join("dump");
+        for (index, id, profile, name) in [
+            (0, APP, NpdmProfile::MetaAcid2048V1, "Legacy"),
+            (1, OUNCE, NpdmProfile::MetaAcid3072V1, "Ounce Edition"),
+        ] {
+            let root = package.join(format!("updates/196608/program/{index}"));
+            for child in ["exefs", "romfs", "control"] {
+                fs::create_dir_all(root.join(child)).unwrap();
+            }
+            fs::write(root.join("exefs/main.npdm"), npdm(id, profile)).unwrap();
+            fs::write(root.join("exefs/main"), nso(0x40 + index, false)).unwrap();
+            fs::write(root.join("romfs/common.bin"), [index; 17]).unwrap();
+            fs::write(
+                root.join("control/control.nacp"),
+                import::synthetic_nup::nacp(&[(0, name)]),
+            )
+            .unwrap();
+        }
+        let mut cnmt = vec![0u8; 0x20 + 0x18 + 2 * 0x38];
+        cnmt[..8].copy_from_slice(&(APP | 0x800).to_le_bytes());
+        cnmt[8..12].copy_from_slice(&196608u32.to_le_bytes());
+        cnmt[12] = 0x81;
+        cnmt[14] = 0x18;
+        cnmt[16] = 2;
+        cnmt[0x20..0x28].copy_from_slice(&APP.to_le_bytes());
+        for i in 0..2 {
+            cnmt[0x38 + i * 0x38 + 0x36] = 1;
+            cnmt[0x38 + i * 0x38 + 0x37] = i as u8;
+        }
+        fs::create_dir_all(package.join("updates/196608/program/0/meta")).unwrap();
+        fs::write(
+            package.join("updates/196608/program/0/meta/shared.cnmt"),
+            cnmt,
+        )
+        .unwrap();
+        let token = super::CancellationToken::default();
+        let selected =
+            super::discovery::scan(vec![package.join("updates/196608/program/1")], &token).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, package);
+        assert_eq!(selected[0].tree_roots, vec!["updates/196608/program/1"]);
+        assert_eq!(selected[0].contents.len(), 1);
+        assert_eq!(selected[0].contents[0].name, "Ounce Edition");
+        let mut app = App {
+            sources: super::discovery::scan(vec![package], &token).unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(app.sources.len(), 1);
+        assert!(app.sources[0].supported, "{}", app.sources[0].issue);
+        assert!(app.sources[0]
+            .contents
+            .iter()
+            .all(|c| c.application == APP && c.kind == "standalone"));
+        let output = app.games().remove(0).output.unwrap();
+        app.convert();
+        let job = app.queue.pop_front().unwrap();
+        super::cli::run_with_display(job.args, None, Some(token), job.display).unwrap();
+        let archive =
+            inspect_archive(output, &WriterOptions::default(), IntegrityPolicy::Strict).unwrap();
+        assert_eq!(archive.applications[0].snapshots.len(), 2);
+        assert!(archive.applications[0]
+            .programs
+            .iter()
+            .any(|p| p.program_id == OUNCE && p.kind == ProgramKind::Primary));
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 fn bytes(size: u64) -> String {
@@ -791,7 +949,6 @@ struct App {
     no_compress: bool,
     recipe: bool,
     restore_recipe: bool,
-    portable_restore: bool,
     include_firmware: bool,
     omitted_firmware: HashSet<String>,
     nup_platforms: HashMap<PathBuf, Platform>,
@@ -820,7 +977,6 @@ impl Default for App {
             no_compress: false,
             recipe: true,
             restore_recipe: true,
-            portable_restore: false,
             include_firmware: true,
             omitted_firmware: HashSet::new(),
             nup_platforms: HashMap::new(),
@@ -1330,7 +1486,7 @@ impl App {
                         archive.metadata = metadata;
                     }
                 }
-                Message::Line(error, line) => {
+                Message::Line(_stderr, line) => {
                     if let Some(value) = line.strip_prefix("@TOTAL\t") {
                         // Each @TOTAL adds to what the command expects;
                         // @PROGRESS counts from the start of the command.
@@ -1340,8 +1496,9 @@ impl App {
                     } else if line.starts_with('@') {
                         running.lines.push(line);
                     } else if !line.is_empty() {
-                        self.log
-                            .push(if error { format!("! {line}") } else { line });
+                        // stderr also carries ordinary progress/diagnostics.
+                        // Only explicit messages or a failed command are errors.
+                        self.log.push(line);
                     }
                 }
                 Message::Done(result) => finished = Some(result),
@@ -1378,7 +1535,7 @@ impl App {
                     .push(format!("{}: {note}", file_name(Path::new(path)))),
                 ["ISSUE", path, issue, ..] if running.job.purpose != Purpose::Scan => self
                     .log
-                    .push(format!("! {}: {issue}", file_name(Path::new(path)))),
+                    .push(format!("ERROR: {}: {issue}", file_name(Path::new(path)))),
                 ["SKIPPED", path, _, _, why, ..] => self
                     .log
                     .push(format!("{}: {why}", file_name(Path::new(path)))),
@@ -1396,8 +1553,9 @@ impl App {
                 format!("{}: cancelled, nothing was changed", running.job.label)
             }
             (Err(e), _) => {
-                self.log.push(format!("! {}: {e}", running.job.label));
-                format!("{}: failed", running.job.label)
+                let error = format!("ERROR: {}: {e}", running.job.label);
+                self.log.push(error.clone());
+                error
             }
             (Ok(()), _) => {
                 let output = running.job.args.iter().rev().find(|a| a.ends_with(".nx"));
@@ -1492,7 +1650,7 @@ impl App {
             }
         }
         if let Some(error) = error {
-            self.log.push(format!("! {error}"));
+            self.log.push(format!("ERROR: {error}"));
         }
     }
 

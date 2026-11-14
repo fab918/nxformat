@@ -5,6 +5,10 @@ use super::*;
 use crate::{inspect_archive, IntegrityPolicy, SnapshotType};
 
 const APP: u64 = 0x0400_0000_0000_1000;
+const LEGACY: u64 = 0x0100_4d30_0c5a_e000;
+const OUNCE: u64 = 0x0400_4d30_0c5a_e001;
+const XENOBLADE_LEGACY: u64 = 0x0100_ff50_0e34_a000;
+const XENOBLADE_OUNCE: u64 = 0x0400_ff50_0e34_a000;
 
 fn work(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("nx-nup-test-{name}-{}", std::process::id()));
@@ -180,6 +184,679 @@ fn standalone_update_needs_the_flag_and_no_base() {
     assert_eq!(s[0].snapshot_type, SnapshotType::StandaloneUpdate);
     assert!(s[0].dependencies.is_empty());
     fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn cross_application_errors_identify_package_and_owner() {
+    let dir = work("cross-application-diagnostic");
+    let nup = dir.join("unrelated.nup");
+    let other = APP + 0x10000;
+    for unrelated in [addon(other), update(other, 65536, 0)] {
+        let actual = if unrelated.kind == 2 {
+            unrelated.title_id
+        } else {
+            other | 0x800
+        };
+        let kind = if unrelated.kind == 2 {
+            "addon"
+        } else {
+            "update"
+        };
+        fs::write(&nup, build(&[base(APP), unrelated], true)).unwrap();
+        for message in [
+            inspect_nup(&nup, &limits(), &Default::default())
+                .err()
+                .unwrap()
+                .to_string(),
+            stage_nup(&nup, &dir, &nup_options(), &limits(), &Default::default())
+                .err()
+                .unwrap()
+                .to_string(),
+        ] {
+            assert!(message.contains("package #1"), "{message}");
+            assert!(message.contains(kind), "{message}");
+            assert!(message.contains(&format!("{actual:016x}")), "{message}");
+            assert!(message.contains(&format!("{APP:016x}")), "{message}");
+            assert!(message.contains(&format!("{other:016x}")), "{message}");
+        }
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn nested_program_views_roundtrip_without_changing_nx_format() {
+    let dir = work("multi-program");
+    let nup = dir.join("game.nup");
+    let out = dir.join("game.nx");
+    let mut original = base(APP);
+    original.extras.push(Node::Dir(
+        "program1",
+        vec![
+            Node::Dir("exefs", exefs(0x51, APP | 1)),
+            Node::Dir(
+                "romfs",
+                vec![Node::File("extra.bin", b"base extra".to_vec())],
+            ),
+        ],
+    ));
+    let mut patch = update(APP, 65536, 0);
+    patch.extras.push(Node::Dir(
+        "program1",
+        vec![
+            Node::Dir("exefs", exefs(0x52, APP | 1)),
+            Node::Dir(
+                "romfs",
+                vec![Node::File("extra.bin", b"new extra".to_vec())],
+            ),
+        ],
+    ));
+    fs::write(&nup, build(&[original, patch], true)).unwrap();
+    let options = WriterOptions::default();
+    for stream in [true, false] {
+        let mode = NupOptions {
+            stream,
+            ..nup_options()
+        };
+        convert_nup(&nup, &out, &mode, &limits(), &options).unwrap();
+        let summary = inspect_archive(&out, &options, IntegrityPolicy::Strict).unwrap();
+        assert_eq!(summary.applications.len(), 1);
+        assert_eq!(summary.applications[0].programs.len(), 2);
+        assert_eq!(summary.applications[0].snapshots.len(), 4);
+        let main_base = summary.applications[0]
+            .snapshots
+            .iter()
+            .find(|snapshot| {
+                snapshot.program_id == Some(APP) && snapshot.snapshot_type == SnapshotType::Base
+            })
+            .unwrap();
+        let main_update = summary.applications[0]
+            .snapshots
+            .iter()
+            .find(|snapshot| {
+                snapshot.program_id == Some(APP) && snapshot.snapshot_type == SnapshotType::Update
+            })
+            .unwrap();
+        let extra_base = summary.applications[0]
+            .snapshots
+            .iter()
+            .find(|snapshot| {
+                snapshot.program_id == Some(APP | 1) && snapshot.snapshot_type == SnapshotType::Base
+            })
+            .unwrap();
+        let extra = summary.applications[0]
+            .snapshots
+            .iter()
+            .find(|snapshot| {
+                snapshot.program_id == Some(APP | 1)
+                    && snapshot.snapshot_type == SnapshotType::Update
+            })
+            .unwrap();
+        assert_eq!(
+            main_update.dependencies[0].target_snapshot_identity,
+            main_base.identity
+        );
+        assert_eq!(
+            extra.dependencies[0].target_snapshot_identity,
+            extra_base.identity
+        );
+        assert_ne!(
+            extra.dependencies[0].target_snapshot_identity,
+            main_base.identity
+        );
+        let mut bytes = [0u8; 9];
+        crate::read_snapshot_file_range(
+            &out,
+            extra.identity,
+            "romfs/extra.bin",
+            0,
+            &mut bytes,
+            &options,
+        )
+        .unwrap();
+        assert_eq!(&bytes, b"new extra");
+        let verified = check_nup(&nup, &out, false, &limits(), &options).unwrap();
+        assert_eq!(verified.snapshots, 4);
+        fs::remove_file(&out).unwrap();
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn switch2_edition_keeps_legacy_application_and_both_programs() {
+    let dir = work("switch2-edition");
+    let nup = dir.join("edition.nup");
+    let out = dir.join("edition.nx");
+    let mut patch = update(OUNCE & !0xfff, 65536, 0);
+    patch.exefs = Some(exefs(0x73, OUNCE));
+    fs::write(&nup, build(&[base(LEGACY), patch, addon(LEGACY)], true)).unwrap();
+    let options = WriterOptions::default();
+    let info = inspect_nup(&nup, &limits(), &options.cancellation).unwrap();
+    assert_eq!(info.application_id, LEGACY);
+    assert_eq!(info.platform, crate::Platform::Switch2);
+    convert_nup(&nup, &out, &nup_options(), &limits(), &options).unwrap();
+    let archive = inspect_archive(&out, &options, IntegrityPolicy::Strict).unwrap();
+    assert_eq!(archive.applications.len(), 1);
+    let app = &archive.applications[0];
+    assert_eq!(app.application_id, LEGACY);
+    assert!(app
+        .programs
+        .iter()
+        .any(|p| p.program_id == LEGACY && p.kind == crate::ProgramKind::Auxiliary));
+    assert!(app
+        .programs
+        .iter()
+        .any(|p| p.program_id == OUNCE && p.kind == crate::ProgramKind::Primary));
+    let base = app
+        .snapshots
+        .iter()
+        .find(|s| s.snapshot_type == SnapshotType::Base)
+        .unwrap();
+    let upgrade = app
+        .snapshots
+        .iter()
+        .find(|s| s.program_id == Some(OUNCE))
+        .unwrap();
+    assert_eq!(upgrade.snapshot_type, SnapshotType::StandaloneUpdate);
+    assert!(upgrade
+        .dependencies
+        .iter()
+        .any(|d| d.kind == crate::DependencyKind::Requires
+            && d.target_snapshot_identity == base.identity));
+    assert_eq!(
+        check_nup(&nup, &out, false, &limits(), &options)
+            .unwrap()
+            .snapshots,
+        3
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn switch2_edition_multiple_base_packages_match_real_nup_ids() {
+    let dir = work("multi-base-edition");
+    let nup = dir.join("edition.nup");
+    let out = dir.join("edition.nx");
+    // Observed in the Xenoblade Definitive Edition NUP: Program 1 is listed
+    // before Program 0 and its 0100...B001 upgrade DLC is the third package.
+    let mut p1 = base(XENOBLADE_OUNCE | 1);
+    p1.romfs = Some(vec![Node::File("one.bin", b"program 1".to_vec())]);
+    let mut p0 = base(XENOBLADE_OUNCE);
+    p0.romfs = Some(vec![Node::File("zero.bin", b"program 0".to_vec())]);
+    fs::write(&nup, build(&[p1, p0, addon(XENOBLADE_LEGACY)], true)).unwrap();
+    let options = WriterOptions::default();
+    let wrong_platform = NupOptions {
+        platform: Some(crate::Platform::Switch1),
+        ..nup_options()
+    };
+    assert!(convert_nup(&nup, &out, &wrong_platform, &limits(), &options).is_err());
+    let info = inspect_nup(&nup, &limits(), &options.cancellation).unwrap();
+    assert_eq!(info.application_id, XENOBLADE_LEGACY);
+    assert_eq!(info.platform, crate::Platform::Switch2);
+    convert_nup(&nup, &out, &nup_options(), &limits(), &options).unwrap();
+    let archive = inspect_archive(&out, &options, IntegrityPolicy::Strict).unwrap();
+    assert_eq!(archive.applications.len(), 1);
+    let app = &archive.applications[0];
+    assert_eq!(app.application_id, XENOBLADE_LEGACY);
+    assert_eq!(app.snapshots.len(), 3);
+    assert!(app
+        .programs
+        .iter()
+        .any(|p| p.program_id == (XENOBLADE_OUNCE | 1) && p.kind == crate::ProgramKind::Primary));
+    assert!(app
+        .programs
+        .iter()
+        .any(|p| p.program_id == XENOBLADE_OUNCE && p.kind == crate::ProgramKind::Auxiliary));
+    for (id, present, absent) in [
+        (XENOBLADE_OUNCE, "romfs/zero.bin", "romfs/one.bin"),
+        (XENOBLADE_OUNCE | 1, "romfs/one.bin", "romfs/zero.bin"),
+    ] {
+        let snapshot = app
+            .snapshots
+            .iter()
+            .find(|s| s.program_id == Some(id))
+            .unwrap();
+        let mut bytes = [0u8; 9];
+        crate::read_snapshot_file_range(&out, snapshot.identity, present, 0, &mut bytes, &options)
+            .unwrap();
+        assert!(crate::read_snapshot_file_range(
+            &out,
+            snapshot.identity,
+            absent,
+            0,
+            &mut bytes,
+            &options
+        )
+        .is_err());
+    }
+    assert_eq!(
+        check_nup(&nup, &out, false, &limits(), &options)
+            .unwrap()
+            .snapshots,
+        3
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn switch2_multi_base_update_index_links_only_to_its_program() {
+    let dir = work("multi-base-indexed-update");
+    let nup = dir.join("edition.nup");
+    let out = dir.join("edition.nx");
+    let mut patch = update(XENOBLADE_OUNCE, 65536, 0);
+    patch.title_id = XENOBLADE_OUNCE | 0x801;
+    patch.exefs = Some(exefs(0x5a, XENOBLADE_OUNCE | 1));
+    fs::write(
+        &nup,
+        build(
+            &[
+                base(XENOBLADE_OUNCE | 1),
+                base(XENOBLADE_OUNCE),
+                patch,
+                addon(XENOBLADE_LEGACY),
+            ],
+            false,
+        ),
+    )
+    .unwrap();
+    let options = WriterOptions::default();
+    convert_nup(&nup, &out, &nup_options(), &limits(), &options).unwrap();
+    let archive = inspect_archive(&out, &options, IntegrityPolicy::Strict).unwrap();
+    let snapshots = &archive.applications[0].snapshots;
+    let program1_base = snapshots
+        .iter()
+        .find(|s| {
+            s.program_id == Some(XENOBLADE_OUNCE | 1) && s.snapshot_type == SnapshotType::Base
+        })
+        .unwrap();
+    let program0_base = snapshots
+        .iter()
+        .find(|s| s.program_id == Some(XENOBLADE_OUNCE) && s.snapshot_type == SnapshotType::Base)
+        .unwrap();
+    let update = snapshots
+        .iter()
+        .find(|s| s.snapshot_type == SnapshotType::Update)
+        .unwrap();
+    assert_eq!(update.program_id, Some(XENOBLADE_OUNCE | 1));
+    assert!(update.dependencies.iter().any(|d| {
+        d.kind == crate::DependencyKind::RequiredBase
+            && d.target_snapshot_identity == program1_base.identity
+    }));
+    assert!(!update
+        .dependencies
+        .iter()
+        .any(|d| d.target_snapshot_identity == program0_base.identity));
+    assert_eq!(
+        check_nup(&nup, &out, false, &limits(), &options)
+            .unwrap()
+            .snapshots,
+        4
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn indexed_romfs_only_update_inherits_the_correct_program_npdm() {
+    let dir = work("indexed-romfs-only");
+    let nup = dir.join("edition.nup");
+    let out = dir.join("edition.nx");
+    let mut update1 = update(XENOBLADE_OUNCE, 65536, 0);
+    update1.title_id = XENOBLADE_OUNCE | 0x801;
+    update1.exefs = None;
+    fs::write(
+        &nup,
+        build(
+            &[base(XENOBLADE_OUNCE), base(XENOBLADE_OUNCE | 1), update1],
+            true,
+        ),
+    )
+    .unwrap();
+    let options = WriterOptions::default();
+    convert_nup(&nup, &out, &nup_options(), &limits(), &options).unwrap();
+    let summary = inspect_archive(&out, &options, IntegrityPolicy::Strict).unwrap();
+    let snapshots = &summary.applications[0].snapshots;
+    let original = snapshots
+        .iter()
+        .find(|s| {
+            s.snapshot_type == SnapshotType::Base && s.program_id == Some(XENOBLADE_OUNCE | 1)
+        })
+        .unwrap();
+    let patched = snapshots
+        .iter()
+        .find(|s| s.snapshot_type == SnapshotType::Update)
+        .unwrap();
+    assert_eq!(patched.program_id, Some(XENOBLADE_OUNCE | 1));
+    assert!(patched.dependencies.iter().any(|d| {
+        d.kind == crate::DependencyKind::RequiredBase
+            && d.target_snapshot_identity == original.identity
+    }));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn switch2_multi_base_rejects_unrelated_and_unverified_packages() {
+    let dir = work("multi-base-invalid");
+    let nup = dir.join("bad.nup");
+    let out = dir.join("bad.nx");
+    let options = WriterOptions::default();
+    let valid = || vec![base(XENOBLADE_OUNCE | 1), base(XENOBLADE_OUNCE)];
+    let mut wrong_program = base(XENOBLADE_OUNCE | 1);
+    wrong_program.exefs = Some(exefs(0x5b, XENOBLADE_OUNCE | 2));
+    let mut wrong_update = update(XENOBLADE_OUNCE, 65536, 0);
+    wrong_update.title_id = XENOBLADE_OUNCE | 0x801;
+    wrong_update.exefs = Some(exefs(0x5c, XENOBLADE_OUNCE));
+    let mut wrong_suffix = update(XENOBLADE_OUNCE, 65536, 0);
+    wrong_suffix.title_id = XENOBLADE_OUNCE | 0x810;
+    let mut cases = Vec::new();
+    cases.push(vec![wrong_program, base(XENOBLADE_OUNCE)]);
+    cases.push(vec![
+        base(XENOBLADE_OUNCE | 1),
+        base(XENOBLADE_OUNCE | 0x10),
+    ]);
+    let mut mismatched_update = valid();
+    mismatched_update.push(wrong_update);
+    cases.push(mismatched_update);
+    let mut invalid_update = valid();
+    invalid_update.push(wrong_suffix);
+    cases.push(invalid_update);
+    let mut missing_exefs = update(XENOBLADE_OUNCE, 65536, 0);
+    missing_exefs.title_id = XENOBLADE_OUNCE | 0x801;
+    missing_exefs.exefs = Some(vec![]);
+    let mut missing_program = valid();
+    missing_program.push(missing_exefs);
+    cases.push(missing_program);
+    let mut missing_upgrade = valid();
+    missing_upgrade.push(addon(XENOBLADE_LEGACY + 2));
+    cases.push(missing_upgrade);
+    let mut unrelated_addon = valid();
+    unrelated_addon.push(addon(0x0100_aaaa_0e34_a000));
+    cases.push(unrelated_addon);
+    for packages in cases {
+        fs::write(&nup, build(&packages, false)).unwrap();
+        assert!(convert_nup(&nup, &out, &nup_options(), &limits(), &options).is_err());
+        assert!(!out.exists());
+    }
+    let mut wrong_single_base = update(XENOBLADE_OUNCE, 65536, 0);
+    wrong_single_base.title_id = XENOBLADE_OUNCE | 0x801;
+    fs::write(
+        &nup,
+        build(&[base(XENOBLADE_OUNCE), wrong_single_base], false),
+    )
+    .unwrap();
+    let error = inspect_nup(&nup, &limits(), &options.cancellation)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        error.contains("no verified matching base Program"),
+        "{error}"
+    );
+    assert!(convert_nup(&nup, &out, &nup_options(), &limits(), &options).is_err());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn real_producer_edition_layouts_preserve_legacy_and_ounce_programs() {
+    let dir = work("producer-edition-layouts");
+    let nup = dir.join("edition.nup");
+    let out = dir.join("edition.nx");
+    let options = WriterOptions::default();
+    for mixed in [false, true] {
+        let mut packages = vec![base(OUNCE)];
+        if mixed {
+            let mut legacy = base(OUNCE & !0xfff);
+            legacy.exefs = Some(vec![
+                Node::File("main", super::super::synthetic::nso(0x42, false)),
+                Node::File("main.npdm", npdm(LEGACY, NpdmProfile::MetaAcid2048V1)),
+            ]);
+            packages.push(legacy);
+        }
+        for name in ["control", "logo", "legal", "meta"] {
+            packages[0].extras.push(Node::Dir(
+                name,
+                vec![Node::File("preserved.bin", vec![42; 17])],
+            ));
+        }
+        packages.push(addon(LEGACY));
+        let mut bytes = build(&packages, true);
+        if !mixed {
+            // The producer left the RomFS child slots but zeroed its count.
+            let romfs = u32_at(&bytes, SUPERBLOCK + 0x30 + 0x10) as usize;
+            let dirs_at = SUPERBLOCK + 0x30 + packages.len() * PACKAGE;
+            bytes[dirs_at + romfs * DIRECTORY + 12..dirs_at + romfs * DIRECTORY + 16].fill(0);
+            let size = u64_at(&bytes, 0x10) as usize;
+            let digest = crate::hash::sha256(&bytes[SUPERBLOCK..SUPERBLOCK + size]);
+            bytes[0x18..0x38].copy_from_slice(&digest);
+        }
+        fs::write(&nup, bytes).unwrap();
+        assert_eq!(
+            inspect_nup(&nup, &limits(), &options.cancellation)
+                .unwrap()
+                .application_id,
+            LEGACY
+        );
+        for stream in [false, true] {
+            convert_nup(
+                &nup,
+                &out,
+                &NupOptions {
+                    stream,
+                    ..nup_options()
+                },
+                &limits(),
+                &options,
+            )
+            .unwrap();
+            assert_eq!(
+                check_nup(&nup, &out, false, &limits(), &options)
+                    .unwrap()
+                    .snapshots,
+                packages.len()
+            );
+            let archive = inspect_archive(&out, &options, IntegrityPolicy::Strict).unwrap();
+            assert!(archive.applications[0]
+                .programs
+                .iter()
+                .any(|p| p.program_id == OUNCE && p.kind == crate::ProgramKind::Primary));
+            if mixed {
+                assert!(archive.applications[0]
+                    .programs
+                    .iter()
+                    .any(|p| p.program_id == LEGACY));
+            }
+            fs::remove_file(&out).unwrap();
+        }
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn indexed_updates_require_the_exact_declared_program() {
+    let dir = work("indexed-update-program-proof");
+    let nup = dir.join("indexed.nup");
+    let out = dir.join("indexed.nx");
+    let options = WriterOptions::default();
+    for standalone in [false, true] {
+        for with_addon in [false, true] {
+            for observed in [None, Some(OUNCE), Some(OUNCE + 1)] {
+                let mut patch = update(OUNCE & !0xfff, 65536, u8::from(standalone));
+                patch.title_id = (OUNCE & !0xfff) | 0x801;
+                patch.exefs = observed.map(|id| exefs(0x78, id));
+                let mut packages = vec![patch];
+                if with_addon {
+                    packages.push(addon(LEGACY));
+                }
+                if !standalone {
+                    packages.push(base(LEGACY));
+                }
+                fs::write(&nup, build(&packages, true)).unwrap();
+                if observed == Some(OUNCE) {
+                    assert!(inspect_nup(&nup, &limits(), &options.cancellation).is_ok());
+                    convert_nup(&nup, &out, &nup_options(), &limits(), &options).unwrap();
+                    check_nup(&nup, &out, false, &limits(), &options).unwrap();
+                    fs::remove_file(&out).unwrap();
+                } else {
+                    assert!(
+                        inspect_nup(&nup, &limits(), &options.cancellation).is_err(),
+                        "indexed update accepted: standalone={standalone}, NPDM={observed:?}"
+                    );
+                    assert!(convert_nup(&nup, &out, &nup_options(), &limits(), &options).is_err());
+                    assert!(!out.exists());
+                }
+            }
+        }
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn unknown_nup_package_root_reports_exact_entry() {
+    let dir = work("unknown-root-diagnostic");
+    let nup = dir.join("bad.nup");
+    let out = dir.join("bad.nx");
+    let mut pkg = base(APP);
+    pkg.extras
+        .push(Node::Dir("unexpected_switch2_tree", vec![]));
+    fs::write(&nup, build(&[pkg], false)).unwrap();
+    let error = convert_nup(
+        &nup,
+        &out,
+        &nup_options(),
+        &limits(),
+        &WriterOptions::default(),
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(error.contains("unexpected_switch2_tree"), "{error}");
+    assert!(error.contains("package #0"), "{error}");
+    assert!(!out.exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn switch2_edition_standalone_update_with_matching_upgrade_dlc() {
+    let dir = work("switch2-standalone-edition");
+    let nup = dir.join("edition.nup");
+    let out = dir.join("edition.nx");
+    let mut patch = update(OUNCE & !0xfff, 65536, 1);
+    patch.exefs = Some(exefs(0x74, OUNCE));
+    fs::write(&nup, build(&[patch, addon(LEGACY)], true)).unwrap();
+    let options = WriterOptions::default();
+    convert_nup(&nup, &out, &nup_options(), &limits(), &options).unwrap();
+    let archive = inspect_archive(&out, &options, IntegrityPolicy::Strict).unwrap();
+    assert_eq!(archive.applications.len(), 1);
+    assert_eq!(archive.applications[0].application_id, LEGACY);
+    assert_eq!(archive.applications[0].programs[0].program_id, OUNCE);
+    assert_eq!(
+        check_nup(&nup, &out, false, &limits(), &options)
+            .unwrap()
+            .snapshots,
+        2
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn switch2_edition_inherits_latest_legacy_update_content() {
+    let dir = work("edition-with-legacy-patch");
+    let nup = dir.join("edition.nup");
+    let out = dir.join("edition.nx");
+    let mut patch = update(OUNCE & !0xfff, 65536, 0);
+    patch.exefs = Some(exefs(0x76, OUNCE));
+    patch.romfs = Some(vec![Node::File("switch2.bin", b"new content".to_vec())]);
+    fs::write(
+        &nup,
+        build(
+            &[base(LEGACY), update(LEGACY, 65536, 0), patch, addon(LEGACY)],
+            true,
+        ),
+    )
+    .unwrap();
+    let options = WriterOptions::default();
+    convert_nup(&nup, &out, &nup_options(), &limits(), &options).unwrap();
+    let archive = inspect_archive(&out, &options, IntegrityPolicy::Strict).unwrap();
+    let edition = archive.applications[0]
+        .snapshots
+        .iter()
+        .find(|s| s.program_id == Some(OUNCE))
+        .unwrap();
+    let legacy_patch = archive.applications[0]
+        .snapshots
+        .iter()
+        .find(|s| s.program_id == Some(LEGACY) && s.snapshot_type == SnapshotType::Update)
+        .unwrap();
+    assert!(edition
+        .dependencies
+        .iter()
+        .any(|d| d.kind == crate::DependencyKind::Requires
+            && d.target_snapshot_identity == legacy_patch.identity));
+    let mut bytes = [0u8; 14];
+    crate::read_snapshot_file_range(
+        &out,
+        edition.identity,
+        "romfs/shadowed.bin",
+        0,
+        &mut bytes,
+        &options,
+    )
+    .unwrap();
+    assert_eq!(&bytes, b"update version");
+    assert_eq!(
+        check_nup(&nup, &out, false, &limits(), &options)
+            .unwrap()
+            .snapshots,
+        4
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn legacy_and_ounce_updates_may_share_nup_title_and_version() {
+    let dir = work("edition-same-title-version");
+    let nup = dir.join("edition.nup");
+    let out = dir.join("edition.nx");
+    let mut patch = update(LEGACY, 65536, 0);
+    patch.exefs = Some(exefs(0x77, OUNCE));
+    patch.romfs = Some(vec![Node::File("edition.bin", b"edition".to_vec())]);
+    fs::write(
+        &nup,
+        build(
+            &[base(LEGACY), update(LEGACY, 65536, 0), patch, addon(LEGACY)],
+            false,
+        ),
+    )
+    .unwrap();
+    let options = WriterOptions::default();
+    convert_nup(&nup, &out, &nup_options(), &limits(), &options).unwrap();
+    let summary = inspect_archive(&out, &options, IntegrityPolicy::Strict).unwrap();
+    assert_eq!(summary.applications[0].programs.len(), 2);
+    assert_eq!(
+        check_nup(&nup, &out, false, &limits(), &options)
+            .unwrap()
+            .snapshots,
+        4
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn switch2_upgrade_rejects_unrelated_native_program() {
+    let dir = work("unrelated-edition");
+    let nup = dir.join("unrelated.nup");
+    let out = dir.join("unrelated.nx");
+    let mut patch = update(OUNCE & !0xfff, 65536, 0);
+    patch.exefs = Some(exefs(0x75, 0x0400_0000_1234_5001));
+    fs::write(&nup, build(&[base(LEGACY), patch], false)).unwrap();
+    assert!(convert_nup(
+        &nup,
+        &out,
+        &nup_options(),
+        &limits(),
+        &WriterOptions::default()
+    )
+    .is_err());
+    assert!(!out.exists());
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -606,4 +1283,139 @@ fn shifted_meta_types_read_like_spec_types() {
     check(&no_npdm);
     // A spec block with a 32-byte build ID and no NPDM stays as is.
     check(&spec[1..]);
+}
+
+#[test]
+fn nested_program_exefs_replaces_only_its_own_modules() {
+    let dir = work("nested-exefs-replacement");
+    let nup = dir.join("game.nup");
+    let out = dir.join("game.nx");
+    let mut original = base(APP);
+    let mut modules = exefs(0x51, APP | 1);
+    modules.push(Node::File(
+        "subsdk0",
+        super::super::synthetic::nso(0x61, false),
+    ));
+    original.extras.push(Node::Dir(
+        "program1",
+        vec![
+            Node::Dir("exefs", modules),
+            Node::Dir("data", vec![Node::File("same.bin", b"aux data".to_vec())]),
+        ],
+    ));
+    original.data = Some(vec![Node::File("same.bin", b"main data".to_vec())]);
+    let mut patch = update(APP, 65536, 0);
+    patch.extras.push(Node::Dir(
+        "program1",
+        vec![Node::Dir("exefs", exefs(0x52, APP | 1))],
+    ));
+    fs::write(&nup, build(&[original, patch], true)).unwrap();
+    for stream in [false, true] {
+        let options = WriterOptions::default();
+        convert_nup(
+            &nup,
+            &out,
+            &NupOptions {
+                stream,
+                ..nup_options()
+            },
+            &limits(),
+            &options,
+        )
+        .unwrap();
+        let summary = inspect_archive(&out, &options, IntegrityPolicy::Strict).unwrap();
+        for snapshot in &summary.applications[0].snapshots {
+            let files = crate::inspect_snapshot_files(
+                &out,
+                snapshot.identity,
+                &options,
+                IntegrityPolicy::Strict,
+            )
+            .unwrap();
+            let removed = snapshot.program_id == Some(APP | 1)
+                && snapshot.snapshot_type == SnapshotType::Base;
+            assert_eq!(files.iter().any(|f| f.path == "exefs/subsdk0"), removed);
+            let expected: &[u8] = if snapshot.program_id == Some(APP) {
+                b"main data"
+            } else {
+                b"aux data"
+            };
+            let mut data = vec![0; expected.len()];
+            crate::read_snapshot_file_range(
+                &out,
+                snapshot.identity,
+                "data/same.bin",
+                0,
+                &mut data,
+                &options,
+            )
+            .unwrap();
+            assert_eq!(data, expected);
+        }
+        check_nup(&nup, &out, false, &limits(), &options).unwrap();
+        fs::remove_file(&out).unwrap();
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn unrelated_npdm_and_invalid_nested_layouts_never_publish() {
+    let dir = work("invalid-program-layouts");
+    let nup = dir.join("game.nup");
+    let out = dir.join("game.nx");
+    let mut cases = Vec::new();
+    let mut unrelated = base(APP);
+    unrelated.exefs = Some(exefs(0x41, APP + 0x2000));
+    cases.push(vec![unrelated]);
+    let mut unrelated_update = update(APP, 65536, 0);
+    unrelated_update.exefs = Some(exefs(0x42, APP + 0x2000));
+    cases.push(vec![base(APP), unrelated_update]);
+    cases.push(vec![update(APP, 65536, 1), update(APP + 0x2000, 131072, 1)]);
+    cases.push(vec![update(APP, 65536, 1), addon(APP + 0x2000)]);
+    for name in [
+        "program0",
+        "program16",
+        "program01",
+        "program255",
+        "program999999999999999999999",
+    ] {
+        let mut game = base(APP);
+        game.extras.push(Node::Dir(
+            name,
+            vec![Node::Dir("exefs", exefs(0x51, APP | 1))],
+        ));
+        cases.push(vec![game]);
+    }
+    for id in [APP, APP | 2, APP + 0x2001] {
+        let mut game = base(APP);
+        game.extras.push(Node::Dir(
+            "program1",
+            vec![Node::Dir("exefs", exefs(0x51, id))],
+        ));
+        cases.push(vec![game]);
+    }
+    let mut missing = base(APP);
+    missing
+        .extras
+        .push(Node::Dir("program1", vec![Node::Dir("romfs", vec![])]));
+    cases.push(vec![missing]);
+    for packages in cases {
+        fs::write(&nup, build(&packages, true)).unwrap();
+        for stream in [false, true] {
+            assert!(convert_nup(
+                &nup,
+                &out,
+                &NupOptions {
+                    stream,
+                    ..nup_options()
+                },
+                &limits(),
+                &WriterOptions::default()
+            )
+            .is_err());
+            assert!(!out.exists());
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        }
+    }
+    fs::remove_dir_all(dir).unwrap();
 }

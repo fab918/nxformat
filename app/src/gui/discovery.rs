@@ -74,7 +74,11 @@ fn declared_source(
     }
 }
 
-fn extracted(path: &Path, selected: &BTreeSet<String>) -> Option<Source> {
+fn extracted(
+    path: &Path,
+    selected: &BTreeSet<String>,
+    token: &CancellationToken,
+) -> Option<Source> {
     let has_restore_recipe = path.join(nxformat_packer::RESTORATION_FILE).is_file();
     let mut restoration_issue = None;
     let mut manifest_issue = None;
@@ -111,6 +115,38 @@ fn extracted(path: &Path, selected: &BTreeSet<String>) -> Option<Source> {
             Err(error) => {
                 manifest_issue = Some(format!("Invalid independent import manifest: {error}. Supply corrected explicit declarations; associations will not be guessed."));
             }
+        }
+    }
+    // Use exactly the same native association planner as pack-tree, including
+    // sibling CNMT, per-Program NACP and explicit component selections.
+    if manifest_issue.is_none() && restoration_issue.is_none() {
+        match import::plan_program_dump(
+            path,
+            &selected.iter().cloned().collect::<Vec<_>>(),
+            &import::ImportLimits::default(),
+            token,
+        ) {
+            Ok(Some(plan)) => {
+                let mut source = declared_source(path, selected, &plan.manifest);
+                for s in &plan.manifest.snapshots {
+                    if source.icon.is_none() {
+                        source.icon = s
+                            .icons
+                            .values()
+                            .find_map(|p| bounded(&path.join(p), 16 * 1024 * 1024));
+                    }
+                }
+                return Some(source);
+            }
+            Err(error) => {
+                return Some(Source {
+                    path: path.to_owned(),
+                    kind: SourceKind::Extracted,
+                    issue: error.to_string(),
+                    ..Default::default()
+                })
+            }
+            Ok(None) => {}
         }
     }
     let mut candidates = match import::discover(path, &import::ImportLimits::default()) {
@@ -252,7 +288,8 @@ fn extracted(path: &Path, selected: &BTreeSet<String>) -> Option<Source> {
 
 /// Resolve a selected canonical component to its enclosing extracted dump.
 fn extracted_selection(path: &Path) -> Option<(PathBuf, Vec<String>)> {
-    for root in path.ancestors().skip(1).take(3) {
+    let mut program_container = None;
+    for root in path.ancestors().skip(1).take(8) {
         let parts: Vec<_> = path
             .strip_prefix(root)
             .ok()?
@@ -267,7 +304,7 @@ fn extracted_selection(path: &Path) -> Option<(PathBuf, Vec<String>)> {
             ["dlc", title, version] => id(title) && version.parse::<u32>().is_ok(),
             _ => false,
         };
-        if !known {
+        if !known && !import::is_program_dump_component(&parts.join("/")) {
             continue;
         }
         let prefix = parts.join("/");
@@ -285,10 +322,16 @@ fn extracted_selection(path: &Path) -> Option<(PathBuf, Vec<String>)> {
             })
             .collect();
         if !roots.is_empty() {
+            if parts.first() == Some(&"program") {
+                if program_container.is_none() {
+                    program_container = Some((root.to_owned(), roots));
+                }
+                continue;
+            }
             return Some((root.to_owned(), roots));
         }
     }
-    None
+    program_container
 }
 
 fn is_nup(path: &Path) -> bool {
@@ -416,7 +459,7 @@ pub fn scan(paths: Vec<PathBuf>, token: &CancellationToken) -> Result<Vec<Source
         if token.is_cancelled() {
             return Err("Cancelled".into());
         }
-        if let Some(source) = extracted(&path, &selected.unwrap_or_default()) {
+        if let Some(source) = extracted(&path, &selected.unwrap_or_default(), token) {
             result.push(source);
         }
     }

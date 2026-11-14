@@ -22,6 +22,7 @@ use crate::{
 };
 use std::{
     cell::RefCell,
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -150,7 +151,7 @@ nxconvert contents ARCHIVE.nx (@APP, @SNAPSHOT, @STORAGE, @RESOURCE, @RECIPE, @R
 nxconvert restore EXTRACTED_FOLDER NEW_ARCHIVE.nx (uses .nxrestore.zst; pack-tree detects it automatically)\n\
 nxconvert extract-exefs ARCHIVE.nx SNAPSHOT_IDENTITY NEW_FOLDER\n\
 nxconvert extract-ncas ARCHIVE.nx NEW_FOLDER (raw native NCA files, no package reconstruction)\n\
-nxconvert extract ARCHIVE.nx NEW_FOLDER [--no-restore | --portable-restore] [--require-restore] (every snapshot as a dump: base, updates/<version>, dlc/<title>/<version>)\n\
+nxconvert extract ARCHIVE.nx NEW_FOLDER [--no-restore] [--require-restore] (every snapshot as a dump: base, updates/<version>, dlc/<title>/<version>)\n\
 nxconvert add ARCHIVE.nx SOURCE... [--no-recipe [--omit-firmware]] (add updates and DLC in place, with rebuild recipes by default)\n\
 nxconvert add-tree ARCHIVE.nx PACKAGE [--platform switch1|switch2] [--update-version N] (add extracted trees in place: updates/<version>/ and dlc/ folders, or with --update-version one update folder holding exefs/ and romfs/)\n\
 nxconvert remove ARCHIVE.nx SNAPSHOT_IDENTITY... (remove in place)\n\
@@ -194,7 +195,6 @@ struct Options {
     no_restore: bool,
     require_restore: bool,
     ignore_restore: bool,
-    portable_restore: bool,
     /// add-tree: the folder is one update tree of this version.
     update_version: Option<u32>,
     tree_roots: std::collections::BTreeSet<String>,
@@ -226,10 +226,6 @@ fn parse(args: Vec<String>) -> Result<(Vec<String>, Options), Box<dyn std::error
         }
         if a == "--omit-firmware" {
             o.omit_firmware = true;
-            continue;
-        }
-        if a == "--portable-restore" {
-            o.portable_restore = true;
             continue;
         }
         if a == "--require-restore" {
@@ -479,6 +475,51 @@ fn observe_program(
     }
     None
 }
+/// An NX application can have an Ounce Program, including a Switch 2 Edition
+/// upgrade Program whose low bits select the upgrade add-on.
+fn switch2_program_of(nx_program: u64, ounce_program: u64) -> bool {
+    nx_program >> 56 == 1
+        && nx_program & 0xfff == 0
+        && ounce_program >> 56 == 4
+        && (nx_program & 0x00ff_ffff_ffff_f000) == (ounce_program & 0x00ff_ffff_ffff_f000)
+}
+/// Additional executable views in a complete extracted package. Only the
+/// documented `program1`..`program15` layout is accepted automatically;
+/// a separate NPDM, not the directory number, supplies the Program ID.
+type ChildProgram = (String, u64, NpdmProfile, &'static str);
+fn child_programs(
+    tree: &Path,
+    limits: &import::ImportLimits,
+) -> Result<Vec<ChildProgram>, Box<dyn std::error::Error>> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(tree)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(suffix) = name.strip_prefix("program") else {
+            continue;
+        };
+        // Other names such as `program_data` are ordinary game files, not
+        // executable Program directories.
+        if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let index = suffix.parse::<u8>().ok();
+        if !matches!(index, Some(1..=15)) || name != format!("program{}", index.unwrap()) {
+            return Err(format!("unsupported nested executable directory {name:?}").into());
+        }
+        if !entry.file_type()?.is_dir() {
+            return Err(format!("nested executable {name:?} is not a directory").into());
+        }
+        let (program, profile, profile_name) = observe_program(&entry.path(), limits)
+            .ok_or_else(|| format!("{name}: missing or invalid exefs/main.npdm"))?;
+        found.push((name, program, profile, profile_name));
+        if found.len() > 15 {
+            return Err("too many nested executable Programs".into());
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(found)
+}
 /// What a dump layout directory names: `base` (or the package itself),
 /// `updates/<version>`, `dlc/<add-on id>/<version>` or `dlc/<add-on id>`.
 #[derive(Clone, Copy, Debug)]
@@ -516,6 +557,48 @@ fn automatic_manifest(
         ..Default::default()
     };
     limits.validate()?;
+    if let Some(plan) = import::plan_program_dump(
+        package,
+        &o.tree_roots.iter().cloned().collect::<Vec<_>>(),
+        &limits,
+        &command_token(o),
+    )? {
+        let expected = match plan.manifest.snapshots[0].platform {
+            Platform::Switch2 => "switch2",
+            _ => "switch1",
+        };
+        if o.platform.as_deref().is_some_and(|p| p != expected) {
+            return Err("selected platform conflicts with extracted Program metadata".into());
+        }
+        let parent = Path::new(output)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        if parent.canonicalize()?.starts_with(package.canonicalize()?) {
+            return Err("output must be outside source package".into());
+        }
+        let measured = walk(package, limits.max_nodes)?;
+        let manifest = format!("{output}.nximport");
+        let assumptions = format!("{output}.assumptions.txt");
+        let mut note = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&assumptions)?;
+        note.write_all(plan.notes.as_bytes())?;
+        note.sync_all()?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&manifest)?;
+        file.write_all(plan.manifest.bytes())?;
+        file.sync_all()?;
+        eprintln!("OBSERVED extracted Program associations from CNMT/NPDM; automatic import requires complete materialized update trees.");
+        return Ok(AutoPlan {
+            manifest,
+            receipt: format!("{output}.nxreceipt"),
+            walk: measured,
+        });
+    }
     let candidates = import::discover(package, &limits)?;
     for root in &o.tree_roots {
         if !candidates
@@ -578,18 +661,70 @@ fn automatic_manifest(
     eprintln!(
         "OBSERVED Program ID {program:016x} from {main_root}/exefs/main.npdm ({profile_name})"
     );
+    let application = if !set
+        && program >> 56 == 4
+        && program & 0xfff != 0
+        && profile == NpdmProfile::MetaAcid3072V1
+    {
+        let legacy = (program & 0x00ff_ffff_ffff_f000) | 0x0100_0000_0000_0000;
+        let upgrade_dlc = legacy.wrapping_add(0x1000 | (program & 0xfff));
+        if trees
+            .iter()
+            .any(|(_, r)| matches!(r, Role::Dlc(id, _) if *id == upgrade_dlc))
+        {
+            legacy
+        } else {
+            program
+        }
+    } else {
+        program
+    };
     let hint = folder_id_hint(package);
     if let Some(h) = hint {
-        if h != program {
+        if h != program && h != application {
             return Err(format!(
-                "folder name declares {h:016x} but main.npdm has {program:016x}; explicit manifest required"
+                "folder name declares {h:016x} but neither the Program {program:016x} nor its application {application:016x} matches"
             )
             .into());
         }
     }
+    let mut upgraded_roots = BTreeMap::new();
+    let mut upgraded_program = None;
+    if set {
+        for (root, r) in &trees {
+            if !matches!(r, Role::Update(..)) {
+                continue;
+            }
+            if let Some((candidate, candidate_profile, _)) =
+                observe_program(&path_of(root), &limits)
+            {
+                if switch2_program_of(program, candidate)
+                    && candidate_profile == NpdmProfile::MetaAcid3072V1
+                {
+                    if upgraded_program.is_some_and(|previous| previous != candidate) {
+                        return Err(
+                            "multiple Switch 2 upgrade Programs need explicit associations".into(),
+                        );
+                    }
+                    upgraded_program = Some(candidate);
+                    upgraded_roots.insert(root.clone(), candidate);
+                }
+            }
+        }
+    }
     let env = std::env::var("NX_TREE_PLATFORM").ok();
-    let (platform, platform_origin) =
-        platform_for(o.platform.as_deref().or(env.as_deref()), program, profile)?;
+    let (platform, platform_origin) = platform_for(
+        o.platform.as_deref().or(env.as_deref()),
+        upgraded_program.unwrap_or(program),
+        if upgraded_program.is_some() {
+            NpdmProfile::MetaAcid3072V1
+        } else {
+            profile
+        },
+    )?;
+    if upgraded_program.is_some() && platform != "switch2" {
+        return Err("Switch 2 upgrade Program requires platform switch2".into());
+    }
     let walk = if o.tree_roots.is_empty() {
         walk(package, limits.max_nodes)?
     } else {
@@ -624,33 +759,82 @@ fn automatic_manifest(
         Role::Update(v) => (1, 0, v),
         Role::Dlc(id, v) => (2, id, v),
     });
+    let mut auxiliary: BTreeMap<(u64, String), (u64, NpdmProfile, String)> = BTreeMap::new();
     for (root, r) in &trees {
+        let is_upgrade = upgraded_roots.contains_key(root);
+        let current_program = upgraded_roots.get(root).copied().unwrap_or(program);
         let key = match r {
             Role::Base => "game".to_owned(),
+            Role::Update(v) if is_upgrade => format!("upgrade-{v}"),
             Role::Update(v) => format!("update-{v}"),
             Role::Dlc(id, v) => format!("dlc-{id:016x}-{v}"),
         };
         match *r {
-            Role::Base => text.push_str(&format!(
-                "snapshot\t{key}\t{root}\t{platform}\t{program:016x}\t{program:016x}\tprimary\tbase\t0\tcomplete\tmaterialized-v1\t{profile_name}\n"
-            )),
+            Role::Base => {
+                let role = if upgraded_program.is_some() {
+                    "auxiliary"
+                } else {
+                    "primary"
+                };
+                text.push_str(&format!(
+                    "snapshot\t{key}\t{root}\t{platform}\t{application:016x}\t{program:016x}\t{role}\tbase\t0\tcomplete\tmaterialized-v1\t{profile_name}\n"
+                ));
+            }
             Role::Update(v) => {
                 let (own, own_profile, own_name) = observe_program(&path_of(root), &limits)
                     .ok_or_else(|| format!("{root}: no supported validated exefs/main.npdm"))?;
-                if own != program || own_profile != profile {
+                if !(own == program && own_profile == profile)
+                    && !(is_upgrade
+                        && own == current_program
+                        && own_profile == NpdmProfile::MetaAcid3072V1)
+                {
                     return Err(format!(
-                        "{root}/exefs/main.npdm has {own:016x} ({own_name}), not {program:016x}; explicit manifest required"
+                        "{root}/exefs/main.npdm has unsupported Program {own:016x} ({own_name}) relative to {program:016x}"
                     )
                     .into());
                 }
-                let kind = if set { "update" } else { "standalone-update" };
+                let kind = if is_upgrade || !set {
+                    "standalone-update"
+                } else {
+                    "update"
+                };
+                let role = if upgraded_program.is_some() && !is_upgrade {
+                    "auxiliary"
+                } else {
+                    "primary"
+                };
                 text.push_str(&format!(
-                    "snapshot\t{key}\t{root}\t{platform}\t{program:016x}\t{program:016x}\tprimary\t{kind}\t{v}\tcomplete\tmaterialized-v1\t{own_name}\n"
+                    "snapshot\t{key}\t{root}\t{platform}\t{application:016x}\t{own:016x}\t{role}\t{kind}\t{v}\tcomplete\tmaterialized-v1\t{own_name}\n"
                 ));
                 if set {
-                    text.push_str(&format!("dependency\t{key}\trequired-base\tgame\n"));
+                    let dependency = if is_upgrade {
+                        "requires"
+                    } else {
+                        "required-base"
+                    };
+                    let target = if is_upgrade {
+                        trees
+                            .iter()
+                            .filter_map(|(other_root, role)| match role {
+                                Role::Update(other_version)
+                                    if !upgraded_roots.contains_key(other_root)
+                                        && *other_version <= v =>
+                                {
+                                    Some(*other_version)
+                                }
+                                _ => None,
+                            })
+                            .max()
+                            .map_or_else(
+                                || "game".to_owned(),
+                                |version| format!("update-{version}"),
+                            )
+                    } else {
+                        "game".to_owned()
+                    };
+                    text.push_str(&format!("dependency\t{key}\t{dependency}\t{target}\n"));
                     facts.push_str(&format!(
-                        "OBSERVED: {root}/exefs/main.npdm has the same Program ID.\n"
+                        "OBSERVED: {root}/exefs/main.npdm has Program {own:016x}; upgrade relationship: {is_upgrade}.\n"
                     ));
                 }
                 facts.push_str(&format!(
@@ -658,9 +842,9 @@ fn automatic_manifest(
                 ));
             }
             Role::Dlc(id, v) => {
-                if !import::addon_belongs_to(id, program) {
+                if !import::addon_belongs_to(id, application) {
                     return Err(format!(
-                        "{root}: add-on {id:016x} is not in the add-on range of {program:016x}; explicit manifest required"
+                        "{root}: add-on {id:016x} is not in the add-on range of {application:016x}; explicit manifest required"
                     )
                     .into());
                 }
@@ -668,11 +852,83 @@ fn automatic_manifest(
                     return Err(format!("{root}: executable DLC needs an explicit manifest").into());
                 }
                 text.push_str(&format!(
-                    "snapshot\t{key}\t{root}\t{platform}\t{program:016x}\t-\tnone\tdlc\t{v}\tcomplete\tmaterialized-v1\tnone\n"
+                    "snapshot\t{key}\t{root}\t{platform}\t{application:016x}\t-\tnone\tdlc\t{v}\tcomplete\tmaterialized-v1\tnone\n"
                 ));
                 text.push_str(&format!("addon\t{key}\t{id:016x}\n"));
                 facts.push_str(&format!(
                     "PRESUMED: {root} is add-on {id:016x} version {v} (directory names), stored by its add-on title ID (no CNMT, no native Content ID).\n"
+                ));
+            }
+        }
+        if !matches!(r, Role::Dlc(..)) {
+            for (name, child_program, child_profile, child_profile_name) in
+                child_programs(&path_of(root), &limits)?
+            {
+                let index: u64 = name["program".len()..].parse()?;
+                let expected_profile = if is_upgrade {
+                    NpdmProfile::MetaAcid3072V1
+                } else {
+                    profile
+                };
+                if child_program != ((current_program & !0xf) | index)
+                    || child_program == current_program
+                    || child_profile != expected_profile
+                {
+                    return Err(format!(
+                        "{root}/{name}: NPDM Program ID {child_program:016x} does not match the declared Program index under {current_program:016x}; explicit association required"
+                    ).into());
+                }
+                let family = (current_program & !0xf, name.clone());
+                let previous = auxiliary.get(&family);
+                if previous.is_some_and(|(id, profile, _)| {
+                    *id != child_program || *profile != child_profile
+                }) {
+                    return Err(format!(
+                        "{root}/{name}: Program ID/profile changed between versions"
+                    )
+                    .into());
+                }
+                let child_key = format!("{key}-{name}");
+                let child_root = if root == "." {
+                    name.clone()
+                } else {
+                    format!("{root}/{name}")
+                };
+                let (child_kind, base_key) = match *r {
+                    Role::Base => ("base", None),
+                    Role::Update(_) => match previous {
+                        Some((_, _, base_key)) if !base_key.is_empty() => {
+                            ("update", Some(base_key.clone()))
+                        }
+                        _ => ("standalone-update", None),
+                    },
+                    Role::Dlc(..) => unreachable!(),
+                };
+                let version = match *r {
+                    Role::Base => 0,
+                    Role::Update(v) => v,
+                    Role::Dlc(..) => unreachable!(),
+                };
+                text.push_str(&format!(
+                    "snapshot\t{child_key}\t{child_root}\t{platform}\t{application:016x}\t{child_program:016x}\tauxiliary\t{child_kind}\t{version}\tcomplete\tmaterialized-v1\t{child_profile_name}\n"
+                ));
+                text.push_str(&format!("program-view\t{key}\t{name}\n"));
+                if let Some(base_key) = base_key {
+                    text.push_str(&format!(
+                        "dependency\t{child_key}\trequired-base\t{base_key}\n"
+                    ));
+                }
+                if matches!(r, Role::Base) {
+                    auxiliary.insert(family, (child_program, child_profile, child_key));
+                } else {
+                    auxiliary.entry(family).or_insert((
+                        child_program,
+                        child_profile,
+                        String::new(),
+                    ));
+                }
+                facts.push_str(&format!(
+                    "OBSERVED: {child_root}/exefs/main.npdm declares auxiliary Program {child_program:016x}.\n"
                 ));
             }
         }
@@ -1138,7 +1394,6 @@ fn extract_all(
     options: &WriterOptions,
     raw: bool,
     restore: bool,
-    mode: RestorationMode,
     require_restore: bool,
 ) -> Result<(usize, Vec<String>), Box<dyn std::error::Error>> {
     // Final extracted files are not staging data. A zero temporary budget
@@ -1165,12 +1420,7 @@ fn extract_all(
         eprintln!("Native extraction supports decrypted IVFC RomFS, internal RAW/zero/LZ4 compression and single-root BKTR. Encrypted or sparse RomFS, unknown compression codecs, multilevel BKTR and multi-Data DLC are unsupported; metadata is memory-bounded. Use extract-ncas for the stored NCA files.");
     }
     if !raw && restore {
-        let size = fs::metadata(path)?.len();
-        eprintln!("Restoration recipe may require roughly as much additional disk space as the original NX ({size} bytes), besides the extracted files. Use --no-restore to skip it.");
-        match mode {
-            RestorationMode::Compact => eprintln!("Compact mode requires a compatible Zstd encoder for exact replay of some blocks. --portable-restore preserves original block bytes independently of the encoder, with a potentially larger recipe."),
-            RestorationMode::Portable => eprintln!("Portable mode preserves original block bytes; replay is independent of the Zstd encoder version."),
-        }
+        eprintln!("Compact restoration recipe: reconstructs original data from extracted files where possible. Retained metadata and unreproducible blocks determine its size. Exact replay of recompressed blocks needs a compatible Zstd encoder. Use --no-restore to skip the recipe.");
     }
     let mut jobs: Vec<(String, Option<u64>, [u8; 32], bool)> = Vec::new();
     let mut partial = Vec::new();
@@ -1316,14 +1566,7 @@ fn extract_all(
                 .ok_or("missing extraction declarations")?
                 .as_ref()
                 .map_err(|error| error.to_string())?;
-            let stats = create_restoration_with_mode(
-                path,
-                destination,
-                &exported,
-                manifest,
-                mode,
-                options,
-            )?;
+            let stats = create_restoration(path, destination, &exported, manifest, options)?;
             println!(
                 "@RESTORATION\t{}\t{}\t{}",
                 destination.join(RESTORATION_FILE).display(),
@@ -1960,11 +2203,6 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
                 &options,
                 args[0] == "extract-ncas",
                 !o.no_restore,
-                if o.portable_restore {
-                    RestorationMode::Portable
-                } else {
-                    RestorationMode::Compact
-                },
                 o.require_restore,
             )?;
             drop(watch);
@@ -2244,11 +2482,6 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let (mut args, o) = parse(argv)?;
-    if o.portable_restore && (args.first().map(String::as_str) != Some("extract") || o.no_restore) {
-        return Err(
-            "--portable-restore applies to extract and cannot be combined with --no-restore".into(),
-        );
-    }
     if o.require_restore && (args.first().map(String::as_str) != Some("extract") || o.no_restore) {
         return Err(
             "--require-restore applies to extract and cannot be combined with --no-restore".into(),

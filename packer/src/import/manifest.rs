@@ -29,6 +29,11 @@ pub struct SnapshotDeclaration {
     pub dependencies: Vec<(DependencyKind, String)>,
     pub composition: Option<Composition>,
     pub exclusions: BTreeSet<String>,
+    /// Child `programN` directories represented by separate executable snapshots.
+    /// They are excluded from this snapshot's logical file tree, not discarded.
+    pub program_views: BTreeSet<String>,
+    /// Explicit ancillary root directories preserved below `data/`.
+    pub data_views: BTreeSet<String>,
     pub presentation: BTreeMap<String, String>,
     /// Package-relative exact `control.nacp` (0x4000 bytes), outside the tree.
     pub nacp: Option<String>,
@@ -80,6 +85,41 @@ impl SnapshotDeclaration {
             })
         })
     }
+}
+
+/// A nested Program is a separate snapshot with the same package version.
+/// Auxiliary Programs introduced by an update may be standalone even when
+/// the primary Program is an ordinary update.
+fn is_program_view_child(
+    parent: &SnapshotDeclaration,
+    child: &str,
+    other: &SnapshotDeclaration,
+) -> bool {
+    let index = child["program".len()..].parse::<u64>().unwrap_or(0);
+    let expected = parent.program_id.map(|program| (program & !0xf) | index);
+    let root = if parent.root == "." {
+        child.to_owned()
+    } else {
+        format!("{}/{}", parent.root, child)
+    };
+    other.root == root
+        && parent.program_id.is_some()
+        && other.platform == parent.platform
+        && other.application_id == parent.application_id
+        && other.program_id == expected
+        && other.program_id != parent.program_id
+        && other.npdm_profile == parent.npdm_profile
+        && other.npdm_profile != NpdmProfile::Absent
+        && other.program_kind == ProgramKind::Auxiliary
+        && other.numeric_version == parent.numeric_version
+        && match parent.snapshot_type {
+            SnapshotType::Base => other.snapshot_type == SnapshotType::Base,
+            SnapshotType::Update | SnapshotType::StandaloneUpdate => matches!(
+                other.snapshot_type,
+                SnapshotType::Update | SnapshotType::StandaloneUpdate
+            ),
+            SnapshotType::Dlc | SnapshotType::Unknown => false,
+        }
 }
 
 impl DeclarationManifest {
@@ -140,6 +180,14 @@ impl DeclarationManifest {
                     chosen.extend(s.dependencies.iter().map(|(_, k)| k.clone()));
                     if let Some(c) = &s.composition {
                         chosen.insert(c.base.clone());
+                    }
+                    for child in &s.program_views {
+                        let auxiliary = original
+                            .snapshots
+                            .iter()
+                            .find(|other| is_program_view_child(s, child, other))
+                            .ok_or_else(|| invalid("missing selected auxiliary Program"))?;
+                        chosen.insert(auxiliary.key.clone());
                     }
                 }
             }
@@ -331,6 +379,8 @@ impl DeclarationManifest {
                     dependencies: Vec::new(),
                     composition: None,
                     exclusions: BTreeSet::new(),
+                    program_views: BTreeSet::new(),
+                    data_views: BTreeSet::new(),
                     presentation: BTreeMap::new(),
                     nacp: None,
                     icons: BTreeMap::new(),
@@ -402,6 +452,25 @@ impl DeclarationManifest {
                         return Err(invalid("duplicate exclusion"));
                     }
                 }
+                ("data-view", 3) => {
+                    if !matches!(f[2], "control" | "logo" | "legal" | "meta")
+                        || !s.data_views.insert(f[2].to_owned())
+                    {
+                        return Err(invalid("invalid or duplicate ancillary data view"));
+                    }
+                }
+                ("program-view", 3) => {
+                    let name = f[2];
+                    let index = name
+                        .strip_prefix("program")
+                        .and_then(|n| n.parse::<u8>().ok());
+                    if !matches!(index, Some(1..=15))
+                        || name != format!("program{}", index.unwrap())
+                        || !s.program_views.insert(name.to_owned())
+                    {
+                        return Err(invalid("invalid or duplicate child Program view"));
+                    }
+                }
                 ("title" | "publisher" | "display-version", 3) => {
                     if f[2].is_empty()
                         || f[2].len() > 4096
@@ -436,6 +505,19 @@ impl DeclarationManifest {
             return Err(invalid("manifest has no snapshots"));
         }
         for s in &snapshots {
+            for child in &s.program_views {
+                if s.program_kind == ProgramKind::Unknown
+                    || snapshots
+                        .iter()
+                        .filter(|other| is_program_view_child(s, child, other))
+                        .count()
+                        != 1
+                {
+                    return Err(invalid(
+                        "child Program view needs exactly one matching auxiliary snapshot/version",
+                    ));
+                }
+            }
             if (s.nacp.is_some() || !s.icons.is_empty())
                 && (s.snapshot_type == SnapshotType::Dlc || s.nacp.is_none())
             {

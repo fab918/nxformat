@@ -59,6 +59,8 @@ jobs:
         run: python tests/conformance/test_native_add.py
       - name: Independently validate complete Switch 1 multi-Program views
         run: python tests/conformance/test_switch1_review.py
+      - name: Independently validate Switch 2 Edition and multi-Program NUP imports
+        run: python tests/conformance/test_switch2_nup.py
       - name: Validate extracted-tree conversion and CLI workflows
         run: |
           python tests/conformance/test_extracted_tree.py

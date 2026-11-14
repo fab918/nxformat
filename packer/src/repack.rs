@@ -38,8 +38,7 @@ pub const MAX_EMBEDDED_RECIPE_BYTES: u64 = 8 * 1024 * 1024;
 #[path = "restoration.rs"]
 mod restoration;
 pub use restoration::{
-    create_restoration, create_restoration_with_mode, inspect_restoration, restore_extraction,
-    RestorationMode, RestorationStats, RESTORATION_FILE,
+    create_restoration, inspect_restoration, restore_extraction, RestorationStats, RESTORATION_FILE,
 };
 
 #[path = "native_add.rs"]
