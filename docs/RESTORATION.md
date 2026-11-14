@@ -1,5 +1,7 @@
 # Reversible extraction
 
+Applies to **NXFormat / NXConvert 1.0.4**.
+
 `nxconvert extract GAME.nx NEW_FOLDER` writes the game files plus
 `NEW_FOLDER/.nxrestore.zst`. Keep that file with the extracted folder.
 
@@ -29,15 +31,58 @@ modified NX because their original byte hashes no longer describe its content.
 No original DNSP reconstruction is promised after editing. The source extraction
 and its recipe are kept, so reverting the edits allows exact restoration again.
 
-Unchanged roundtrip validation on 30XX restores the exact 820,011,768-byte NX and
+Unchanged roundtrip validation on a reference archive restores the exact 820,011,768-byte NX and
 its three original DNSP packages. Editing one DLC RomFS file, including its size,
 then repacking and reextracting changes exactly that path among 11,953 files.
 
 ## Compact recipe, independent of the NX format
 
+An incomplete native base cannot be exported as a standalone executable game.
+When its update supplies the executable, extraction preserves the base as NCA
+files in `base/` and exports the update's verified ExeFS/RomFS in `updates/VERSION/`.
+BKTR still resolves against that exact base, and the resulting IVFC tree is
+checked before publishing the extraction. No executable is borrowed from an
+unrelated title or another update version. The raw base files also participate
+in exact restoration, so they are not duplicated as literals in the recipe.
+
+For unmarked decrypter-expanded bases, conversion requires Application CNMT,
+evidence of a rewritten size, valid bounded section headers, an absent PFS0
+executable and missing compression-tree payload under a recognized compression
+schema. Such a base requires a matching update executable. Ordinary damaged
+executables, malformed headers and invalid compression descriptors still fail.
+This recognizes incomplete source content; it does not authenticate the missing
+standalone base payload against its original CNMT.
+
+Native compressed storage is reconstructed from the exported decoded files.
+RAW ranges reference their file bytes directly. For LZ4, a bounded portable
+streaming parser tries several hash-table sizes and uses an encoding instruction
+only after reproducing the original frame byte for byte. An unmatched encoding
+instead retains its token/match topology and references literal bytes from the
+exported files. Frames crossing file boundaries use that same exact fallback.
+Already exported raw base content is reused without decoding or describing it
+again. This requires no extra LZ4 dependency, source-size temporary copy or
+duplicate compressed-data sidecar.
+
+On a reference native package set (base plus update), the 4,032,943,808-byte NX
+exported 7,862,031,843 bytes of files. This reduced the compact recipe from
+961,057,921 to **10,969,404 bytes** (98.86% smaller). Exact restoration matched the
+original NX SHA-256 and both original DNSP recipes verified, with the default
+512 MiB memory budget. Metadata and unmapped source bytes still affect size;
+there is no fixed size guarantee for arbitrary archives.
+
+A complete CLI repeat with `--memory-mib 512` took 24.16 s for extraction
+(including the recipe) and 24.12 s for restoration. Windows reported peak
+working sets of 129,384,448 and 19,361,792 bytes respectively. One-second
+file-length sampling during extraction peaked at 7,873,002,500 additional
+bytes, including the recipe and logs, excluding the existing input NX and
+filesystem allocation overhead. These are measurements on the test machine.
+
 The restoration file is a standalone **Zstandard frame compressed at level 13**,
 with a maximum 8 MiB history and a frame checksum. Its uncompressed format magic
-is `NXRSTR02`. The stream is also protected by a SHA-256 footer.
+is `NXRSTR03` when derived LZ4 instructions are needed, otherwise `NXRSTR02`.
+Both versions are readable; an older converter needs updating to replay a
+version-03 extraction recipe. The NX format and its readers are unchanged.
+The stream is also protected by a SHA-256 footer.
 
 The recipe describes the original physical NX in order:
 
@@ -52,13 +97,16 @@ The recipe describes the original physical NX in order:
 - IVFC leaf SHA-256 tables whose source blocks lie within exported files are
   recomputed. Consecutive hashes are stored as a run instead of retaining their
   incompressible hash bytes or repeating an instruction for each hash.
+- Derived LZ4 pieces record decoded file bounds, the verified hash-table size
+  and the requested encoded slice. Replay bounds the workspace and validates
+  the complete original NX SHA-256 before publication.
 
 Paths are stored once and referenced by integer IDs. One fingerprint of the
 sorted path/type/size/content-hash inventory detects edits; per-file and per-block
 hash copies are omitted because the inventory fingerprint, recipe footer and
 final original-NX SHA-256 provide the required checks.
 
-On the 30XX test archive this reduced an initial 8,692,673-byte recipe to
+On the reference test archive this reduced an initial 8,692,673-byte recipe to
 **1,804,114 bytes**, about 79% smaller. Exact size depends on the archive, including
 unmapped content, stale generations, metadata and source resources. The recipe
 is not assumed to contain metadata only.
@@ -79,14 +127,19 @@ Original Zstd blocks depend on reproducible encoder output; an incompatible
 future Zstd encoder fails the final SHA-256 check instead of publishing different
 bytes. The bundled Zstd dependency is pinned.
 
-For encoder-independent long-term storage, use
-`nxconvert extract GAME.nx NEW_FOLDER --portable-restore`, or enable **Portable
-restoration** in the desktop application. This mode stores original block bytes
-as literals and never emits encoder-dependent reconstruction operations. It
-still uses a standard Zstd level 13 frame, so exact replay needs a decoder but
-not the original encoder. The recipe can approach the original archive size.
-Both modes warn about that possible additional disk cost before extraction;
-`--no-restore` and the desktop checkbox can disable recipe creation.
+Compact reconstruction is the only recipe creation mode. `--no-restore` and
+the desktop checkbox can disable recipe creation. Existing recipes that retain
+original blocks as literals remain readable, including recipes produced by the
+former portable mode; the restoration stream format is unchanged.
+
+On a measured Switch 2 roundtrip, a 15,969,850,688-byte NX extracted to
+17,773,456,082 bytes of files and a **6,559,628-byte compact recipe**. A repeated
+extraction with periodic file-size sampling peaked at 17,780,015,710 bytes
+of file content, including its temporary recipe; no original-size NX copy was
+observed during extraction. These are file lengths, excluding filesystem
+allocation overhead and the already existing input NX. Restoring produced the
+exact original SHA-256, and both extractions produced identical recipe bytes.
+This is a measured case, not a fixed recipe-size guarantee for other archives.
 
 During an edited repack, only the header and active metadata tail (tables and
 native media) are retained in a compact private store. An in-memory range map
@@ -212,8 +265,8 @@ The default exit status still permits a successful extraction with recipe failur
 keeping the extracted files and warning about the missing recipe. Automation that
 requires reversible extraction should use `extract GAME.nx FOLDER --require-restore`:
 a recipe failure then returns an error/nonzero exit status, still emits `failed`,
-and retains extracted files. It can be combined with `--portable-restore`, but not
-with `--no-restore`. An extraction failure itself returns an error before this
+and retains extracted files. It cannot be combined with `--no-restore`.
+An extraction failure itself returns an error before this
 recipe status is emitted.
 
 ## Independent declarations and platform-qualified paths
@@ -262,10 +315,12 @@ configured memory limit; the full decompressed section is never staged. The
 same file paths feed normal edited repacking. Unknown compression types, sparse
 and metadata-hashed storage and unsupported tree shapes still fail explicitly.
 
-A compact restoration recipe retains original LZ4 storage bytes literally rather
-than guessing an encoder configuration. This preserves exact original NX/package
-replay, but the recipe may approach source size for these snapshots. The NX format
-and restoration opcodes do not change. An unchanged roundtrip remains byte exact.
+A compact restoration recipe derives supported original LZ4 storage from
+extracted file bytes, using the reconstruction rules described above. Bytes that
+cannot be derived remain literal, so recipe size depends on the source layout.
+Recipes using derived LZ4 instructions use `NXRSTR03` and require NXConvert 1.0.4
+to restore; existing `NXRSTR02` recipes remain readable. The NX archive format is
+unchanged, and an unchanged roundtrip remains byte exact.
 
 Opt-in read-only tests can inspect local native inputs without publishing game
 files: set `NXFORMAT_COMPRESSED_PROBES` to a TSV containing label, package path,

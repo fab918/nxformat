@@ -20,6 +20,8 @@ pub struct Pkg {
     pub exefs: Option<Vec<Node>>,
     pub romfs: Option<Vec<Node>>,
     pub data: Option<Vec<Node>>,
+    /// Additional top-level entries, including program1/exefs or control.nacp.
+    pub extras: Vec<Node>,
     pub meta: Vec<(u16, Vec<u8>)>,
 }
 
@@ -101,6 +103,15 @@ pub fn build(packages: &[Pkg], zstd: bool) -> Vec<u8> {
         if let Some(r) = &p.romfs {
             ro = add(&mut flat, "romfs", r);
             kids.push(ro);
+        }
+        for node in &p.extras {
+            match node {
+                Node::Dir(name, nested) => kids.push(add(&mut flat, name, nested)),
+                Node::File(name, bytes) => {
+                    flat.files.push((name.to_string(), bytes.clone()));
+                    kids.push(FILE_FLAG | (flat.files.len() as u32 - 1));
+                }
+            }
         }
         flat.dirs[root as usize].1 = kids;
         records.push((root, ex, ro));
@@ -223,6 +234,7 @@ pub fn base(app: u64) -> Pkg {
         kind: 0,
         flags: 0,
         data: None,
+        extras: Vec::new(),
         exefs: Some(exefs(0x41, app)),
         romfs: Some(vec![
             Node::File("common.bin", b"base common data".to_vec()),
@@ -246,6 +258,7 @@ pub fn update(app: u64, version: u32, flags: u8) -> Pkg {
         kind: 1,
         flags,
         data: None,
+        extras: Vec::new(),
         exefs: Some(exefs(0x42, app)),
         romfs: Some(vec![
             Node::File("shadowed.bin", b"update version".to_vec()),
@@ -262,6 +275,7 @@ pub fn addon(app: u64) -> Pkg {
         kind: 2,
         flags: 0,
         data: None,
+        extras: Vec::new(),
         exefs: None,
         romfs: Some(vec![Node::File("dlc.bin", b"dlc".to_vec())]),
         meta: Vec::new(),

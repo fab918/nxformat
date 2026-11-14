@@ -814,6 +814,11 @@ fn sparse_base_converts_and_runs_with_its_update() {
     cmd!("pack", s(&base), s(&update), s(&both), "--recipe").unwrap();
     verify(&both);
     rebuild_all(&both, &t.path("out"), &[&base, &update]);
+    let dump = t.path("dump");
+    cmd!("extract", s(&both), s(&dump), "--require-restore").unwrap();
+    let restored = t.path("restored.nx");
+    cmd!("restore", s(&dump), s(&restored)).unwrap();
+    assert_eq!(fs::read(&both).unwrap(), fs::read(&restored).unwrap());
 }
 
 #[test]
@@ -827,6 +832,200 @@ fn damaged_executable_without_the_sparse_marker_is_refused() {
         "{error}"
     );
     assert!(!nx.exists());
+}
+
+/// A decrypter-expanded base can retain valid headers describing payload that
+/// only exists after applying its update (no DSPF marker). Keep the stale CNMT
+/// size, just as rewritten native dumps do; never derive identity from a name.
+fn incomplete_compressed_base() -> Vec<(String, Vec<u8>)> {
+    let mut spec = TitleSpec::application(APP, 0, 1);
+    spec.program.as_mut().unwrap().compressed_romfs = true;
+    let mut entries = title_entries(&spec);
+    sparse_executable(&mut entries, false);
+    let (_, program) = entries
+        .iter_mut()
+        .find(|(name, b)| name.ends_with(".nca") && b[0x205] == 0)
+        .unwrap();
+    let start = u32::from_le_bytes(program[0x250..0x254].try_into().unwrap()) as usize * 512;
+    let fs = &program[0x600..0x800];
+    let layers = u32::from_le_bytes(fs[20..24].try_into().unwrap()) as usize;
+    let at = 24 + (layers - 2) * 24;
+    let data = u64::from_le_bytes(fs[at..at + 8].try_into().unwrap()) as usize;
+    let table = u64::from_le_bytes(fs[0x178..0x180].try_into().unwrap()) as usize;
+    program[start + data + table..start + data + table + 16].fill(0xa5);
+    program.extend([0; 512]);
+    let size = program.len() as u64;
+    program[0x208..0x210].copy_from_slice(&size.to_le_bytes());
+    entries
+}
+
+#[test]
+fn unmarked_incomplete_base_requires_matching_update_and_roundtrips() {
+    let t = Temp::new();
+    let base = t.write("in/Base.dnsp", &dnsp(&incomplete_compressed_base()));
+    let nx = t.path("Game.nx");
+    let error = cmd!("pack", s(&base), s(&nx), "--paranoid").unwrap_err();
+    assert!(error.contains("requires its matching update"), "{error}");
+    assert!(!nx.exists());
+    let update = t.write("in/Update.dnsp", &update_nsp(UPDATE, 2));
+    cmd!("pack", s(&base), s(&update), s(&nx), "--paranoid").unwrap();
+    verify(&nx);
+    let dump = t.path("dump");
+    cmd!("extract", s(&nx), s(&dump), "--require-restore").unwrap();
+    assert!(!dump.join("base/exefs").exists());
+    assert!(fs::read_dir(dump.join("base")).unwrap().any(|e| e
+        .unwrap()
+        .path()
+        .extension()
+        .is_some_and(|ext| ext == "nca")));
+    assert!(dump.join(format!("updates/{UPDATE}/exefs/main")).is_file());
+    assert!(dump
+        .join(format!("updates/{UPDATE}/romfs/data.bin"))
+        .is_file());
+    let restored = t.path("restored.nx");
+    cmd!("restore", s(&dump), s(&restored)).unwrap();
+    assert_eq!(fs::read(&nx).unwrap(), fs::read(&restored).unwrap());
+    rebuild_all(&restored, &t.path("originals"), &[&base, &update]);
+}
+
+#[test]
+fn incomplete_base_cannot_hide_a_broken_or_unrelated_update() {
+    let t = Temp::new();
+    let base = t.write("in/Base.dnsp", &dnsp(&incomplete_compressed_base()));
+    for wrong_title in [false, true] {
+        let mut spec = TitleSpec::patch(if wrong_title { APP + 0x10000 } else { APP }, UPDATE, 2);
+        // The matching title has an explicitly malformed executable. It must
+        // not borrow the missing base executable or skip its integrity check.
+        spec.program.as_mut().unwrap().compressed_romfs = true;
+        let mut entries = title_entries(&spec);
+        if !wrong_title {
+            sparse_executable(&mut entries, false);
+        }
+        let update = t.write("in/Update.dnsp", &dnsp(&entries));
+        let nx = t.path("Game.nx");
+        assert!(cmd!("pack", s(&base), s(&update), s(&nx), "--paranoid").is_err());
+        assert!(!nx.exists());
+    }
+}
+
+#[test]
+fn incomplete_base_fallback_does_not_accept_invalid_headers_or_tables() {
+    let t = Temp::new();
+    let update = t.write("in/Update.dnsp", &update_nsp(UPDATE, 2));
+    for damage in 0..4 {
+        let mut entries = incomplete_compressed_base();
+        let (_, program) = entries
+            .iter_mut()
+            .find(|(n, b)| n.ends_with(".nca") && b[0x205] == 0)
+            .unwrap();
+        match damage {
+            0 => program[0x400] ^= 1, // Invalid header hash, before any fallback.
+            1 => {
+                // Recognized compression magic with an invalid schema.
+                program[0x600 + 0x188..0x600 + 0x18c].copy_from_slice(b"NOPE");
+                nxformat_packer::native::synthetic::rehash_section_header(program, 1);
+            }
+            2 => {
+                // An out-of-bounds compression index is not missing payload.
+                program[0x600 + 0x178..0x600 + 0x180].fill(0xff);
+                nxformat_packer::native::synthetic::rehash_section_header(program, 1);
+            }
+            _ => {
+                // No rewritten-size evidence: corruption remains an error.
+                program.truncate(program.len() - 512);
+                let size = program.len() as u64;
+                program[0x208..0x210].copy_from_slice(&size.to_le_bytes());
+            }
+        }
+        let base = t.write("in/Base.dnsp", &dnsp(&entries));
+        let nx = t.path("Game.nx");
+        assert!(
+            cmd!("pack", s(&base), s(&update), s(&nx), "--paranoid").is_err(),
+            "case {damage}"
+        );
+        assert!(!nx.exists());
+    }
+}
+
+#[test]
+fn incomplete_base_does_not_disable_update_romfs_integrity() {
+    let t = Temp::new();
+    let base = t.write("in/Base.dnsp", &dnsp(&incomplete_compressed_base()));
+    let mut entries = title_entries(&TitleSpec::patch(APP, UPDATE, 2));
+    let (_, program) = entries
+        .iter_mut()
+        .find(|(n, b)| n.ends_with(".nca") && b[0x205] == 0)
+        .unwrap();
+    let start = u32::from_le_bytes(program[0x250..0x254].try_into().unwrap()) as usize * 512;
+    let data = u64::from_le_bytes(program[0x630..0x638].try_into().unwrap()) as usize;
+    // Alter data without updating its IVFC hash tree or touching headers.
+    program[start + data + 512] ^= 1;
+    let update = t.write("in/Update.dnsp", &dnsp(&entries));
+    let nx = t.path("Game.nx");
+    cmd!("pack", s(&base), s(&update), s(&nx), "--paranoid").unwrap();
+    let dump = t.path("dump");
+    let error = cmd!("extract", s(&nx), s(&dump), "--require-restore").unwrap_err();
+    assert!(error.contains("IVFC"), "{error}");
+    assert!(!dump.exists());
+}
+
+/// Opt-in integration check on locally owned content, without redistributing
+/// it or extracting a second copy of an already materialized large game.
+#[test]
+#[ignore]
+fn real_native_recipe_roundtrip() {
+    use std::io::Read;
+    let nx =
+        PathBuf::from(std::env::var_os("NX_RECIPE_TEST_ARCHIVE").expect("NX_RECIPE_TEST_ARCHIVE"));
+    let dump = PathBuf::from(
+        std::env::var_os("NX_RECIPE_TEST_EXTRACTION").expect("NX_RECIPE_TEST_EXTRACTION"),
+    );
+    let restored = dump
+        .parent()
+        .unwrap()
+        .join(format!("compact-restored-{}.nx", std::process::id()));
+    let jobs: Vec<_> = snapshots(&nx)
+        .into_iter()
+        .map(|(kind, version, hex)| {
+            let mut identity = [0u8; 32];
+            for (i, b) in identity.iter_mut().enumerate() {
+                *b = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap();
+            }
+            let folder = match kind.as_str() {
+                "base" => "base".into(),
+                "update" => format!("updates/{version}"),
+                _ => panic!("test expects base + updates"),
+            };
+            (identity, folder)
+        })
+        .collect();
+    let manifest = fs::read_to_string(dump.join("extracted.nximport")).unwrap();
+    let options = nxformat_packer::WriterOptions::default();
+    let stats =
+        nxformat_packer::create_restoration(&nx, &dump, &jobs, &manifest, &options).unwrap();
+    println!(
+        "REAL_RECIPE_BYTES={} REFERENCED_BYTES={}",
+        stats.recipe_bytes, stats.referenced_bytes
+    );
+    let stats = nxformat_packer::restore_extraction(&dump, &restored, &options).unwrap();
+    assert!(stats.unchanged);
+    let (mut a, mut b) = (
+        fs::File::open(&nx).unwrap(),
+        fs::File::open(&restored).unwrap(),
+    );
+    assert_eq!(a.metadata().unwrap().len(), b.metadata().unwrap().len());
+    let (mut left, mut right) = (vec![0; 1024 * 1024], vec![0; 1024 * 1024]);
+    loop {
+        let n = a.read(&mut left).unwrap();
+        if n == 0 {
+            break;
+        }
+        b.read_exact(&mut right[..n]).unwrap();
+        assert_eq!(&left[..n], &right[..n]);
+    }
+    verify(&restored);
+    cmd!("check-recipe", s(&restored)).unwrap();
+    println!("REAL_EXACT_RESTORATION_OK={}", restored.display());
 }
 
 #[test]

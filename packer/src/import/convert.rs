@@ -887,6 +887,7 @@ fn convert_inner(
                         crate::writer::pending_dependency_target(
                             parent.declaration.snapshot_type,
                             parent.declaration.numeric_version,
+                            parent.scope.program_id.value,
                         )
                     }
                     None => return Err(invalid("dependency on an add-on of the same pass")),
@@ -940,13 +941,33 @@ fn convert_inner(
                     snapshot.native.npdm = restored.native.npdm;
                 }
             } else {
-                let control = match control_metadata(&package_guard, &declaration, limits)? {
-                    Some((metadata, version, bytes)) => Some((Some(metadata), version, bytes)),
-                    None => external
-                        .metadata
-                        .get(key)
-                        .map(|m| m.snapshot_metadata(limits)),
-                };
+                let mut control = control_metadata(&package_guard, &declaration, limits)?
+                    .map(|(metadata, version, bytes)| (Some(metadata), version, bytes));
+                if let Some(package) = external.metadata.get(key) {
+                    let (fallback, version, bytes) = package.snapshot_metadata(limits);
+                    let (metadata, display_version, held) = control.get_or_insert((None, None, 0));
+                    *held = held.saturating_add(bytes);
+                    *display_version = display_version.take().or(version);
+                    if let Some(fallback) = fallback {
+                        if let Some(native) = metadata.as_mut() {
+                            native.title = native.title.take().or(fallback.title);
+                            native.publisher = native.publisher.take().or(fallback.publisher);
+                            native.icon = native.icon.take().or(fallback.icon);
+                            for extra in fallback.localized {
+                                if let Some(existing) = native.localized.iter_mut().find(|entry| {
+                                    entry.language.eq_ignore_ascii_case(&extra.language)
+                                }) {
+                                    existing.title = existing.title.take().or(extra.title);
+                                    existing.icon = existing.icon.take().or(extra.icon);
+                                } else {
+                                    native.localized.push(extra);
+                                }
+                            }
+                        } else {
+                            *metadata = Some(fallback);
+                        }
+                    }
+                }
                 if let Some((metadata, display_version, bytes)) = control {
                     input_memory = input_memory
                         .checked_add(bytes)

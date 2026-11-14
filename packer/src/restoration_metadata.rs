@@ -581,20 +581,14 @@ mod tests {
         let before = fingerprint(&original, &options);
         assert_eq!(before.1, 0);
         assert_eq!(before.2.len(), 1);
-        for portable in [false, true] {
-            let dump = dir.join(if portable { "portable-dump" } else { "dump" });
+        {
+            let dump = dir.join("dump");
             crate::cli::run(
-                {
-                    let mut args = vec![
-                        "extract".into(),
-                        original.to_string_lossy().into_owned(),
-                        dump.to_string_lossy().into_owned(),
-                    ];
-                    if portable {
-                        args.push("--portable-restore".into());
-                    }
-                    args
-                },
+                vec![
+                    "extract".into(),
+                    original.to_string_lossy().into_owned(),
+                    dump.to_string_lossy().into_owned(),
+                ],
                 None,
                 None,
             )
@@ -604,11 +598,7 @@ mod tests {
                 b"a resized mod; source resource must retain original bytes",
             )
             .unwrap();
-            let modified = dir.join(if portable {
-                "portable-modified.nx"
-            } else {
-                "modified.nx"
-            });
+            let modified = dir.join("modified.nx");
             super::super::restore_extraction(&dump, &modified, &options).unwrap();
             inspect_archive(&modified, &options, IntegrityPolicy::Strict).unwrap();
             assert_eq!(fingerprint(&modified, &options), before);

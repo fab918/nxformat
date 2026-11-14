@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(NXFormat LANGUAGES CXX)
+project(NXFormat VERSION 1.0.4 LANGUAGES CXX)
 
 include(CTest)
 # Optional single-header C++17 reader target; no writer or conversion core is

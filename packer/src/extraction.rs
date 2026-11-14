@@ -619,7 +619,17 @@ pub(super) fn extract_native(
     budget: &MemoryBudget,
     options: &WriterOptions,
 ) -> Result<(), WriterError> {
-    native_view(path, archive, snapshot, destination, budget, options, true).map(|_| ())
+    native_view(
+        path,
+        archive,
+        snapshot,
+        destination,
+        budget,
+        options,
+        true,
+        &HashSet::new(),
+    )
+    .map(|_| ())
 }
 
 pub(in crate::writer::repack) fn collect_native_ranges(
@@ -628,6 +638,7 @@ pub(in crate::writer::repack) fn collect_native_ranges(
     snapshot: &SourceSnapshot,
     budget: &MemoryBudget,
     options: &WriterOptions,
+    covered: &HashSet<u32>,
 ) -> Result<Vec<super::super::restoration::RestoreRange>, WriterError> {
     native_view(
         path,
@@ -637,6 +648,7 @@ pub(in crate::writer::repack) fn collect_native_ranges(
         budget,
         options,
         false,
+        covered,
     )
 }
 
@@ -675,6 +687,7 @@ fn physical_range(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn native_view(
     path: &Path,
     archive: &SourceArchive,
@@ -683,6 +696,7 @@ fn native_view(
     budget: &MemoryBudget,
     options: &WriterOptions,
     export: bool,
+    covered: &HashSet<u32>,
 ) -> Result<Vec<super::super::restoration::RestoreRange>, WriterError> {
     use super::super::restoration::RestoreRange;
     let mut ranges = Vec::new();
@@ -710,6 +724,56 @@ fn native_view(
     let mut base_file = File::open(path)?;
     let mut patch = snapshot_file_reader(&mut patch_file, archive, index, options)?;
     let nca = parse(&mut patch)?;
+    // An incomplete base has no honest standalone filesystem view. Keep its
+    // native bytes as ordinary exported files; the update below is still
+    // materialized and IVFC-verified through its exact BKTR base dependency.
+    // Mapping the raw files also keeps them out of the restoration recipe.
+    if snapshot.snapshot.snapshot_type == SnapshotType::Base as u8
+        && snapshot.snapshot.build_id == [0; 32]
+    {
+        let marked = nca
+            .summary
+            .sections
+            .iter()
+            .any(|s| s.fs_type == 1 && s.sparse_flattened);
+        let size = patch.size;
+        let incomplete = nca
+            .incomplete_exefs_slot(
+                &mut Source::new(&mut patch, size),
+                &InventoryOptions::default(),
+            )
+            .map_err(|e| bad(e.to_string()))?
+            .is_some();
+        if marked || incomplete {
+            drop(patch);
+            if export {
+                crate::cli::emit(true, "This base requires its update. Preserving the base as NCA files; the update is extracted as playable ExeFS/RomFS.".into());
+                export_tree(
+                    &mut patch_file,
+                    archive,
+                    snapshot.snapshot.root,
+                    destination,
+                    options,
+                )?;
+            }
+            return snapshot_entries(archive, snapshot)?
+                .into_iter()
+                .map(|(name, file)| {
+                    Ok(RestoreRange {
+                        file,
+                        offset: 0,
+                        len: archive.files[file as usize].size,
+                        path: name,
+                        file_offset: 0,
+                        hash_size: 0,
+                        hash_offset: 0,
+                        literals: None,
+                        lz4: None,
+                    })
+                })
+                .collect();
+        }
+    }
     let Some(slot) = romfs_slot(&nca)? else {
         if nca.summary.content_type != native::NcaContentType::Program {
             return Err(invalid("native Data NCA has no RomFS section"));
@@ -875,6 +939,174 @@ fn native_view(
             position: 0,
         };
         let mut entries = romfs_entries(&mut view, &hash, remaining)?;
+        if !export {
+            use super::super::restoration::{LiteralMap, Lz4Frame};
+            entries.retain(|e| e.range.is_some_and(|(_, size)| size != 0));
+            entries.sort_unstable_by_key(|e| e.range.map(|(at, _)| at));
+            let mut memory = 0u64;
+            let mut pending: Option<RestoreRange> = None;
+            let mut pending_frame = None;
+            let mut encoder_search = super::super::restoration::lz4::Search::default();
+            view.patch.visit_literals(
+                |source, physical, len| {
+                    let mut at = physical;
+                    while at < physical + len {
+                        let (file, _, boundary) = physical_range(source, index, at)?;
+                        if !covered.contains(&file) {
+                            return Ok(false);
+                        }
+                        at = boundary.min(physical + len);
+                    }
+                    Ok(true)
+                },
+                |source, span| {
+                    let (physical, logical, len, frame) = match span {
+                        compression::Span::Frame {
+                            physical,
+                            logical,
+                            plain,
+                            encoded,
+                        } => {
+                            let i = entries.partition_point(|e| {
+                                let (at, size) = e.range.unwrap();
+                                at + size <= logical
+                            });
+                            let Some(entry) = entries.get(i) else {
+                                return Ok(false);
+                            };
+                            let (at, size) = entry.range.unwrap();
+                            if at > logical || at + size < logical + plain.len() as u64 {
+                                return Ok(false);
+                            }
+                            let Some(level) = encoder_search.find(plain, encoded, options)? else {
+                                return Ok(false);
+                            };
+                            if let Some(r) = pending.take() {
+                                ranges.push(r);
+                            }
+                            pending_frame = None;
+                            let mut done = 0;
+                            while done < encoded.len() as u64 {
+                                let (file, offset, boundary) =
+                                    physical_range(source, index, physical + done)?;
+                                let len =
+                                    (encoded.len() as u64 - done).min(boundary - physical - done);
+                                if !covered.contains(&file) {
+                                    let path = format!("romfs/{}", entry.path);
+                                    memory += 320 + path.len() as u64 * 2;
+                                    ranges.push(RestoreRange {
+                                        file,
+                                        offset,
+                                        len,
+                                        path,
+                                        file_offset: logical - at,
+                                        hash_size: 0,
+                                        hash_offset: 0,
+                                        literals: None,
+                                        lz4: Some(Arc::new(Lz4Frame {
+                                            offset,
+                                            skip: done as u32,
+                                            decoded: plain.len() as u32,
+                                            encoded: encoded.len() as u32,
+                                            level,
+                                        })),
+                                    });
+                                }
+                                done += len;
+                            }
+                            if memory > remaining / 3 {
+                                return Err(limit_error(
+                                    "compressed restoration ranges exceed memory budget",
+                                ));
+                            }
+                            return Ok(true);
+                        }
+                        compression::Span::Literal {
+                            physical,
+                            logical,
+                            len,
+                            frame,
+                        } => (physical, logical, len, frame),
+                    };
+                    let end = logical + len;
+                    let first = entries.partition_point(|e| {
+                        let (at, size) = e.range.unwrap();
+                        at + size <= logical
+                    });
+                    for entry in &entries[first..] {
+                        let (at, size) = entry.range.unwrap();
+                        if at >= end {
+                            break;
+                        }
+                        let begin = at.max(logical);
+                        let stop = (at + size).min(end);
+                        let mut done = begin;
+                        while done < stop {
+                            let encoded = physical + done - logical;
+                            let (file, offset, boundary) = physical_range(source, index, encoded)?;
+                            let len = (stop - done).min(boundary - encoded);
+                            if covered.contains(&file) {
+                                done += len;
+                                continue;
+                            }
+                            let append = frame.is_some()
+                                && frame == pending_frame
+                                && pending.as_ref().is_some_and(|r| {
+                                    r.file == file
+                                        && r.path.strip_prefix("romfs/")
+                                            == Some(entry.path.as_str())
+                                        && offset >= r.offset + r.len
+                                        && offset + len - r.offset <= 65536
+                                });
+                            if !append {
+                                if let Some(r) = pending.take() {
+                                    ranges.push(r);
+                                }
+                                memory += 268 + entry.path.len() as u64 * 2;
+                            }
+                            if append {
+                                let r = pending.as_mut().unwrap();
+                                let map = Arc::get_mut(r.literals.as_mut().unwrap()).unwrap();
+                                memory += map.push(
+                                    (offset - r.offset) as u32,
+                                    (done - at - r.file_offset) as u32,
+                                    len as u32,
+                                );
+                                r.len = offset + len - r.offset;
+                            } else {
+                                let literals = frame.map(|_| {
+                                    let mut map = LiteralMap::new(offset);
+                                    memory += map.push(0, 0, len as u32);
+                                    Arc::new(map)
+                                });
+                                pending = Some(RestoreRange {
+                                    file,
+                                    offset,
+                                    len,
+                                    path: format!("romfs/{}", entry.path),
+                                    file_offset: done - at,
+                                    hash_size: 0,
+                                    hash_offset: 0,
+                                    literals,
+                                    lz4: None,
+                                });
+                                pending_frame = frame;
+                            }
+                            if memory > remaining / 3 {
+                                return Err(limit_error(
+                                    "compressed restoration ranges exceed memory budget",
+                                ));
+                            }
+                            done += len;
+                        }
+                    }
+                    Ok(false)
+                },
+            )?;
+            if let Some(r) = pending {
+                ranges.push(r);
+            }
+        }
         if export {
             let romfs = destination.join("romfs");
             std::fs::create_dir(&romfs)?;
@@ -900,9 +1132,7 @@ fn native_view(
             }
         }
         drop(view);
-        // LZ4 source frames are literal recipe bytes: decoded file ranges
-        // cannot reproduce an arbitrary original LZ4 encoding exactly.
-        return native_exefs_view(
+        ranges.extend(native_exefs_view(
             path,
             archive,
             snapshot,
@@ -910,7 +1140,8 @@ fn native_view(
             budget,
             options,
             export,
-        );
+        )?);
+        return Ok(ranges);
     }
     let entries = romfs_entries(&mut reader, &nca.hash_data[slot], limit)?;
     let romfs = destination.join("romfs");
@@ -939,6 +1170,8 @@ fn native_view(
                     file_offset: done,
                     hash_size: 0,
                     hash_offset: 0,
+                    literals: None,
+                    lz4: None,
                 });
                 done += len;
             }
@@ -983,6 +1216,8 @@ fn native_view(
                                         file_offset: begin - off,
                                         hash_size: block as u32,
                                         hash_offset: done as u8,
+                                        literals: None,
+                                        lz4: None,
                                     });
                                 }
                                 done += len;
@@ -1053,6 +1288,8 @@ fn native_exefs_view(
                 file_offset: 0,
                 hash_size: 0,
                 hash_offset: 0,
+                literals: None,
+                lz4: None,
             });
             if export {
                 reader.seek(SeekFrom::Start(entry.offset))?;
@@ -1597,7 +1834,9 @@ mod tests {
         let mut args = vec!["pack".into()];
         for (i, spec) in [base, patch].iter().enumerate() {
             let path = dir.join(format!("{i}.dnsp"));
-            std::fs::write(&path, synthetic::dnsp(&synthetic::title_entries(spec))).unwrap();
+            let mut entries = synthetic::title_entries(spec);
+            entries.push((format!("{APP:032x}.tik"), vec![i as u8; 1024]));
+            std::fs::write(&path, synthetic::dnsp(&entries)).unwrap();
             args.push(path.to_string_lossy().into_owned());
         }
         args.push(nx.to_string_lossy().into_owned());
@@ -1622,6 +1861,9 @@ mod tests {
             std::fs::read(dump.join("updates/1/romfs/data.bin")).unwrap(),
             vec![2; 200000]
         );
+        let recipe =
+            zstd::stream::decode_all(File::open(dump.join(".nxrestore.zst")).unwrap()).unwrap();
+        assert_eq!(&recipe[..8], b"NXRSTR03");
         let exact = dir.join("exact.nx");
         super::super::super::restoration::restore_extraction(
             &dump,

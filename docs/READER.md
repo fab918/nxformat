@@ -1,6 +1,6 @@
 # Portable C++17 reader
 
-Applies to **NXFormat / NXConvert 1.0.3**.
+Applies to **NXFormat / NXConvert 1.0.4**.
 
 For persistent emulator use, see the runtime contract below. The optional
 `nx_session.hpp` and `nx_disk_source.hpp` companions add owned positional IO,

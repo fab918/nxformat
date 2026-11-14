@@ -746,7 +746,15 @@ pub(super) fn prepare(
     if kind == SnapshotType::Update && meta.meta.patch_id != Some(request.title_id) {
         return Err(invalid("update title disagrees with native base Patch ID"));
     }
-    let base_plan = native::associate(vec![base_report.clone()]).plan();
+    // This first plan checks the stored base family, not whether it can run
+    // alone. The combined plan below checks the exact update and its Build ID.
+    let mut structural_base = base_report.clone();
+    for meta in &mut structural_base.metas {
+        for program in &mut meta.meta.programs {
+            program.requires_update = false;
+        }
+    }
+    let base_plan = native::associate(vec![structural_base]).plan();
     if !base_plan.blocked.is_empty() || base_plan.applications.len() != 1 {
         return Err(invalid(
             "native base Program associations are incomplete or ambiguous",

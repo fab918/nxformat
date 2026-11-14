@@ -86,6 +86,33 @@ fn paranoid() -> ImportLimits {
 }
 
 #[test]
+fn program_view_requires_matching_version_and_survives_latest_selection() {
+    let declarations = concat!(
+        "NXIMPORT\t1\n",
+        "snapshot\tb\tbase\tswitch2\t0400000000001000\t0400000000001000\tprimary\tbase\t0\tcomplete\tmaterialized-v1\tmeta-acid3072-v1\n",
+        "program-view\tb\tprogram1\n",
+        "snapshot\tb1\tbase/program1\tswitch2\t0400000000001000\t0400000000001001\tauxiliary\tbase\t0\tcomplete\tmaterialized-v1\tmeta-acid3072-v1\n",
+        "snapshot\tu\tupdates/2\tswitch2\t0400000000001000\t0400000000001000\tprimary\tupdate\t2\tcomplete\tmaterialized-v1\tmeta-acid3072-v1\n",
+        "dependency\tu\trequired-base\tb\n",
+        "program-view\tu\tprogram1\n",
+        "snapshot\tu1\tupdates/2/program1\tswitch2\t0400000000001000\t0400000000001001\tauxiliary\tstandalone-update\t2\tcomplete\tmaterialized-v1\tmeta-acid3072-v1\n",
+    );
+    let limits = ImportLimits::default();
+    let parsed = DeclarationManifest::read(declarations.as_bytes(), &limits).unwrap();
+    let selected = parsed
+        .select_latest_complete(&Default::default(), &limits)
+        .unwrap();
+    assert_eq!(selected.manifest.snapshots.len(), 4);
+    assert!(selected.manifest.snapshots.iter().any(|s| s.key == "b1"));
+
+    let invalid_version = declarations.replace(
+        "auxiliary\tbase\t0\tcomplete",
+        "auxiliary\tbase\t1\tcomplete",
+    );
+    assert!(DeclarationManifest::read(invalid_version.as_bytes(), &limits).is_err());
+}
+
+#[test]
 fn cycles_scope_duplicates_build_conflicts_and_publication_failure_are_transactional() {
     let t = Temp::new();
     let source = t.0.join("source");

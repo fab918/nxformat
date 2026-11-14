@@ -421,6 +421,9 @@ pub struct NativeProgram {
     /// The ExeFS is a flattened sparse section: the executable is only in the
     /// update, so the base carries no Build ID (see `NcaSection::sparse_flattened`).
     pub sparse: bool,
+    /// An unmarked, rewritten incomplete base is accepted only alongside a
+    /// matching, independently validated update executable.
+    pub requires_update: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -854,7 +857,7 @@ pub(crate) fn inspect_entries(
         let mut issues = Vec::new();
         let mut verification = Vec::new();
         if options.mode == InventoryMode::Strict {
-            verification.push(verify_unit(src, nca, options));
+            verification.push(verify_unit(src, nca, options, None));
         }
         match meta.generation {
             NativeGeneration::Switch1 => {}
@@ -988,6 +991,7 @@ pub(crate) fn inspect_entries(
                     "ambiguous Control NCA Program/offset association",
                 ));
             }
+            let mut deferred_exefs = None;
             match record.record_type {
                 ContentRecordType::Program => {
                     if !meta.program_ids.contains(&unit.summary.program_id) {
@@ -997,11 +1001,30 @@ pub(crate) fn inspect_entries(
                         meta.requires_base_romfs = true;
                     }
                     // Inventory each executable and its explicit native association.
-                    let sparse_exefs = unit
-                        .summary
-                        .sections
-                        .iter()
-                        .any(|s| s.fs_type == 1 && s.sparse_flattened);
+                    let incomplete_exefs = if meta.meta_type == ContentMetaType::Application
+                        && record.size != report.units[ui].size
+                    {
+                        match unit.incomplete_exefs_slot(src, options) {
+                            Ok(slot) => slot,
+                            Err(e) => {
+                                plannable = false;
+                                issues.push(Issue::from_error(
+                                    &e,
+                                    &format!("{name} incomplete base"),
+                                ));
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let sparse_exefs = incomplete_exefs.is_some()
+                        || unit
+                            .summary
+                            .sections
+                            .iter()
+                            .any(|s| s.fs_type == 1 && s.sparse_flattened);
+                    deferred_exefs = incomplete_exefs;
                     let build_id = if sparse_exefs {
                         // The executable lives in the update: nothing to read here.
                         issues.push(Issue::new(
@@ -1026,6 +1049,7 @@ pub(crate) fn inspect_entries(
                         id_offset: record.id_offset,
                         build_id,
                         sparse: sparse_exefs,
+                        requires_update: incomplete_exefs.is_some(),
                     });
                     if record.id_offset == 0 {
                         meta.build_id = build_id;
@@ -1061,7 +1085,7 @@ pub(crate) fn inspect_entries(
                     ContentRecordType::Program | ContentRecordType::Control
                 )
             {
-                verification.push(verify_unit(src, unit, options));
+                verification.push(verify_unit(src, unit, options, deferred_exefs));
             }
         }
         let primary = meta
@@ -1134,12 +1158,17 @@ impl Issue {
 }
 
 /// Strict check of the sections the inventory read.
-fn verify_unit(src: &mut Source, nca: &ParsedNca, options: &InventoryOptions) -> VerificationState {
+fn verify_unit(
+    src: &mut Source,
+    nca: &ParsedNca,
+    options: &InventoryOptions,
+    deferred: Option<usize>,
+) -> VerificationState {
     let mut states = Vec::new();
     for (i, s) in nca.summary.sections.iter().enumerate() {
         let state = match (nca.summary.content_type, s.fs_type, s.hash_type) {
             // Its hashes describe the full section, holes included.
-            _ if s.sparse_flattened => Ok(VerificationState::NotApplicable),
+            _ if s.sparse_flattened || deferred == Some(i) => Ok(VerificationState::NotApplicable),
             (NcaContentType::Meta | NcaContentType::Program, 1, 2) => {
                 nca.verify_partition(src, i, options)
             }
@@ -1870,6 +1899,20 @@ impl Inventory {
                         }
                         // A sparse base has no executable of its own; its update brings it.
                         let sparse_base = program.sparse && snapshot_type == SnapshotType::Base;
+                        if program.requires_update
+                            && !app.updates.iter().any(|r| {
+                                let update = &self.sources[r.source].metas[r.meta];
+                                update.plannable
+                                    && update.meta.title_id == m.patch_id.unwrap_or(0)
+                                    && update.meta.programs.iter().any(|p| {
+                                        p.program_id == program.program_id
+                                            && p.id_offset == program.id_offset
+                                            && p.build_id.is_some_and(|id| id != [0; 32])
+                                    })
+                            })
+                        {
+                            reasons.push("incomplete base requires its matching update with a verified executable".into());
+                        }
                         if (program.build_id.is_none() && !sparse_base)
                             || program.build_id == Some([0; 32])
                         {

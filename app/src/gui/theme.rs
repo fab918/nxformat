@@ -64,6 +64,7 @@ pub enum Icon {
     Archive,
     Plus,
     Arrow,
+    Back,
     Image,
     Check,
     Settings,
@@ -134,6 +135,11 @@ pub fn paint_icon(p: &egui::Painter, rect: egui::Rect, kind: Icon, color: Color3
             line(pt(0.6, 0.25), pt(0.85, 0.5));
             line(pt(0.6, 0.75), pt(0.85, 0.5));
         }
+        Icon::Back => {
+            line(pt(0.83, 0.5), pt(0.17, 0.5));
+            line(pt(0.4, 0.25), pt(0.15, 0.5));
+            line(pt(0.4, 0.75), pt(0.15, 0.5));
+        }
         Icon::Image => {
             p.rect_stroke(
                 rect.shrink(size_fraction(rect, 0.12)),
@@ -186,6 +192,20 @@ fn size_fraction(rect: egui::Rect, value: f32) -> f32 {
 }
 
 pub fn button(ui: &mut egui::Ui, kind: Icon, label: &str, primary: bool) -> egui::Response {
+    styled_button(ui, kind, label, primary, false)
+}
+
+pub fn back_button(ui: &mut egui::Ui) -> egui::Response {
+    styled_button(ui, Icon::Back, "Back", false, true)
+}
+
+fn styled_button(
+    ui: &mut egui::Ui,
+    kind: Icon,
+    label: &str,
+    primary: bool,
+    navigation: bool,
+) -> egui::Response {
     let width = ui.fonts_mut(|f| {
         f.layout_no_wrap(label.into(), FontId::proportional(14.0), TEXT)
             .size()
@@ -194,12 +214,24 @@ pub fn button(ui: &mut egui::Ui, kind: Icon, label: &str, primary: bool) -> egui
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 40.0), egui::Sense::click());
     let color = if primary {
         ACCENT
+    } else if navigation {
+        if response.hovered() {
+            Color32::from_rgb(72, 63, 96)
+        } else {
+            Color32::from_rgb(49, 44, 64)
+        }
     } else if response.hovered() {
         Color32::from_rgb(54, 52, 69)
     } else {
         Color32::from_rgb(38, 40, 49)
     };
-    let text_color = if primary { BG } else { TEXT };
+    let text_color = if primary {
+        BG
+    } else if navigation {
+        ACCENT
+    } else {
+        TEXT
+    };
     ui.painter()
         .rect_filled(rect, 9.0, if ui.is_enabled() { color } else { CARD });
     if !primary {

@@ -201,6 +201,99 @@ fn retarget(nup: &mut [u8], dir: u32, node: u32) {
     nup[0x18..0x38].copy_from_slice(&digest);
 }
 
+/// Simulate the extra 14 child slots reported by a Lichii-produced Kirby NUP.
+/// This alters only the TOC directory count and keeps its SHA-256 valid.
+fn unused_tail_slots(mut nup: Vec<u8>, zero_fill: bool) -> Vec<u8> {
+    let l = layout(&nup);
+    let dir = dir_id(&nup, "tail");
+    let row = SUPERBLOCK + l.dirs_at + dir as usize * DIRECTORY;
+    let first = u32_at(&nup, row + 8) as usize;
+    let pool = u64_at(&nup[SUPERBLOCK..], 0x18) as usize;
+    let total = (pool - l.children_at) / 4;
+    assert_eq!(u32_at(&nup, row + 12), 14);
+    assert_eq!(first + 14, total);
+    nup[row + 12..row + 16].copy_from_slice(&0u32.to_le_bytes());
+    if zero_fill {
+        nup[SUPERBLOCK + l.children_at + first * 4..SUPERBLOCK + pool].fill(0);
+    }
+    let toc_size = u64_at(&nup, 0x10) as usize;
+    let digest = crate::hash::sha256(&nup[SUPERBLOCK..SUPERBLOCK + toc_size]);
+    nup[0x18..0x38].copy_from_slice(&digest);
+    nup
+}
+
+#[test]
+fn unaccounted_nup_children_are_diagnosed_or_proven_zero_padding() {
+    let dir = work("extra-slots");
+    let files = [
+        "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "aa", "ab", "ac", "ad",
+    ]
+    .into_iter()
+    .map(|name| Node::File(name, vec![42]))
+    .collect();
+    let valid = build(&[base_with(vec![Node::Dir("tail", files)])], false);
+
+    // Unknown entries remain rejected, even if a less strict NUP consumer
+    // manages to start the game. The failure lists package IDs for support.
+    let unsafe_extra = unused_tail_slots(valid.clone(), false);
+    assert_rejected(
+        &dir,
+        &unsafe_extra,
+        &["14 extra", "unused child slots are not zero padding"],
+    );
+    let error = inspect_nup(
+        &dir.join("input.nup"),
+        &ImportLimits::default(),
+        &Default::default(),
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(
+        error.contains("14 extra") && error.contains("#0 base"),
+        "{error}"
+    );
+
+    // Explicitly validated trailing zero padding is harmless. Do not reject
+    // a game merely because its producer left such bytes before the pool.
+    let padded = unused_tail_slots(valid, true);
+    let path = dir.join("input.nup");
+    fs::write(&path, padded).unwrap();
+    assert!(inspect_nup(&path, &ImportLimits::default(), &Default::default()).is_ok());
+    for stream in [false, true] {
+        let stage = stage_nup(
+            &path,
+            &dir.join("out"),
+            &options(stream),
+            &ImportLimits::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        drop(stage);
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn child_slot_overlap_and_gap_are_rejected() {
+    let directory = |first_child, child_count| Directory {
+        name: String::new(),
+        first_child,
+        child_count,
+    };
+    for (ranges, reason) in [
+        (vec![directory(0, 3), directory(2, 2)], "overlap"),
+        (vec![directory(0, 1), directory(3, 1)], "gap"),
+        (vec![directory(0, 5)], "outside the table"),
+    ] {
+        let error = validate_child_table(&ranges, &[0, 0, 0, 0], &[])
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains(reason), "{error}");
+    }
+}
+
 #[test]
 fn cycles_and_repeated_nodes_are_rejected() {
     let dir = work("graphs");

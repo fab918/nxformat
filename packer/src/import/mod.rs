@@ -1,6 +1,8 @@
 //! Explicit complete-content import. Native NCA and extracted views feed the
 //! existing writer; facts never masquerade as authenticated/display metadata.
 mod convert;
+mod dump;
+pub use dump::{is_program_dump_component, plan_program_dump, ProgramDumpPlan};
 mod manifest;
 mod nup;
 mod secure;
