@@ -271,6 +271,83 @@ fn region(data: &[u8], section_len: u64) -> Result<(u64, u64), WriterError> {
     Ok((off, size))
 }
 
+/// Authenticate the separate IVFC tree protecting decrypted BKTR tables.
+/// Hash layers are relative to layer_info_offset; the final data layer starts
+/// at the indirect table, rather than at its stored descriptor offset.
+fn verify_patch_metadata(
+    reader: &mut (impl Read + Seek),
+    section_start: u64,
+    section_len: u64,
+    patch: &[u8; 0x40],
+    info: &[u8; 0x30],
+    options: &WriterOptions,
+) -> Result<(), WriterError> {
+    let offset = u64_at(info, 0);
+    if u64_at(info, 8) != 0xe8
+        || offset
+            .checked_add(0xe8)
+            .map_or(true, |end| end > section_len)
+    {
+        return Err(bad("invalid BKTR metadata integrity descriptor bounds"));
+    }
+    let mut descriptor = [0u8; 0xe8];
+    reader.seek(SeekFrom::Start(section_start + offset))?;
+    reader.read_exact(&mut descriptor)?;
+    if sha256(&descriptor) != info[16..48] {
+        return Err(bad("BKTR metadata integrity descriptor SHA-256 mismatch"));
+    }
+    let indirect = u64_at(patch, 0);
+    let layers_at = u64_at(&descriptor, 0);
+    let mut hash = [0u8; 0xf8];
+    hash[..0xe0].copy_from_slice(&descriptor[8..]);
+    let count = u32_at(&hash, 12) as usize;
+    if !(2..=7).contains(&count)
+        || u32_at(&hash, 4) != 0x20000
+        || layers_at <= indirect
+        || layers_at >= offset
+    {
+        return Err(bad("invalid BKTR metadata integrity layers"));
+    }
+    let last = 16 + (count - 2) * 24;
+    let data_size = u64_at(&hash, last + 8);
+    if data_size == 0 || data_size > layers_at - indirect {
+        return Err(bad("BKTR metadata overlaps its integrity layers"));
+    }
+    // Both declared BKTR tables must be fully covered by the verified data.
+    for at in [0, 32] {
+        let table = u64_at(patch, at);
+        let size = u64_at(patch, at + 8);
+        if size != 0
+            && (table < indirect
+                || table
+                    .checked_sub(indirect)
+                    .and_then(|v| v.checked_add(size))
+                    .map_or(true, |end| end > data_size))
+        {
+            return Err(bad("BKTR table lies outside authenticated metadata"));
+        }
+    }
+    for index in 0..count - 2 {
+        let at = 16 + index * 24;
+        let adjusted = layers_at
+            .checked_add(u64_at(&hash, at))
+            .and_then(|v| v.checked_sub(indirect))
+            .ok_or_else(|| bad("BKTR metadata layer offset overflow"))?;
+        hash[at..at + 8].copy_from_slice(&adjusted.to_le_bytes());
+    }
+    hash[last..last + 8].copy_from_slice(&0u64.to_le_bytes());
+    let mut metadata = SectionReader {
+        patch: reader,
+        base: None,
+        patch_start: section_start + indirect,
+        base_start: 0,
+        mappings: Vec::new(),
+        len: offset - indirect,
+        position: 0,
+    };
+    verify_ivfc(&mut metadata, &hash, options)
+}
+
 // Stream every level, including the data level; retain at most one hash block.
 fn verify_ivfc(
     reader: &mut SectionReader<impl Read + Seek>,
@@ -658,8 +735,21 @@ fn native_view(
     let section = &nca.summary.sections[slot];
     if section.sparse_flattened || nca.unsupported_storage[slot] {
         return Err(invalid(
-            "sparse or metadata-hashed RomFS storage is unsupported; export raw NCAs",
+            "sparse or unsupported metadata-hashed RomFS storage; export raw NCAs",
         ));
+    }
+    if let Some(info) = &nca.metadata_hash_data[slot] {
+        if !section.has_patch_info {
+            return Err(invalid("metadata integrity without BKTR is unsupported"));
+        }
+        verify_patch_metadata(
+            &mut patch,
+            section.start,
+            section.end - section.start,
+            &nca.patch_data[slot],
+            info,
+            options,
+        )?;
     }
     if section.hash_type != 3 {
         return Err(invalid("only IVFC RomFS is supported; export raw NCAs"));
@@ -983,6 +1073,69 @@ fn native_exefs_view(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn bktr_metadata_integrity_rejects_corruption_and_uncovered_tables() {
+        let data_size = 0x8000;
+        let mut bytes = vec![7u8; data_size];
+        let mut hashes = vec![0u8; 0x4000];
+        for (index, block) in bytes.chunks(0x4000).enumerate() {
+            hashes[index * 32..index * 32 + 32].copy_from_slice(&sha256(block));
+        }
+        let mut descriptor = [0u8; 0xe8];
+        descriptor[..8].copy_from_slice(&(data_size as u64).to_le_bytes());
+        let hash = &mut descriptor[8..];
+        hash[..4].copy_from_slice(b"IVFC");
+        hash[4..8].copy_from_slice(&0x20000u32.to_le_bytes());
+        hash[8..12].copy_from_slice(&32u32.to_le_bytes());
+        hash[12..16].copy_from_slice(&3u32.to_le_bytes());
+        for (index, offset, size) in [(0, 0u64, 0x4000u64), (1, 0x4000, data_size as u64)] {
+            let at = 16 + index * 24;
+            hash[at..at + 8].copy_from_slice(&offset.to_le_bytes());
+            hash[at + 8..at + 16].copy_from_slice(&size.to_le_bytes());
+            hash[at + 16..at + 20].copy_from_slice(&14u32.to_le_bytes());
+        }
+        hash[0xc0..0xe0].copy_from_slice(&sha256(&hashes));
+        bytes.extend(hashes);
+        let descriptor_offset = bytes.len();
+        bytes.extend(descriptor);
+        let mut info = [0u8; 0x30];
+        info[..8].copy_from_slice(&(descriptor_offset as u64).to_le_bytes());
+        info[8..16].copy_from_slice(&0xe8u64.to_le_bytes());
+        info[16..].copy_from_slice(&sha256(&descriptor));
+        let mut patch = [0u8; 0x40];
+        patch[8..16].copy_from_slice(&0x4000u64.to_le_bytes());
+        patch[32..40].copy_from_slice(&0x4000u64.to_le_bytes());
+        patch[40..48].copy_from_slice(&0x4000u64.to_le_bytes());
+        let check = |bytes: Vec<u8>, patch: &[u8; 0x40], info: &[u8; 0x30]| {
+            let len = bytes.len() as u64;
+            verify_patch_metadata(
+                &mut Cursor::new(bytes),
+                0,
+                len,
+                patch,
+                info,
+                &WriterOptions::default(),
+            )
+        };
+        check(bytes.clone(), &patch, &info).unwrap();
+        for at in [0, data_size, descriptor_offset + 8] {
+            let mut damaged = bytes.clone();
+            damaged[at] ^= 1;
+            assert!(check(damaged, &patch, &info).is_err());
+        }
+        let mut uncovered = patch;
+        uncovered[40..48].copy_from_slice(&(data_size as u64).to_le_bytes());
+        assert!(check(bytes.clone(), &uncovered, &info).is_err());
+        let mut invalid = info;
+        invalid[..8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(check(bytes.clone(), &patch, &invalid).is_err());
+        let mut wrong_version = bytes;
+        wrong_version[descriptor_offset + 12..descriptor_offset + 16].fill(0);
+        let mut rehashed = info;
+        rehashed[16..].copy_from_slice(&sha256(&wrong_version[descriptor_offset..]));
+        assert!(check(wrong_version, &patch, &rehashed).is_err());
+    }
 
     fn view(bytes: Vec<u8>) -> SectionReader<Cursor<Vec<u8>>> {
         let len = bytes.len() as u64;

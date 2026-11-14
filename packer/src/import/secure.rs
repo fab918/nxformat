@@ -1,7 +1,7 @@
 //! Read-only capability root. Walk each component without following links.
 use super::*;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs::{File, OpenOptions},
     io,
     path::{Component, Path},
@@ -17,6 +17,8 @@ pub(crate) struct Root {
     /// Holding them pins the tree (no rename/delete of an open directory) and
     /// makes every later open a single relative call instead of a root walk.
     dirs: Mutex<HashMap<String, Arc<File>>>,
+    preserve_game_metadata: bool,
+    game_metadata_paths: Option<BTreeSet<String>>,
 }
 /// One directory entry as reported by the listing itself (no per-entry open).
 #[derive(Clone, Debug)]
@@ -293,6 +295,8 @@ impl Root {
                 path: absolute,
                 file: Arc::new(file),
                 dirs: Mutex::default(),
+                preserve_game_metadata: false,
+                game_metadata_paths: None,
             })
         }
         #[cfg(windows)]
@@ -317,6 +321,8 @@ impl Root {
                 file: Arc::new(file),
                 _parents: parents,
                 dirs: Mutex::default(),
+                preserve_game_metadata: false,
+                game_metadata_paths: None,
             };
             // Location is established once; descendants are opened relative
             // to pinned handles and can no longer escape through reparse points.
@@ -404,6 +410,17 @@ impl Root {
     pub fn names(&self, path: &str, max: usize) -> Result<Vec<String>, WriterError> {
         Ok(self.list(path, max)?.into_iter().map(|e| e.name).collect())
     }
+    /// Preserve files shipped in exact exports without changing normal imports.
+    pub(crate) fn with_game_metadata(mut self) -> Self {
+        self.preserve_game_metadata = true;
+        self
+    }
+    pub(crate) fn with_game_metadata_paths(mut self, paths: BTreeSet<String>) -> Self {
+        self.preserve_game_metadata = true;
+        self.game_metadata_paths = Some(paths);
+        self
+    }
+
     /// Names, kinds, sizes and write times straight from the directory
     /// listing: no entry is opened. Links/reparse points/special files fail.
     pub fn list(&self, path: &str, max: usize) -> Result<Vec<Entry>, WriterError> {
@@ -543,8 +560,11 @@ impl Root {
             return Err(unsupported("host capability filesystem"));
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
-        // Host metadata is outside the game namespace. Keep similarly named
-        // game files unless their contents identify real macOS metadata.
+        // Files inside a RomFS/data namespace are game bytes, even when a
+        // developer shipped a real DS_Store or AppleDouble file in the game.
+        // Only filter identified host metadata outside those content roots.
+        let game_content = self.preserve_game_metadata
+            && path.split('/').any(|part| matches!(part, "romfs" | "data"));
         let mut ignored = vec![false; out.len()];
         for (index, entry) in out.iter().enumerate() {
             if entry.dir {
@@ -564,6 +584,14 @@ impl Root {
             } else {
                 format!("{path}/{}", entry.name)
             };
+            if game_content
+                && self
+                    .game_metadata_paths
+                    .as_ref()
+                    .map_or(true, |paths| paths.contains(&relative))
+            {
+                continue;
+            }
             let mut file = self.open_relative(&relative)?;
             ignored[index] = macos_metadata(&mut file, entry.size, apple_double)?;
         }
@@ -660,6 +688,16 @@ mod metadata_tests {
         let names = root.names("", 32).unwrap();
         assert!(names.contains(&"._romfs".to_string()));
         assert!(names.contains(&".DS_Store".to_string()));
+        std::fs::write(path.join("romfs/.DS_Store"), b"\0\0\0\x01Bud1game bytes").unwrap();
+        std::fs::write(path.join("romfs/asset"), b"asset").unwrap();
+        std::fs::write(path.join("romfs/._asset"), apple_double()).unwrap();
+        assert_eq!(root.names("romfs", 32).unwrap(), ["asset"]);
+        let exact = Root::open(&path).unwrap().with_game_metadata();
+        assert_eq!(
+            exact.names("romfs", 32).unwrap(),
+            [".DS_Store", "._asset", "asset"]
+        );
+        drop(exact);
         drop(root);
         std::fs::remove_dir_all(path).unwrap();
     }
