@@ -204,6 +204,84 @@ struct Region {
 }
 
 impl ParsedNca {
+    /// Some decrypters expand a sparse base without writing DSPF. Its old
+    /// executable and compression index are not materialized. Recognize only
+    /// missing payload beneath valid, bounded headers, never a schema error.
+    /// The caller must additionally require Application CNMT, rewritten size,
+    /// and a matching update with a complete executable before planning it.
+    pub(crate) fn incomplete_exefs_slot(
+        &self,
+        src: &mut Source,
+        options: &InventoryOptions,
+    ) -> Result<Option<usize>, NativeError> {
+        if self.summary.content_type != NcaContentType::Program {
+            return Ok(None);
+        }
+        let mut missing = None;
+        for (i, section) in self.summary.sections.iter().enumerate() {
+            if self.unsupported_storage[i] || section.has_patch_info {
+                return Ok(None);
+            }
+            if section.fs_type != 1 {
+                continue;
+            }
+            let (_, pfs, _, _) = self.pfs0_region(i)?;
+            let mut magic = [0; 4];
+            src.read_exact_at(self.abs(i, pfs.offset), &mut magic)?;
+            if &magic != b"PFS0" {
+                if missing.replace(i).is_some() {
+                    return Ok(None);
+                }
+            } else {
+                let base = self.abs(i, pfs.offset);
+                let entries = parse_partition(src, base, base + pfs.size, false, options)?;
+                // A logo partition is not an executable. A present executable
+                // (including a malformed main) must follow normal validation.
+                if entries.len() != 2
+                    || !entries
+                        .iter()
+                        .all(|e| matches!(e.name.as_str(), "NintendoLogo.png" | "StartupMovie.gif"))
+                {
+                    return Ok(None);
+                }
+            }
+        }
+        let Some(missing) = missing else {
+            return Ok(None);
+        };
+        for (i, section) in self.summary.sections.iter().enumerate() {
+            if section.fs_type != 0 {
+                continue;
+            }
+            let data = self.romfs_region(i)?;
+            let info = &self.compression_data[i];
+            let offset = u64_at(info, 0);
+            let size = u64_at(info, 8);
+            let count = u32_at(info, 24) as u64;
+            let leaves = count.div_ceil((0x3ff0 / 24) as u64);
+            if &info[16..20] != b"BKTR"
+                || u32_at(info, 20) != 1
+                || info[28..].iter().any(|&b| b != 0)
+                || count == 0
+                || leaves > 0x3ff0 / 8
+                || size < (leaves + 1) * 0x4000
+                || offset.checked_add(size).map_or(true, |end| end > data.size)
+            {
+                continue;
+            }
+            let mut root = [0; 16];
+            src.read_exact_at(self.abs(i, data.offset + offset), &mut root)?;
+            if u32_at(&root, 0) != 0
+                || u32_at(&root, 4) as u64 != leaves
+                || u64_at(&root, 8) == 0
+                || u64_at(&root, 8) > i64::MAX as u64
+            {
+                return Ok(Some(missing));
+            }
+        }
+        Ok(None)
+    }
+
     fn section_slot(&self, index: usize) -> (&NcaSection, &[u8; 0xF8]) {
         (&self.summary.sections[index], &self.hash_data[index])
     }

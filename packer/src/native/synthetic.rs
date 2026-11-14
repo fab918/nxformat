@@ -541,6 +541,16 @@ pub fn sparse_executable(entries: &mut [(String, Vec<u8>)], marked: bool) {
     program[0x280..0x2A0].copy_from_slice(&digest);
 }
 
+/// Rehash an edited synthetic FS header so negative tests can distinguish
+/// invalid storage descriptors from a header-authentication failure.
+pub fn rehash_section_header(nca: &mut [u8], section: usize) {
+    assert!(section < 4);
+    let start = 0x400 + section * 0x200;
+    let digest = sha256(&nca[start..start + 0x200]);
+    let at = 0x280 + section * 32;
+    nca[at..at + 32].copy_from_slice(&digest);
+}
+
 pub fn dnsp(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
     partition(entries, false)
 }

@@ -2,6 +2,8 @@
 //! extension: original headers, indexes, NCA/BKTR metadata and embedded package
 //! recipes are literal data; game bytes reference the exported file ranges.
 use super::*;
+#[path = "restoration_lz4.rs"]
+pub(super) mod lz4;
 #[path = "restoration_metadata.rs"]
 mod metadata;
 #[path = "restoration_store.rs"]
@@ -11,7 +13,8 @@ use crate::import::{ImportLimits, SourceRoot};
 use std::io::{self, BufReader};
 
 pub const RESTORATION_FILE: &str = ".nxrestore.zst";
-const MAGIC: &[u8; 8] = b"NXRSTR02";
+const MAGIC: &[u8; 8] = b"NXRSTR03";
+const LEGACY_MAGIC: &[u8; 8] = b"NXRSTR02";
 const CHUNK: usize = 128 * 1024;
 const MAX_TEXT: u64 = 16 * 1024 * 1024;
 const RECIPE_WORKSPACE: u64 = 128 * 1024 * 1024;
@@ -64,6 +67,101 @@ pub(super) struct RestoreRange {
     /// Nonzero: reconstruct SHA-256 of this many exported file bytes.
     pub hash_size: u32,
     pub hash_offset: u8,
+    /// Compact literal topology for an original LZ4 frame. Tokens and match
+    /// offsets remain literals; file bytes come from decoded exported files.
+    pub literals: Option<Arc<LiteralMap>>,
+    pub lz4: Option<Arc<Lz4Frame>>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct Lz4Frame {
+    pub offset: u64,
+    pub skip: u32,
+    pub decoded: u32,
+    pub encoded: u32,
+    pub level: u8,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct LiteralMap {
+    pub offset: u64,
+    pub runs: Vec<u8>,
+    last_encoded: u32,
+    last_decoded: u32,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct LiteralRun {
+    pub encoded: u32,
+    pub decoded: u32,
+    pub len: u32,
+}
+
+impl LiteralMap {
+    pub fn new(offset: u64) -> Self {
+        Self {
+            offset,
+            runs: Vec::new(),
+            last_encoded: 0,
+            last_decoded: 0,
+        }
+    }
+
+    pub fn push(&mut self, encoded: u32, decoded: u32, len: u32) -> u64 {
+        fn varint(out: &mut Vec<u8>, mut value: u32) {
+            while value >= 128 {
+                out.push(value as u8 | 128);
+                value >>= 7;
+            }
+            out.push(value as u8);
+        }
+        let old = self.runs.capacity();
+        varint(&mut self.runs, encoded - self.last_encoded);
+        varint(&mut self.runs, decoded - self.last_decoded);
+        varint(&mut self.runs, len);
+        self.last_encoded = encoded;
+        self.last_decoded = decoded;
+        (self.runs.capacity() - old) as u64
+    }
+
+    fn iter(&self) -> impl Iterator<Item = LiteralRun> + '_ {
+        let mut input = self.runs.as_slice();
+        let (mut encoded, mut decoded) = (0, 0);
+        std::iter::from_fn(move || {
+            fn varint(input: &mut &[u8]) -> u32 {
+                let (mut out, mut shift) = (0, 0);
+                loop {
+                    let b = input[0];
+                    *input = &input[1..];
+                    out |= u32::from(b & 127) << shift;
+                    if b < 128 {
+                        return out;
+                    }
+                    shift += 7;
+                }
+            }
+            if input.is_empty() {
+                return None;
+            }
+            encoded += varint(&mut input);
+            decoded += varint(&mut input);
+            Some(LiteralRun {
+                encoded,
+                decoded,
+                len: varint(&mut input),
+            })
+        })
+    }
+}
+
+impl RestoreRange {
+    pub fn memory(&self) -> u64 {
+        160 + self.path.len() as u64 * 2
+            + self
+                .literals
+                .as_ref()
+                .map_or(0, |m| 64 + m.runs.capacity() as u64)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -393,7 +491,24 @@ fn ranges_for(
             .ok_or_else(|| bad("restoration snapshot absent"))?;
         let native = !snapshot.snapshot.addon && snapshot.snapshot.content_id != [0; 16];
         let ranges = if native {
-            native_add::extraction::collect_native_ranges(path, archive, snapshot, budget, options)?
+            let covered = all
+                .iter()
+                .filter_map(|(&file, ranges)| {
+                    ranges
+                        .iter()
+                        .any(|r| {
+                            r.offset == 0
+                                && r.len == archive.files[file as usize].size
+                                && r.hash_size == 0
+                                && r.literals.is_none()
+                                && r.lz4.is_none()
+                        })
+                        .then_some(file)
+                })
+                .collect();
+            native_add::extraction::collect_native_ranges(
+                path, archive, snapshot, budget, options, &covered,
+            )?
         } else {
             let mut nodes = Vec::new();
             let mut total = 0;
@@ -418,15 +533,19 @@ fn ranges_for(
                         file_offset: 0,
                         hash_size: 0,
                         hash_offset: 0,
+                        literals: None,
+                        lz4: None,
                     })
                 })
                 .collect::<Result<Vec<_>, WriterError>>()?
         };
         for mut r in ranges {
             r.path = format!("{prefix}/{}", r.path);
-            memory += 128 + r.path.len() as u64 * 2;
-            if memory > options.max_memory_bytes / 8 {
-                return Err(limit_error("restoration ranges exceed memory budget"));
+            memory += r.memory();
+            if memory > options.max_memory_bytes / 3 {
+                return Err(limit_error(format!(
+                    "restoration ranges exceed memory budget ({memory} bytes)"
+                )));
             }
             all.entry(r.file).or_default().push(r);
         }
@@ -449,7 +568,9 @@ fn ranges_for(
                 let mut segment = r.clone();
                 segment.offset = at;
                 segment.len = r.offset + r.len - at;
-                if segment.hash_size == 0 {
+                if segment.literals.is_some() || segment.lz4.is_some() {
+                    // The map retains its physical origin and decoded base.
+                } else if segment.hash_size == 0 {
                     segment.file_offset += at - r.offset;
                 } else {
                     let delta = r.hash_offset as u64 + at - r.offset;
@@ -474,6 +595,7 @@ enum Piece {
     Literal(u64, u64),
     File(String, u64, u64),
     Hash(String, u64, u32, u8, u64),
+    Lz4(String, u64, u32, u32, u8, u32, u64),
 }
 fn pieces(ranges: &[RestoreRange], offset: u64, len: u64) -> Vec<Piece> {
     let mut out = Vec::new();
@@ -494,7 +616,42 @@ fn pieces(ranges: &[RestoreRange], offset: u64, len: u64) -> Vec<Piece> {
         }
         if let Some(r) = best.filter(|r| r.offset + r.len > at) {
             let n = (end - at).min(r.offset + r.len - at);
-            if r.hash_size != 0 {
+            if let Some(frame) = &r.lz4 {
+                out.push(Piece::Lz4(
+                    r.path.clone(),
+                    r.file_offset,
+                    frame.decoded,
+                    frame.encoded,
+                    frame.level,
+                    frame.skip + (at - frame.offset) as u32,
+                    n,
+                ));
+            } else if let Some(map) = &r.literals {
+                let mut cursor = at;
+                for run in map.iter() {
+                    let begin = map.offset + run.encoded as u64;
+                    if begin + run.len as u64 <= at {
+                        continue;
+                    }
+                    if begin >= at + n {
+                        break;
+                    }
+                    let start = begin.max(at);
+                    let end = (begin + run.len as u64).min(at + n);
+                    if start > cursor {
+                        out.push(Piece::Literal(cursor - offset, start - cursor));
+                    }
+                    out.push(Piece::File(
+                        r.path.clone(),
+                        r.file_offset + run.decoded as u64 + start - begin,
+                        end - start,
+                    ));
+                    cursor = end;
+                }
+                if cursor < at + n {
+                    out.push(Piece::Literal(cursor - offset, at + n - cursor));
+                }
+            } else if r.hash_size != 0 {
                 let delta = r.hash_offset as u64 + at - r.offset;
                 out.push(Piece::Hash(
                     r.path.clone(),
@@ -605,7 +762,7 @@ pub fn create_restoration(
     let range_memory: u64 = all
         .values()
         .flat_map(|v| v.iter())
-        .map(|r| 128 + r.path.len() as u64 * 2)
+        .map(RestoreRange::memory)
         .sum();
     let retained = budget
         .current
@@ -628,7 +785,10 @@ pub fn create_restoration(
         inner: encoder,
         hash: Sha256::new(),
     };
-    out.write_all(MAGIC)?;
+    let derived_lz4 = all
+        .values()
+        .any(|ranges| ranges.iter().any(|r| r.lz4.is_some()));
+    out.write_all(if derived_lz4 { MAGIC } else { LEGACY_MAGIC })?;
     num(&mut out, archive.file_size)?;
     out.write_all(&original_hash)?;
     string(&mut out, manifest)?;
@@ -690,7 +850,9 @@ pub fn create_restoration(
         let referenced_here = parts.as_ref().map_or(0, |p| {
             p.iter()
                 .map(|p| match p {
-                    Piece::File(_, _, n) | Piece::Hash(_, _, _, _, n) => *n,
+                    Piece::File(_, _, n)
+                    | Piece::Hash(_, _, _, _, n)
+                    | Piece::Lz4(_, _, _, _, _, _, n) => *n,
                     _ => 0,
                 })
                 .sum::<u64>()
@@ -740,6 +902,19 @@ pub fn create_restoration(
                         num(&mut out, offset)?;
                         out.write_all(&size.to_le_bytes())?;
                         out.write_all(&[begin])?;
+                    }
+                    Piece::Lz4(path, offset, decoded, encoded, level, skip, len) => {
+                        out.write_all(&[3])?;
+                        num(&mut out, len)?;
+                        let id = path_ids
+                            .get(path.as_str())
+                            .ok_or_else(|| invalid("LZ4 source file is absent"))?;
+                        out.write_all(&id.to_le_bytes())?;
+                        num(&mut out, offset)?;
+                        out.write_all(&decoded.to_le_bytes())?;
+                        out.write_all(&encoded.to_le_bytes())?;
+                        out.write_all(&skip.to_le_bytes())?;
+                        out.write_all(&[level])?;
                     }
                 }
             }
@@ -805,7 +980,7 @@ pub fn inspect_restoration(
     decoder.window_log_max(23)?;
     let mut header = [0; 48];
     decoder.read_exact(&mut header)?;
-    if &header[..8] != MAGIC {
+    if &header[..8] != MAGIC && &header[..8] != LEGACY_MAGIC {
         return Err(bad("unsupported restoration recipe"));
     }
     let manifest = text(&mut decoder, MAX_TEXT.min(options.max_memory_bytes / 8))?;
@@ -847,7 +1022,7 @@ pub fn restore_extraction(
     };
     let mut magic = [0; 8];
     input.read_exact(&mut magic)?;
-    if &magic != MAGIC {
+    if &magic != MAGIC && &magic != LEGACY_MAGIC {
         return Err(bad("unsupported restoration recipe"));
     }
     let original_size = number(&mut input)?;
@@ -921,7 +1096,7 @@ pub fn restore_extraction(
     let mut produced = 0u64;
     let mut referenced = 0u64;
     let mut buffer = vec![0; CHUNK];
-    let mut cached_file: Option<(usize, File)> = None;
+    let mut cached_file: Option<(usize, BufReader<File>, u64)> = None;
     options.progress.add_total(original_size);
     loop {
         cancelled(options)?;
@@ -987,7 +1162,7 @@ pub fn restore_extraction(
                     let bytes = &mut logical[at as usize..(at + len) as usize];
                     match kind {
                         0 => input.read_exact(bytes)?,
-                        1 | 2 => {
+                        1..=3 => {
                             let mut id = [0; 4];
                             input.read_exact(&mut id)?;
                             let id = u32::from_le_bytes(id) as usize;
@@ -997,7 +1172,31 @@ pub fn restore_extraction(
                                 .ok_or_else(|| bad("restoration references an undeclared file"))?;
                             let offset = number(&mut input)?;
                             let mut hash_block_size = 0;
-                            let (size, begin) = if kind == 2 {
+                            let mut lz4_info = None;
+                            let (size, begin) = if kind == 3 {
+                                if &magic != MAGIC {
+                                    return Err(bad("LZ4 instruction in a legacy recipe"));
+                                }
+                                let mut fields = [0u8; 13];
+                                input.read_exact(&mut fields)?;
+                                let decoded = u32::from_le_bytes(fields[0..4].try_into().unwrap());
+                                let encoded = u32::from_le_bytes(fields[4..8].try_into().unwrap());
+                                let skip = u32::from_le_bytes(fields[8..12].try_into().unwrap());
+                                let level = fields[12];
+                                if decoded == 0
+                                    || decoded > 65536
+                                    || encoded == 0
+                                    || encoded > 65536
+                                    || !(12..=16).contains(&level)
+                                    || (skip as u64)
+                                        .checked_add(len)
+                                        .map_or(true, |end| end > encoded as u64)
+                                {
+                                    return Err(bad("invalid derived LZ4 bounds"));
+                                }
+                                lz4_info = Some((encoded, skip, level));
+                                (decoded as u64, 0)
+                            } else if kind == 2 {
                                 let mut size = [0; 4];
                                 input.read_exact(&mut size)?;
                                 let size = u32::from_le_bytes(size);
@@ -1025,12 +1224,34 @@ pub fn restore_extraction(
                                 return Err(bad("restoration reference out of bounds"));
                             }
                             if unchanged {
-                                if cached_file.as_ref().map(|(old, _)| *old) != Some(id) {
-                                    cached_file = Some((id, root.open_relative(&node.path)?));
+                                if cached_file.as_ref().map(|(old, ..)| *old) != Some(id) {
+                                    cached_file = Some((
+                                        id,
+                                        BufReader::with_capacity(
+                                            CHUNK,
+                                            root.open_relative(&node.path)?,
+                                        ),
+                                        0,
+                                    ));
                                 }
-                                let file = &mut cached_file.as_mut().unwrap().1;
-                                file.seek(SeekFrom::Start(offset))?;
-                                if kind == 2 {
+                                let (_, file, position) = cached_file.as_mut().unwrap();
+                                let delta = offset as i128 - *position as i128;
+                                if let Ok(delta) = i64::try_from(delta) {
+                                    file.seek_relative(delta)?;
+                                } else {
+                                    file.seek(SeekFrom::Start(offset))?;
+                                }
+                                if let Some((encoded, skip, level)) = lz4_info {
+                                    let mut plain = vec![0; size as usize];
+                                    file.read_exact(&mut plain)?;
+                                    let frame = lz4::compress(&plain, level)?;
+                                    if frame.len() != encoded as usize {
+                                        return Err(bad("incompatible restoration LZ4 encoder"));
+                                    }
+                                    bytes.copy_from_slice(
+                                        &frame[skip as usize..skip as usize + bytes.len()],
+                                    );
+                                } else if kind == 2 {
                                     let mut block = vec![0; hash_block_size];
                                     let mut written = 0;
                                     let mut start = begin as usize;
@@ -1047,6 +1268,7 @@ pub fn restore_extraction(
                                 } else {
                                     file.read_exact(bytes)?;
                                 }
+                                *position = offset + size;
                             }
                             referenced += len;
                         }
@@ -1205,6 +1427,113 @@ pub fn restore_extraction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_lz4_maps_preserve_clipped_block_and_interval_origins() {
+        let mut map = LiteralMap::new(100);
+        map.push(3, 5, 4);
+        map.push(15, 27, 8);
+        assert!(map.runs.len() <= 6);
+        let range = RestoreRange {
+            file: 0,
+            offset: 100,
+            len: 30,
+            path: "data".into(),
+            file_offset: 10,
+            hash_size: 0,
+            hash_offset: 0,
+            literals: Some(Arc::new(map)),
+            lz4: None,
+        };
+        let literal: Vec<u8> = (0..30).collect();
+        let decoded: Vec<u8> = (0..200).map(|n| (n * 3) as u8).collect();
+        let mut expected = literal.clone();
+        expected[3..7].copy_from_slice(&decoded[15..19]);
+        expected[15..23].copy_from_slice(&decoded[37..45]);
+        for trim in [0, 4, 9, 17] {
+            let mut clipped = range.clone();
+            clipped.offset += trim;
+            clipped.len -= trim;
+            for start in trim..30 {
+                for end in start + 1..=30 {
+                    let mut actual = Vec::new();
+                    for piece in pieces(&[clipped.clone()], 100 + start, end - start) {
+                        match piece {
+                            Piece::Literal(off, len) => actual.extend_from_slice(
+                                &literal[(start + off) as usize..(start + off + len) as usize],
+                            ),
+                            Piece::File(_, off, len) => actual
+                                .extend_from_slice(&decoded[off as usize..(off + len) as usize]),
+                            _ => panic!("unexpected derived hash"),
+                        }
+                    }
+                    assert_eq!(actual, expected[start as usize..end as usize]);
+                }
+            }
+        }
+    }
+    #[test]
+    fn malformed_derived_lz4_recipes_do_not_publish_output() {
+        let f = fixture();
+        let recipe = f.extracted.join(RESTORATION_FILE);
+        let decoded = zstd::stream::decode_all(File::open(&recipe).unwrap()).unwrap();
+        let mut reader = std::io::Cursor::new(&decoded);
+        let mut header = [0; 48];
+        reader.read_exact(&mut header).unwrap();
+        text(&mut reader, MAX_TEXT).unwrap();
+        let count = number(&mut reader).unwrap();
+        digest(&mut reader).unwrap();
+        let mut source = None;
+        for id in 0..count {
+            text(&mut reader, 4096).unwrap();
+            let dir = byte(&mut reader).unwrap();
+            let size = number(&mut reader).unwrap();
+            if dir == 0 && size >= 32 {
+                source = Some((id as u32, size));
+            }
+        }
+        let (id, source_size) = source.unwrap();
+        let prefix = &decoded[..reader.position() as usize];
+        for (i, (plain, encoded, skip, bits, offset)) in [
+            (0u32, 1u32, 0u32, 13u8, 0u64),
+            (65537, 1, 0, 13, 0),
+            (32, 0, 0, 13, 0),
+            (32, 65537, 0, 13, 0),
+            (32, 16, 16, 13, 0),
+            (32, 16, 0, 11, 0),
+            (32, 16, 0, 13, source_size),
+            (32, 16, 0, 13, 0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut bytes = prefix.to_vec();
+            bytes[..8].copy_from_slice(MAGIC);
+            bytes.extend([1, 0, 0]); // reconstructed RAW NX block
+            for n in [1, 1, 1] {
+                num(&mut bytes, n).unwrap();
+            }
+            bytes.push(3); // derived LZ4 piece
+            num(&mut bytes, 1).unwrap();
+            bytes.extend(id.to_le_bytes());
+            num(&mut bytes, offset).unwrap();
+            bytes.extend(plain.to_le_bytes());
+            bytes.extend(encoded.to_le_bytes());
+            bytes.extend(skip.to_le_bytes());
+            bytes.extend([bits, 255]);
+            let checksum = sha256(&bytes);
+            bytes.extend(checksum);
+            std::fs::write(
+                &recipe,
+                zstd::stream::encode_all(bytes.as_slice(), 13).unwrap(),
+            )
+            .unwrap();
+            let output = f.dir.join(format!("invalid-lz4-{i}.nx"));
+            assert!(restore_extraction(&f.extracted, &output, &WriterOptions::default()).is_err());
+            assert!(!output.exists());
+        }
+    }
+
     #[test]
     fn recipe_workers_respect_memory_and_serial_requests() {
         let mut options = WriterOptions {
@@ -2208,6 +2537,7 @@ mod tests {
             number(&mut reader).unwrap();
         }
         let mut legacy = decoded[..reader.position() as usize].to_vec();
+        legacy[..8].copy_from_slice(LEGACY_MAGIC);
         let original = std::fs::read(&f.original).unwrap();
         legacy.push(0);
         num(&mut legacy, original.len() as u64).unwrap();

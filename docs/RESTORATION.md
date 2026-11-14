@@ -35,9 +35,52 @@ then repacking and reextracting changes exactly that path among 11,953 files.
 
 ## Compact recipe, independent of the NX format
 
+An incomplete native base cannot be exported as a standalone executable game.
+When its update supplies the executable, extraction preserves the base as NCA
+files in `base/` and exports the update's verified ExeFS/RomFS in `updates/VERSION/`.
+BKTR still resolves against that exact base, and the resulting IVFC tree is
+checked before publishing the extraction. No executable is borrowed from an
+unrelated title or another update version. The raw base files also participate
+in exact restoration, so they are not duplicated as literals in the recipe.
+
+For unmarked decrypter-expanded bases, conversion requires Application CNMT,
+evidence of a rewritten size, valid bounded section headers, an absent PFS0
+executable and missing compression-tree payload under a recognized compression
+schema. Such a base requires a matching update executable. Ordinary damaged
+executables, malformed headers and invalid compression descriptors still fail.
+This recognizes incomplete source content; it does not authenticate the missing
+standalone base payload against its original CNMT.
+
+Native compressed storage is reconstructed from the exported decoded files.
+RAW ranges reference their file bytes directly. For LZ4, a bounded portable
+streaming parser tries several hash-table sizes and uses an encoding instruction
+only after reproducing the original frame byte for byte. An unmatched encoding
+instead retains its token/match topology and references literal bytes from the
+exported files. Frames crossing file boundaries use that same exact fallback.
+Already exported raw base content is reused without decoding or describing it
+again. This requires no extra LZ4 dependency, source-size temporary copy or
+duplicate compressed-data sidecar.
+
+On R-Type Dimensions III (base 1.0.1 plus update 1.0.4), the 4,032,943,808-byte NX
+exported 7,862,031,843 bytes of files. This reduced the compact recipe from
+961,057,921 to **10,969,404 bytes** (98.86% smaller). Exact restoration matched the
+original NX SHA-256 and both original DNSP recipes verified, with the default
+512 MiB memory budget. Metadata and unmapped source bytes still affect size;
+there is no fixed size guarantee for arbitrary archives.
+
+A complete CLI repeat with `--memory-mib 512` took 24.16 s for extraction
+(including the recipe) and 24.12 s for restoration. Windows reported peak
+working sets of 129,384,448 and 19,361,792 bytes respectively. One-second
+file-length sampling during extraction peaked at 7,873,002,500 additional
+bytes, including the recipe and logs, excluding the existing input NX and
+filesystem allocation overhead. These are measurements on the test machine.
+
 The restoration file is a standalone **Zstandard frame compressed at level 13**,
 with a maximum 8 MiB history and a frame checksum. Its uncompressed format magic
-is `NXRSTR02`. The stream is also protected by a SHA-256 footer.
+is `NXRSTR03` when derived LZ4 instructions are needed, otherwise `NXRSTR02`.
+Both versions are readable; an older converter needs updating to replay a
+version-03 extraction recipe. The NX format and its readers are unchanged.
+The stream is also protected by a SHA-256 footer.
 
 The recipe describes the original physical NX in order:
 
@@ -52,6 +95,9 @@ The recipe describes the original physical NX in order:
 - IVFC leaf SHA-256 tables whose source blocks lie within exported files are
   recomputed. Consecutive hashes are stored as a run instead of retaining their
   incompressible hash bytes or repeating an instruction for each hash.
+- Derived LZ4 pieces record decoded file bounds, the verified hash-table size
+  and the requested encoded slice. Replay bounds the workspace and validates
+  the complete original NX SHA-256 before publication.
 
 Paths are stored once and referenced by integer IDs. One fingerprint of the
 sorted path/type/size/content-hash inventory detects edits; per-file and per-block

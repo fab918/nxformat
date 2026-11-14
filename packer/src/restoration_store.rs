@@ -310,6 +310,7 @@ pub(super) fn collect_resources(
                         0 => skip(&mut input, n, &mut buffer, options)?,
                         1 => skip(&mut input, 12, &mut buffer, options)?,
                         2 => skip(&mut input, 17, &mut buffer, options)?,
+                        3 => skip(&mut input, 25, &mut buffer, options)?,
                         _ => return Err(bad("invalid resource replay piece")),
                     }
                 }

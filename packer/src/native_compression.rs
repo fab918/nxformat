@@ -4,6 +4,20 @@ use super::*;
 const NODE: usize = 0x4000;
 const CAPACITY: usize = (NODE - 16) / 24;
 const BLOCK: usize = 65536;
+pub(super) enum Span<'a> {
+    Frame {
+        physical: u64,
+        logical: u64,
+        plain: &'a [u8],
+        encoded: &'a [u8],
+    },
+    Literal {
+        physical: u64,
+        logical: u64,
+        len: u64,
+        frame: Option<u64>,
+    },
+}
 #[derive(Debug)]
 struct Entry {
     start: u64,
@@ -25,6 +39,87 @@ pub(super) struct Reader<R> {
     token: CancellationToken,
 }
 impl<R: Read + Seek> Reader<R> {
+    /// Map encoded literal bytes to their positions in the decoded filesystem.
+    /// Match offsets, tokens and length bytes stay literal recipe metadata;
+    /// this reproduces any valid LZ4 encoding without choosing an encoder.
+    pub fn visit_literals(
+        &mut self,
+        mut covered: impl FnMut(&R, u64, u64) -> Result<bool, WriterError>,
+        mut visit: impl FnMut(&R, Span<'_>) -> Result<bool, WriterError>,
+    ) -> Result<(), WriterError> {
+        for (i, e) in self.entries.iter().enumerate() {
+            if self.token.is_cancelled() {
+                return Err(WriterError::new(
+                    WriterErrorKind::Cancelled,
+                    "NCA compression read cancelled",
+                ));
+            }
+            let len = self.entries.get(i + 1).map_or(self.len, |e| e.start) - e.start;
+            let physical = self.data_start + e.physical;
+            match e.codec {
+                0 => {
+                    visit(
+                        &self.source,
+                        Span::Literal {
+                            physical,
+                            logical: e.start,
+                            len,
+                            frame: None,
+                        },
+                    )?;
+                }
+                1 => {}
+                3 => {
+                    if covered(&self.source, physical, e.stored as u64)? {
+                        continue;
+                    }
+                    self.frame.resize(e.stored as usize, 0);
+                    self.source.seek(SeekFrom::Start(physical))?;
+                    self.source.read_exact(&mut self.frame)?;
+                    lz4(&self.frame, len as usize, &mut self.plain)?;
+                    if visit(
+                        &self.source,
+                        Span::Frame {
+                            physical,
+                            logical: e.start,
+                            plain: &self.plain,
+                            encoded: &self.frame,
+                        },
+                    )? {
+                        continue;
+                    }
+                    let mut at = 0;
+                    let mut decoded = 0;
+                    while at < self.frame.len() {
+                        let token = self.frame[at];
+                        at += 1;
+                        let literals = lz4_length(&self.frame, &mut at, (token >> 4) as usize)?;
+                        if literals != 0 {
+                            visit(
+                                &self.source,
+                                Span::Literal {
+                                    physical: physical + at as u64,
+                                    logical: e.start + decoded as u64,
+                                    len: literals as u64,
+                                    frame: Some(physical),
+                                },
+                            )?;
+                        }
+                        at += literals;
+                        decoded += literals;
+                        if at == self.frame.len() {
+                            break;
+                        }
+                        at += 2;
+                        decoded += lz4_length(&self.frame, &mut at, (token & 15) as usize)? + 4;
+                    }
+                }
+                _ => return Err(bad("unsupported NCA compression codec")),
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(
         mut source: R,
         data_start: u64,
@@ -207,32 +302,32 @@ impl<R: Read + Seek> Seek for Reader<R> {
         Ok(self.position)
     }
 }
-fn lz4(input: &[u8], expected: usize, out: &mut Vec<u8>) -> io::Result<()> {
-    let err = || io::Error::other("invalid NCA LZ4 block");
-    fn length(input: &[u8], at: &mut usize, mut n: usize) -> io::Result<usize> {
-        if n == 15 {
-            loop {
-                let b = *input
-                    .get(*at)
-                    .ok_or_else(|| io::Error::other("truncated NCA LZ4 length"))?;
-                *at += 1;
-                n += b as usize;
-                if n > BLOCK {
-                    return Err(io::Error::other("NCA LZ4 expansion exceeds block"));
-                }
-                if b != 255 {
-                    break;
-                }
+fn lz4_length(input: &[u8], at: &mut usize, mut n: usize) -> io::Result<usize> {
+    if n == 15 {
+        loop {
+            let b = *input
+                .get(*at)
+                .ok_or_else(|| io::Error::other("truncated NCA LZ4 length"))?;
+            *at += 1;
+            n += b as usize;
+            if n > BLOCK {
+                return Err(io::Error::other("NCA LZ4 expansion exceeds block"));
+            }
+            if b != 255 {
+                break;
             }
         }
-        Ok(n)
     }
+    Ok(n)
+}
+fn lz4(input: &[u8], expected: usize, out: &mut Vec<u8>) -> io::Result<()> {
+    let err = || io::Error::other("invalid NCA LZ4 block");
     out.clear();
     let mut at = 0;
     while at < input.len() {
         let token = input[at];
         at += 1;
-        let literals = length(input, &mut at, (token >> 4) as usize)?;
+        let literals = lz4_length(input, &mut at, (token >> 4) as usize)?;
         if literals > input.len() - at || literals > expected - out.len() {
             return Err(err());
         }
@@ -249,7 +344,7 @@ fn lz4(input: &[u8], expected: usize, out: &mut Vec<u8>) -> io::Result<()> {
         if offset == 0 || offset > out.len() {
             return Err(err());
         }
-        let mut n = length(input, &mut at, (token & 15) as usize)? + 4;
+        let mut n = lz4_length(input, &mut at, (token & 15) as usize)? + 4;
         if n > expected - out.len() {
             return Err(err());
         }
@@ -276,6 +371,77 @@ mod tests {
         b.extend((0..901).map(|i| (i % 251) as u8));
         b
     }
+    #[test]
+    fn portable_encoded_frames_decode_at_small_and_full_block_boundaries() {
+        for size in [1, 12, 13, 17, 255, 4096, 65536] {
+            for repeated in [false, true] {
+                let plain: Vec<_> = (0..size)
+                    .map(|i| {
+                        if repeated {
+                            7
+                        } else {
+                            ((i / 23 + i % 7) % 251) as u8
+                        }
+                    })
+                    .collect();
+                for bits in 12..=16 {
+                    let frame =
+                        super::super::super::restoration::lz4::compress(&plain, bits).unwrap();
+                    let mut decoded = Vec::new();
+                    lz4(&frame, size, &mut decoded).unwrap();
+                    assert_eq!(decoded, plain);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn encoded_literals_reconstruct_original_frames_without_an_encoder() {
+        let expected = image();
+        let (bytes, info) = native::synthetic::compressed_storage(&expected);
+        let mut reconstructed = bytes.clone();
+        let mut reader = Reader::new(
+            Cursor::new(bytes.clone()),
+            0,
+            bytes.len() as u64,
+            &info,
+            8 * 1024 * 1024,
+            CancellationToken::default(),
+        )
+        .unwrap();
+        let mut runs = Vec::new();
+        reader
+            .visit_literals(
+                |_, _, _| Ok(false),
+                |_, span| {
+                    let Span::Literal {
+                        physical,
+                        logical: decoded,
+                        len,
+                        frame,
+                    } = span
+                    else {
+                        return Ok(false);
+                    };
+                    assert_eq!(
+                        &bytes[physical as usize..(physical + len) as usize],
+                        &expected[decoded as usize..(decoded + len) as usize]
+                    );
+                    reconstructed[physical as usize..(physical + len) as usize].fill(0);
+                    runs.push((physical, decoded, len, frame));
+                    Ok(false)
+                },
+            )
+            .unwrap();
+        assert!(runs.iter().any(|r| r.3.is_some()));
+        assert!(runs.iter().any(|r| r.3.is_none()));
+        for (physical, decoded, len, _) in runs {
+            reconstructed[physical as usize..(physical + len) as usize]
+                .copy_from_slice(&expected[decoded as usize..(decoded + len) as usize]);
+        }
+        assert_eq!(reconstructed, bytes);
+    }
+
     #[test]
     fn mixed_codec_reads_cross_blocks_and_seek_with_bounded_memory() {
         let expected = image();

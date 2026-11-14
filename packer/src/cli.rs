@@ -1417,7 +1417,7 @@ fn extract_all(
             .iter()
             .any(|a| a.snapshots.iter().any(|s| s.content_id.is_some()))
     {
-        eprintln!("Native extraction supports decrypted IVFC RomFS, internal RAW/zero/LZ4 compression and single-root BKTR. Encrypted or sparse RomFS, unknown compression codecs, multilevel BKTR and multi-Data DLC are unsupported; metadata is memory-bounded. Use extract-ncas for the stored NCA files.");
+        eprintln!("Native extraction verifies ExeFS/RomFS and applies BKTR using the exact base. Incomplete bases are preserved as NCA files; their updates are extracted normally. Other unsupported layouts require extract-ncas.");
     }
     if !raw && restore {
         eprintln!("Compact restoration recipe: reconstructs original data from extracted files where possible. Retained metadata and unreproducible blocks determine its size. Exact replay of recompressed blocks needs a compatible Zstd encoder. Use --no-restore to skip the recipe.");
@@ -1463,6 +1463,8 @@ fn extract_all(
                     "extracted tree (complete stored files)"
                 } else if raw {
                     "native NCA files (byte-for-byte export)"
+                } else if s.snapshot_type == SnapshotType::Base && s.build_id.is_none() {
+                    "incomplete native base (NCA preservation; executable supplied by update)"
                 } else {
                     "native ExeFS/RomFS (IVFC verified; BKTR requires exact base; unsupported layouts fail without partial output)"
                 }
