@@ -21,11 +21,11 @@ def main():
         # additionally validate the catalog, identities, dependencies and payloads.
         validator = load_validator()
         archives = sorted(root.glob("*.nx"))
-        assert len(archives) == 12
+        assert len(archives) == 20
         for archive in archives:
             validator.validate_archive(archive.read_bytes(), verify_payloads=True)
             subprocess.run([str(reader), str(archive), str(archive.with_suffix(".tsv"))], check=True, cwd=ROOT)
-    print("PASS 12 Switch 2 NUP imports: raw/zstd, staged/streamed, Editions and programs 1/15; Python + C++17")
+    print("PASS 20 Switch 2 NUP imports: raw/zstd, staged/streamed, Editions, separate bases, indexed updates and programs 1/15; Python + C++17")
 
 
 if __name__ == "__main__":

@@ -337,6 +337,105 @@ fn name(pool: &[u8], offset: u32, length: u32, root: bool) -> Result<String, Wri
     Ok(text.to_owned())
 }
 
+fn package_kind(kind: u8) -> &'static str {
+    match kind {
+        0 => "base",
+        1 => "update",
+        2 => "addon",
+        _ => "unknown",
+    }
+}
+
+/// Keep useful package identities in structural errors: tools following the
+/// official NUP reader cannot list them once the child table is malformed.
+fn package_summary(packages: &[Package]) -> String {
+    let mut entries: Vec<_> = packages
+        .iter()
+        .take(8)
+        .map(|p| {
+            format!(
+                "#{} {} {:016x} (v{})",
+                p.ordinal,
+                package_kind(p.kind),
+                p.title_id,
+                p.version
+            )
+        })
+        .collect();
+    if packages.len() > entries.len() {
+        entries.push(format!("and {} more", packages.len() - entries.len()));
+    }
+    entries.join(", ")
+}
+
+/// Check every directory's child-slot range, even if that directory is not
+/// reachable from a package root. Accept only an unreferenced, all-zero tail
+/// as producer padding; unknown or overlapping slots are never interpreted as
+/// valid entries. This does not change the NX archive format.
+fn validate_child_table(
+    dirs: &[Directory],
+    children: &[u32],
+    packages: &[Package],
+) -> Result<(), WriterError> {
+    let present = children.len() as u64;
+    let declared: u64 = dirs.iter().map(|d| u64::from(d.child_count)).sum();
+    let context = || {
+        let difference = present.abs_diff(declared);
+        let direction = if present >= declared {
+            "extra"
+        } else {
+            "missing"
+        };
+        format!(
+            "child table: {declared} slots declared, {present} present ({difference} {direction}, {} bytes); packages: {}",
+            difference * 4,
+            package_summary(packages)
+        )
+    };
+    let mut ranges = Vec::with_capacity(dirs.len());
+    for (index, dir) in dirs.iter().enumerate() {
+        if dir.child_count == 0 {
+            continue;
+        }
+        let first = u64::from(dir.first_child);
+        let end = first + u64::from(dir.child_count);
+        if end > present {
+            return Err(bad(&format!(
+                "{}; directory #{index} references child slots {first}..{end} outside the table",
+                context()
+            )));
+        }
+        ranges.push((first, end));
+    }
+    ranges.sort_unstable();
+    let mut covered = 0u64;
+    for (first, end) in ranges {
+        if first != covered {
+            let reason = if first < covered { "overlap" } else { "gap" };
+            return Err(bad(&format!(
+                "{}; child-slot ranges contain a {reason} at index {first}",
+                context()
+            )));
+        }
+        covered = end;
+    }
+    if covered != declared {
+        return Err(bad(&format!(
+            "{}; directory child-slot ranges do not match declared counts",
+            context()
+        )));
+    }
+    // Some producers leave harmless zero-filled slots immediately before the
+    // string pool. All slots must be unreferenced and zero to accept them.
+    if children[covered as usize..].iter().any(|&slot| slot != 0) {
+        return Err(bad(&format!(
+            "{}; unused child slots are not zero padding",
+            context()
+        )));
+    }
+    Ok(())
+}
+
 fn read_toc(file: &mut File, limits: &ImportLimits) -> Result<(Toc, u64), WriterError> {
     let physical = file.metadata()?.len();
     let mut sb = [0u8; SUPERBLOCK];
@@ -466,10 +565,11 @@ fn read_toc(file: &mut File, limits: &ImportLimits) -> Result<(Toc, u64), Writer
         files.push(file);
         at += FILE;
     }
-    let children = toc[children_at as usize..pool_offset as usize]
+    let children: Vec<u32> = toc[children_at as usize..pool_offset as usize]
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
         .collect();
+    validate_child_table(&dirs, &children, &packages)?;
     Ok((
         Toc {
             packages,
@@ -573,7 +673,17 @@ impl Toc {
                         continue;
                     }
                 }
-                return Err(unsupported("package root entry outside ExeFS/RomFS/data"));
+                let name = if let Some(dir) = self.dirs.get(node as usize) {
+                    format!("directory {:?}", dir.name)
+                } else if let Some(file) = self.files.get(node as usize - self.dirs.len()) {
+                    format!("file {:?}", file.name)
+                } else {
+                    format!("invalid node {node}")
+                };
+                return Err(unsupported(&format!(
+                    "NUP package #{} ({:016x}) has unsupported root entry {name}; expected exefs, romfs, data or program1..program15",
+                    p.ordinal, p.title_id
+                )));
             }
         }
         if p.kind == 2 && !children.is_empty() {
@@ -914,11 +1024,17 @@ fn package_role(p: &Package, has_base: bool) -> Result<(crate::SnapshotType, u64
     match (p.kind, p.flags) {
         (0, 0) => Ok((SnapshotType::Base, p.title_id)),
         (1, 0 | 1) => {
-            if !matches!(p.title_id & 0xfff, 0 | 0x800) {
+            let suffix = p.title_id & 0xfff;
+            if suffix != 0 && !(0x800..=0x80f).contains(&suffix) {
                 return Err(bad(&format!(
-                    "update title ID {:016x} is neither an application ID nor its patch ID",
+                    "update title ID {:016x} has an invalid patch/program index",
                     p.title_id
                 )));
+            }
+            if suffix > 0x800 && p.title_id >> 56 != 4 {
+                return Err(bad(
+                    "indexed patch title IDs require a native Switch 2 application",
+                ));
             }
             let standalone = p.flags == 1;
             if standalone == has_base {
@@ -945,6 +1061,35 @@ fn package_role(p: &Package, has_base: bool) -> Result<(crate::SnapshotType, u64
         (0..=2, _) => Err(bad("unknown package flags")),
         _ => Err(unsupported("reserved NUP package kind")),
     }
+}
+
+/// Report which actual package caused a cross-application rejection. Reading
+/// its NPDM is bounded to 1 MiB and happens only on the error path.
+fn package_application_error(
+    path: &Path,
+    toc: &Toc,
+    p: &Package,
+    observed: u64,
+    expected: u64,
+    limits: &ImportLimits,
+    token: &crate::CancellationToken,
+) -> WriterError {
+    let mut reason = format!(
+        "package #{} ({} title ID {:016x}, version {}, flags {}) belongs to application {:016x}, expected {:016x}",
+        p.ordinal,
+        package_kind(p.kind),
+        p.title_id,
+        p.version,
+        p.flags,
+        observed,
+        expected
+    );
+    match nup_program_id(path, toc, p, limits, token) {
+        Ok(Some((program, _))) => reason.push_str(&format!("; NPDM Program ID {program:016x}")),
+        Ok(None) => {}
+        Err(error) => reason.push_str(&format!("; NPDM unavailable: {error}")),
+    }
+    bad(&reason)
 }
 
 /// Switch 2 can launch an Ounce Program belonging to an NX application. The
@@ -1021,6 +1166,17 @@ fn nup_program_id(
         _ => return Ok(None),
     };
     let program = super::structures::validate_npdm(&bytes, profile)?.program_id;
+    // An explicit patch index is authoritative. Unindexed 0x800 packages
+    // remain compatible with legacy-to-Ounce transitions evidenced by NPDM.
+    if package.kind == 1 && (package.title_id & 0xfff) > 0x800 {
+        let expected = (package.title_id & !0xfff) | (package.title_id & 0xf);
+        if program != expected || profile != super::structures::NpdmProfile::MetaAcid3072V1 {
+            return Err(bad(&format!(
+                "indexed update package #{} ({:016x}) NPDM Program {:016x} does not match declared Program {:016x}",
+                package.ordinal, package.title_id, program, expected
+            )));
+        }
+    }
     Ok(Some((program, profile)))
 }
 
@@ -1047,6 +1203,12 @@ fn nup_upgrade_plan(
     } else {
         None
     };
+    // Native Ounce bases are handled by their own Program-family association.
+    // A matching legacy DLC must not turn their ordinary indexed updates into
+    // standalone NX -> Ounce upgrades.
+    if base.is_some() && base_application.is_none() {
+        return Ok(None);
+    }
     let mut upgrade = None;
     let mut legacy_application = None;
     let mut packages = BTreeSet::new();
@@ -1129,6 +1291,211 @@ fn nup_upgrade_plan(
     }))
 }
 
+/// Some real Switch 2 NUPs contain one `base` TOC record per native Program,
+/// rather than one base record with nested `programN` directories. Accept this
+/// only when every base has a verified Ounce NPDM in the *same* Program family.
+/// This is an import association; it does not change the NX on-disk format.
+#[derive(Debug)]
+struct NupMultiBasePlan {
+    application: u64,
+    primary_program: u64,
+    ounce_application: u64,
+    programs: BTreeMap<u64, usize>,
+}
+
+impl NupMultiBasePlan {
+    fn program(&self, p: &Package) -> Option<u64> {
+        match p.kind {
+            0 => self
+                .programs
+                .contains_key(&p.title_id)
+                .then_some(p.title_id),
+            1 => {
+                let suffix = p.title_id & 0xfff;
+                if p.title_id & !0xfff != self.ounce_application
+                    || (suffix != 0 && !(0x800..=0x80f).contains(&suffix))
+                {
+                    return None;
+                }
+                let program = self.ounce_application | (suffix & 0xf);
+                self.programs.contains_key(&program).then_some(program)
+            }
+            _ => None,
+        }
+    }
+
+    fn owns(&self, p: &Package) -> bool {
+        if p.kind != 2 {
+            return self.program(p).is_some();
+        }
+        if p.flags != 0 || p.title_id & 0xfff == 0 {
+            return false;
+        }
+        let Some(owner) = (p.title_id & !0xfff).checked_sub(0x1000) else {
+            return false;
+        };
+        owner == self.ounce_application
+            || owner == ((self.ounce_application & 0x00ff_ffff_ffff_ffff) | 0x0100_0000_0000_0000)
+    }
+}
+
+fn nup_multi_base_plan(
+    path: &Path,
+    toc: &Toc,
+    limits: &ImportLimits,
+    token: &crate::CancellationToken,
+) -> Result<Option<NupMultiBasePlan>, WriterError> {
+    let bases: Vec<_> = toc.packages.iter().filter(|p| p.kind == 0).collect();
+    if bases.len() <= 1 {
+        return Ok(None);
+    }
+    let family = bases[0].title_id & !0xfff;
+    if family >> 56 != 4 {
+        return Err(unsupported(
+            "multiple base NUP packages require one verified Switch 2 Program family",
+        ));
+    }
+    let mut programs = BTreeMap::new();
+    for p in bases {
+        cancelled(token)?;
+        if p.flags != 0 || p.title_id & !0xfff != family || p.title_id & 0xfff > 15 {
+            return Err(bad(&format!(
+                "base package #{} ({:016x}) is not a Program in the same Switch 2 application",
+                p.ordinal, p.title_id
+            )));
+        }
+        let Some((program, profile)) = nup_program_id(path, toc, p, limits, token)? else {
+            return Err(unsupported(&format!(
+                "base package #{} ({:016x}) needs a validated exefs/main.npdm",
+                p.ordinal, p.title_id
+            )));
+        };
+        if profile != super::structures::NpdmProfile::MetaAcid3072V1 || program != p.title_id {
+            return Err(bad(&format!(
+                "base package #{} ({:016x}) NPDM Program ID does not match its TOC title ID",
+                p.ordinal, p.title_id
+            )));
+        }
+        if programs.insert(program, p.ordinal).is_some() {
+            return Err(bad("duplicate Switch 2 base Program ID"));
+        }
+    }
+    if !programs.contains_key(&family) {
+        return Err(unsupported("multi-base NUP has no Program index 0 anchor"));
+    }
+    let legacy = (family & 0x00ff_ffff_ffff_ffff) | 0x0100_0000_0000_0000;
+    let mut has_legacy_addon = false;
+    let mut has_native_addon = false;
+    let mut upgrade_index = None;
+    let provisional = NupMultiBasePlan {
+        application: family,
+        primary_program: family,
+        ounce_application: family,
+        programs,
+    };
+    for p in &toc.packages {
+        cancelled(token)?;
+        if !provisional.owns(p) {
+            return Err(bad(&format!(
+                "NUP package #{} ({:016x}) belongs to another application or has no matching base Program",
+                p.ordinal, p.title_id
+            )));
+        }
+        if p.kind == 1 {
+            if p.flags != 0 {
+                return Err(unsupported(
+                    "standalone update beside multiple base Programs",
+                ));
+            }
+            if let Some((program, profile)) = nup_program_id(path, toc, p, limits, token)? {
+                if profile != super::structures::NpdmProfile::MetaAcid3072V1
+                    || Some(program) != provisional.program(p)
+                {
+                    return Err(bad(&format!(
+                        "update package #{} ({:016x}) NPDM does not match its Switch 2 Program index",
+                        p.ordinal, p.title_id
+                    )));
+                }
+            }
+        }
+        if p.kind == 2 && (p.title_id & !0xfff).checked_sub(0x1000) == Some(family) {
+            has_native_addon = true;
+        }
+        if p.kind == 2 && (p.title_id & !0xfff).checked_sub(0x1000) == Some(legacy) {
+            has_legacy_addon = true;
+            let index = p.title_id & 0xfff;
+            if (1..=15).contains(&index) {
+                let program = family | index;
+                if !provisional.programs.contains_key(&program) {
+                    return Err(bad(&format!(
+                        "Switch 2 upgrade DLC {:016x} references absent Program index {index}",
+                        p.title_id
+                    )));
+                }
+                if upgrade_index
+                    .replace(program)
+                    .is_some_and(|previous| previous != program)
+                {
+                    return Err(unsupported(
+                        "ambiguous Switch 2 upgrade DLC Program indices",
+                    ));
+                }
+            }
+        }
+    }
+    if has_legacy_addon && has_native_addon {
+        return Err(unsupported(
+            "mixed legacy and native Switch 2 DLC namespaces require explicit associations",
+        ));
+    }
+    Ok(Some(NupMultiBasePlan {
+        application: if has_legacy_addon { legacy } else { family },
+        primary_program: upgrade_index.unwrap_or(family),
+        ..provisional
+    }))
+}
+
+/// An indexed update beside a base must resolve to that exact Program. A
+/// matching family ID alone cannot make Program 1 an update of Program 0.
+/// Standalone updates are resolved independently by their own NPDM.
+fn validate_indexed_updates(
+    path: &Path,
+    toc: &Toc,
+    multi: Option<&NupMultiBasePlan>,
+    upgrade: Option<&NupUpgradePlan>,
+    limits: &ImportLimits,
+    token: &crate::CancellationToken,
+) -> Result<(), WriterError> {
+    for p in toc
+        .packages
+        .iter()
+        .filter(|p| p.kind == 1 && (p.title_id & 0xfff) > 0x800)
+    {
+        cancelled(token)?;
+        if p.flags == 1 {
+            // With no base to inherit, a standalone indexed update must
+            // carry its own structurally validated Program identity.
+            if nup_program_id(path, toc, p, limits, token)?.is_none() {
+                return Err(bad(&format!(
+                    "standalone indexed update package #{} ({:016x}) requires a validated exefs/main.npdm",
+                    p.ordinal, p.title_id
+                )));
+            }
+            continue;
+        }
+        if multi.is_some_and(|plan| plan.program(p).is_some())
+            || upgrade.is_some_and(|plan| plan.includes(p))
+        {
+            continue;
+        }
+        return Err(bad(&format!(
+            "indexed Switch 2 update package #{} ({:016x}) has no verified matching base Program",
+            p.ordinal, p.title_id
+        )));
+    }
+    Ok(())
+}
+
 pub struct NupPackageInfo {
     pub kind: crate::SnapshotType,
     pub version: u32,
@@ -1162,9 +1529,7 @@ pub fn inspect_nup(
     }
     let mut bases = toc.packages.iter().filter(|p| p.kind == 0 && p.flags == 0);
     let base = bases.next();
-    if bases.next().is_some() {
-        return Err(bad("more than one base package"));
-    }
+    let multi = nup_multi_base_plan(path, &toc, limits, token)?;
     let main = base
         .or_else(|| {
             toc.packages
@@ -1174,12 +1539,14 @@ pub fn inspect_nup(
         })
         .ok_or_else(|| bad("no base or standalone update package to convert"))?;
     let upgrade = nup_upgrade_plan(path, &toc, limits, token)?;
+    validate_indexed_updates(path, &toc, multi.as_ref(), upgrade.as_ref(), limits, token)?;
     let (_, observed_application) = package_role(main, base.is_some())?;
-    let application_id = upgrade
+    let application_id = multi
         .as_ref()
-        .map(|plan| plan.legacy_application)
+        .map(|plan| plan.application)
+        .or_else(|| upgrade.as_ref().map(|plan| plan.legacy_application))
         .unwrap_or(observed_application);
-    let platform = if upgrade.is_some() || application_id >> 56 == 0x04 {
+    let platform = if multi.is_some() || upgrade.is_some() || application_id >> 56 == 0x04 {
         Platform::Switch2
     } else if application_id >> 56 == 0x01
         && nup_program_id(path, &toc, main, limits, token)?
@@ -1206,8 +1573,19 @@ pub fn inspect_nup(
         let (mut kind, owner) = package_role(p, base.is_some())?;
         if upgrade.as_ref().is_some_and(|plan| plan.includes(p)) {
             kind = SnapshotType::StandaloneUpdate;
+        } else if multi.as_ref().is_some_and(|plan| plan.owns(p)) {
+            // Several NUP base Programs and their legacy upgrade DLC may have
+            // different title ID prefixes but share one verified application.
         } else if owner != application_id {
-            return Err(bad("package belongs to another application"));
+            return Err(package_application_error(
+                path,
+                &toc,
+                p,
+                owner,
+                application_id,
+                limits,
+                token,
+            ));
         }
         let display_version = if kind != SnapshotType::Dlc {
             metadata_bytes += u64::from(p.meta_size);
@@ -1425,7 +1803,13 @@ fn stage_nup_bounded(
     cancelled(token)?;
     let mut source = File::open(nup)?;
     let (toc, physical) = read_toc(&mut source, limits)?;
+    // Bound all package-level NPDM inspection before resolving associations.
+    if toc.packages.len() > limits.max_snapshots {
+        return Err(limit("NUP package count exceeds the snapshot budget"));
+    }
     let upgrade = nup_upgrade_plan(nup, &toc, limits, token)?;
+    let multi = nup_multi_base_plan(nup, &toc, limits, token)?;
+    validate_indexed_updates(nup, &toc, multi.as_ref(), upgrade.as_ref(), limits, token)?;
     let has_base = toc.packages.iter().any(|p| p.kind == 0);
     let mut owner = None;
     for p in &toc.packages {
@@ -1433,18 +1817,30 @@ fn stage_nup_bounded(
             continue;
         }
         let (_, declared) = package_role(p, has_base)?;
-        let application = upgrade
-            .as_ref()
-            .filter(|plan| plan.includes(p))
-            .map_or(declared, |plan| plan.legacy_application);
-        if owner.is_some_and(|previous| previous != application) {
-            return Err(bad("package belongs to another application"));
+        let application = if let Some(plan) = multi.as_ref() {
+            plan.application
+        } else {
+            upgrade
+                .as_ref()
+                .filter(|plan| plan.includes(p))
+                .map_or(declared, |plan| plan.legacy_application)
+        };
+        if let Some(previous) = owner.filter(|previous| *previous != application) {
+            return Err(package_application_error(
+                nup,
+                &toc,
+                p,
+                application,
+                previous,
+                limits,
+                token,
+            ));
         }
         owner = Some(application);
     }
-    if upgrade.is_some() && platform != "switch2" {
+    if (upgrade.is_some() || multi.is_some()) && platform != "switch2" {
         return Err(unsupported(
-            "NX -> Switch 2 Program upgrade requires --platform switch2",
+            "Switch 2 Program import requires --platform switch2",
         ));
     }
     // Decoded bytes written to the stage. Streamed, only ExeFS is staged.
@@ -1506,14 +1902,12 @@ fn stage_nup_bounded(
     let package_root = dir.path.join("pkg");
     fs::create_dir(&package_root)?;
 
-    let bases: Vec<_> = toc.packages.iter().filter(|p| p.kind == 0).collect();
-    if bases.len() > 1 {
-        return Err(bad("more than one base package"));
-    }
-    let base = bases.first().copied();
+    let base = toc.packages.iter().find(|p| p.kind == 0);
     let mut skipped = Vec::new();
     let mut text = "NXIMPORT\t1\n".to_owned();
     let mut base_tree = None;
+    // A separate base tree and staging path for each Switch 2 Program.
+    let mut program_bases: BTreeMap<u64, (Tree, String)> = BTreeMap::new();
     let mut buffer = vec![0u8; 1 << 20];
     let mut keys = BTreeSet::new();
     let mut auxiliary_bases: BTreeMap<(u64, String), (u64, String)> = BTreeMap::new();
@@ -1555,18 +1949,30 @@ fn stage_nup_bounded(
         }
         let (snapshot_type, original_application) = package_role(p, base.is_some())?;
         let is_upgrade = upgrade.as_ref().is_some_and(|plan| plan.includes(p));
-        let application = if is_upgrade {
+        let application = if let Some(plan) = multi.as_ref() {
+            plan.application
+        } else if is_upgrade {
             upgrade.as_ref().unwrap().legacy_application
         } else {
             original_application
         };
-        if let Some(b) = base {
+        if let Some(b) = base.filter(|_| multi.is_none()) {
             if application != b.title_id {
                 return Err(bad("update belongs to another application"));
             }
         }
+        let multi_program = multi.as_ref().and_then(|plan| plan.program(p));
         let (kind, key) = if is_upgrade {
             ("standalone-update", format!("upgrade-{}", p.version))
+        } else if let Some(program) = multi_program {
+            match snapshot_type {
+                crate::SnapshotType::Base => ("base", format!("base-program-{}", hex16(program))),
+                crate::SnapshotType::Update => (
+                    "update",
+                    format!("update-program-{}-{}", hex16(program), p.version),
+                ),
+                _ => return Err(bad("unexpected Switch 2 multi-base package kind")),
+            }
         } else {
             match snapshot_type {
                 crate::SnapshotType::Base => ("base", "base".to_owned()),
@@ -1586,9 +1992,16 @@ fn stage_nup_bounded(
             return Err(bad("two updates share one version"));
         }
         let own = toc.package_tree(p, limits)?;
-        let tree = match (p.kind, &base_tree) {
-            (1, Some(b)) => resolve_nup_update(&toc, p, b, &own, upgrade.as_ref(), limits)?,
-            _ => own,
+        let base_for_update = multi_program.and_then(|id| program_bases.get(&id));
+        let tree = if p.kind == 1 && multi.is_some() {
+            let (base_tree, _) = base_for_update
+                .ok_or_else(|| bad("Switch 2 update has no matching staged base Program"))?;
+            overlay(base_tree, &own)?
+        } else {
+            match (p.kind, &base_tree) {
+                (1, Some(b)) => resolve_nup_update(&toc, p, b, &own, upgrade.as_ref(), limits)?,
+                _ => own,
+            }
         };
         // Before any directory or stream entry is created for this package.
         charge_entries(&mut resolved, &tree, max_entries)?;
@@ -1643,7 +2056,8 @@ fn stage_nup_bounded(
                 return Err(limit("NUP files to stage exceed the staging byte budget"));
             }
             if index & BASE_BIT != 0 {
-                let from = package_root.join("trees/base").join(path);
+                let inherited_key = base_for_update.map_or("base", |(_, key)| key.as_str());
+                let from = package_root.join("trees").join(inherited_key).join(path);
                 if fs::hard_link(&from, &out).is_err() {
                     copy_inherited(
                         &from,
@@ -1684,6 +2098,14 @@ fn stage_nup_bounded(
             }
             Err(_) => ("none", application),
         };
+        if let Some(expected) = multi_program {
+            if primary_program != expected || profile != "meta-acid3072-v1" {
+                return Err(bad(&format!(
+                    "Switch 2 package #{} ({:016x}) must use its verified Program {:016x}",
+                    p.ordinal, p.title_id, expected
+                )));
+            }
+        }
         if !dlc && !is_upgrade && primary_program != application {
             // Standalone native Switch 2 Programs may use the low add-on bits,
             // but an NPDM must never replace an unrelated declared application.
@@ -1691,7 +2113,11 @@ fn stage_nup_bounded(
                 && application >> 56 == 4
                 && primary_program & !0xfff == application
                 && profile == "meta-acid3072-v1";
-            if !native_standalone {
+            let native_multi_base = multi
+                .as_ref()
+                .is_some_and(|plan| plan.program(p) == Some(primary_program))
+                && profile == "meta-acid3072-v1";
+            if !native_standalone && !native_multi_base {
                 return Err(bad("NPDM Program does not match the declared application"));
             }
         }
@@ -1709,7 +2135,11 @@ fn stage_nup_bounded(
         } else {
             (
                 hex16(primary_program),
-                if upgrade.is_some() && !is_upgrade {
+                if multi
+                    .as_ref()
+                    .is_some_and(|plan| primary_program != plan.primary_program)
+                    || (upgrade.is_some() && !is_upgrade)
+                {
                     "auxiliary"
                 } else {
                     "primary"
@@ -1725,7 +2155,8 @@ fn stage_nup_bounded(
             text.push_str(&format!("addon\t{key}\t{}\n", hex16(p.title_id)));
         }
         if kind == "update" {
-            text.push_str(&format!("dependency\t{key}\trequired-base\tbase\n"));
+            let parent = base_for_update.map_or("base", |(_, key)| key.as_str());
+            text.push_str(&format!("dependency\t{key}\trequired-base\t{parent}\n"));
         } else if is_upgrade && base.is_some() {
             let parent = edition_legacy_parent(&toc, p, upgrade.as_ref().unwrap()).map_or_else(
                 || "base".to_owned(),
@@ -1829,7 +2260,11 @@ fn stage_nup_bounded(
             }
         }
         if kind == "base" {
-            base_tree = Some(tree);
+            if let Some(program) = multi_program {
+                program_bases.insert(program, (tree, key));
+            } else {
+                base_tree = Some(tree);
+            }
         }
     }
     if keys.is_empty() {
@@ -1937,6 +2372,15 @@ pub fn check_nup(
         return Err(limit("NUP has more packages than the snapshot budget"));
     }
     let upgrade = nup_upgrade_plan(nup, &toc, &limits, &options.cancellation)?;
+    let multi = nup_multi_base_plan(nup, &toc, &limits, &options.cancellation)?;
+    validate_indexed_updates(
+        nup,
+        &toc,
+        multi.as_ref(),
+        upgrade.as_ref(),
+        &limits,
+        &options.cancellation,
+    )?;
     let summary = crate::inspect_archive(archive, options, crate::IntegrityPolicy::Fast)?;
     let base = toc.packages.iter().find(|p| p.kind == 0);
     let base_program = match base {
@@ -1951,6 +2395,7 @@ pub fn check_nup(
     let mut matched = BTreeSet::new();
     let mut base_tree = None;
     let mut base_identity = None;
+    let mut program_bases: BTreeMap<u64, (Tree, [u8; 32])> = BTreeMap::new();
     let mut auxiliary_bases = BTreeMap::new();
     // (first block index, block count) of files already read back.
     let mut read_back = BTreeSet::new();
@@ -1965,16 +2410,26 @@ pub fn check_nup(
         let own = toc.package_tree(p, &limits)?;
         charge_entries(&mut resolved, &own, MAX_RESOLVED_ENTRIES)?;
         let is_upgrade = upgrade.as_ref().is_some_and(|plan| plan.includes(p));
-        let (tree, application, wanted): (Tree, u64, SnapshotFilter) = match p.kind {
+        let (tree, mut application, wanted): (Tree, u64, SnapshotFilter) = match p.kind {
             0 => (
-                own.clone(),
+                own,
                 p.title_id,
                 Box::new(|s| s.snapshot_type == SnapshotType::Base),
             ),
             1 => {
-                let tree = match &base_tree {
-                    Some(b) => resolve_nup_update(&toc, p, b, &own, upgrade.as_ref(), &limits)?,
-                    None => own,
+                let tree = if let Some(plan) = multi.as_ref() {
+                    let program = plan
+                        .program(p)
+                        .ok_or_else(|| bad("Switch 2 update has no matching base Program"))?;
+                    let (base, _) = program_bases
+                        .get(&program)
+                        .ok_or_else(|| bad("Switch 2 update base Program has not been staged"))?;
+                    overlay(base, &own)?
+                } else {
+                    match &base_tree {
+                        Some(b) => resolve_nup_update(&toc, p, b, &own, upgrade.as_ref(), &limits)?,
+                        None => own,
+                    }
                 };
                 let version = p.version;
                 (
@@ -2009,6 +2464,9 @@ pub fn check_nup(
                 )
             }
         };
+        if let Some(plan) = multi.as_ref() {
+            application = plan.application;
+        }
         let what = match p.kind {
             0 => "base".to_owned(),
             1 => format!("update v{}", p.version),
@@ -2030,6 +2488,7 @@ pub fn check_nup(
         } else {
             nup_program_id(nup, &toc, p, &limits, &options.cancellation)?
                 .map(|(id, _)| id)
+                .or_else(|| multi.as_ref().and_then(|plan| plan.program(p)))
                 .or(if p.kind == 1 { base_program } else { None })
                 .or(Some(application))
         };
@@ -2064,6 +2523,16 @@ pub fn check_nup(
                     ),
                     None => base_identity,
                 }
+            } else if let Some(plan) = multi.as_ref() {
+                let program = plan
+                    .program(p)
+                    .ok_or_else(|| bad("update has no base Program"))?;
+                Some(
+                    program_bases
+                        .get(&program)
+                        .ok_or_else(|| bad("update base Program is missing from the archive"))?
+                        .1,
+                )
             } else {
                 base_identity
             };
@@ -2164,8 +2633,13 @@ pub fn check_nup(
             }
         }
         if p.kind == 0 {
-            base_tree = Some(tree);
-            base_identity = Some(snapshot.identity);
+            if multi.is_some() {
+                let program = expected_program.ok_or_else(|| bad("base Program has no NPDM"))?;
+                program_bases.insert(program, (tree, snapshot.identity));
+            } else {
+                base_tree = Some(tree);
+                base_identity = Some(snapshot.identity);
+            }
         }
     }
     if base.is_none() && out.snapshots == 0 {
