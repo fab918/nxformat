@@ -27,14 +27,6 @@ pub(super) struct RestoreRange {
     pub hash_offset: u8,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RestorationMode {
-    #[default]
-    Compact,
-    /// Preserve every stored source block; replay needs only a Zstd decoder.
-    Portable,
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct RestorationStats {
     pub unchanged: bool,
@@ -503,24 +495,6 @@ pub fn create_restoration(
     manifest: &str,
     options: &WriterOptions,
 ) -> Result<RestorationStats, WriterError> {
-    create_restoration_with_mode(
-        archive_path,
-        directory,
-        jobs,
-        manifest,
-        RestorationMode::Compact,
-        options,
-    )
-}
-
-pub fn create_restoration_with_mode(
-    archive_path: impl AsRef<Path>,
-    directory: impl AsRef<Path>,
-    jobs: &[([u8; 32], String)],
-    manifest: &str,
-    mode: RestorationMode,
-    options: &WriterOptions,
-) -> Result<RestorationStats, WriterError> {
     validate_options(options)?;
     let archive_path = archive_path.as_ref();
     let directory = directory.as_ref();
@@ -541,11 +515,7 @@ pub fn create_restoration_with_mode(
     if budget.current + options.max_memory_bytes / 3 > options.max_memory_bytes {
         return Err(limit_error("restoration parser exceeds memory budget"));
     }
-    let all = if mode == RestorationMode::Compact {
-        ranges_for(archive_path, &archive, jobs, &budget, options)?
-    } else {
-        HashMap::new()
-    };
+    let all = ranges_for(archive_path, &archive, jobs, &budget, options)?;
     let mut reps: HashMap<u32, (u32, u64)> = HashMap::new();
     let mut files: Vec<_> = all.keys().copied().collect();
     files.sort_unstable();
@@ -1365,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn edited_large_compact_and_portable_recipes_fit_one_output_plus_small_overhead() {
+    fn edited_large_compact_recipe_fits_one_output_plus_small_overhead() {
         let f = fixture();
         let mut state = 12345u64;
         let noise: Vec<u8> = (0..16 * 1024 * 1024)
@@ -1395,31 +1365,20 @@ mod tests {
         .unwrap();
         let original_size = std::fs::metadata(&original).unwrap().len();
         assert!(original_size > 16 * 1024 * 1024);
-        for portable in [false, true] {
-            let dump = f.dir.join(if portable {
-                "large-portable"
-            } else {
-                "large-compact"
-            });
-            let mut args = vec![
+        {
+            let dump = f.dir.join("large-compact");
+            let args = vec![
                 "extract".into(),
                 original.to_string_lossy().into_owned(),
                 dump.to_string_lossy().into_owned(),
             ];
-            if portable {
-                args.push("--portable-restore".into());
-            }
             crate::cli::run(args, None, None).unwrap();
             std::fs::write(dump.join("base/romfs/data.bin"), b"one mod").unwrap();
             let options = WriterOptions {
                 max_temporary_disk_bytes: original_size + 128 * 1024,
                 ..Default::default()
             };
-            let output = f.dir.join(if portable {
-                "large-portable-mod.nx"
-            } else {
-                "large-compact-mod.nx"
-            });
+            let output = f.dir.join("large-compact-mod.nx");
             let stats = restore_extraction(&dump, &output, &options).unwrap();
             assert!(!stats.unchanged);
             assert!(stats.archive_bytes > 16 * 1024 * 1024);
@@ -1429,7 +1388,7 @@ mod tests {
                     <= options.max_temporary_disk_bytes
             );
             inspect_archive(&output, &options, IntegrityPolicy::Strict).unwrap();
-            eprintln!("large compact-store benchmark: portable={portable} original_bytes={original_size} new_nx_bytes={} metadata_staged_bytes={} temporary_budget={}", stats.archive_bytes, stats.metadata_staged_bytes, options.max_temporary_disk_bytes);
+            eprintln!("large compact-store benchmark: original_bytes={original_size} new_nx_bytes={} metadata_staged_bytes={} temporary_budget={}", stats.archive_bytes, stats.metadata_staged_bytes, options.max_temporary_disk_bytes);
         }
     }
 
@@ -1960,23 +1919,14 @@ mod tests {
         assert_eq!(fresh.attempts, attempts + 1);
     }
     #[test]
-    fn portable_recipe_uses_no_encoder_and_replays_exact_original_bytes() {
+    fn legacy_literal_recipe_replays_exact_original_bytes_and_supports_edits() {
         let f = fixture();
-        let portable = f.dir.join("portable");
-        crate::cli::run(
-            vec![
-                "extract".into(),
-                f.original.to_string_lossy().into_owned(),
-                portable.to_string_lossy().into_owned(),
-                "--portable-restore".into(),
-            ],
-            None,
-            None,
-        )
-        .unwrap();
+        let portable = &f.extracted;
+        // Old portable recipes used ordinary literal operations. Construct
+        // that legacy representation without retaining a full-copy writer.
         let decoded =
             zstd::stream::decode_all(File::open(portable.join(RESTORATION_FILE)).unwrap()).unwrap();
-        let mut reader = std::io::Cursor::new(decoded);
+        let mut reader = std::io::Cursor::new(&decoded);
         let mut header = [0; 48];
         reader.read_exact(&mut header).unwrap();
         text(&mut reader, MAX_TEXT).unwrap();
@@ -1987,18 +1937,21 @@ mod tests {
             byte(&mut reader).unwrap();
             number(&mut reader).unwrap();
         }
-        loop {
-            match byte(&mut reader).unwrap() {
-                255 => break,
-                0 => {
-                    let len = number(&mut reader).unwrap();
-                    reader.seek(SeekFrom::Current(len as i64)).unwrap();
-                }
-                _ => panic!("portable recipe contains encoder-dependent operations"),
-            }
-        }
+        let mut legacy = decoded[..reader.position() as usize].to_vec();
+        let original = std::fs::read(&f.original).unwrap();
+        legacy.push(0);
+        num(&mut legacy, original.len() as u64).unwrap();
+        legacy.extend_from_slice(&original);
+        legacy.push(255);
+        let digest = crate::hash::sha256(&legacy);
+        legacy.extend_from_slice(&digest);
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 13).unwrap();
+        encoder.window_log(23).unwrap();
+        encoder.include_checksum(true).unwrap();
+        encoder.write_all(&legacy).unwrap();
+        std::fs::write(portable.join(RESTORATION_FILE), encoder.finish().unwrap()).unwrap();
         let restored = f.dir.join("portable-restored.nx");
-        restore_extraction(&portable, &restored, &WriterOptions::default()).unwrap();
+        restore_extraction(portable, &restored, &WriterOptions::default()).unwrap();
         assert_eq!(
             std::fs::read(restored).unwrap(),
             std::fs::read(&f.original).unwrap()
@@ -2006,7 +1959,7 @@ mod tests {
         std::fs::write(portable.join("base/romfs/random.bin"), b"portable edit").unwrap();
         let edited = f.dir.join("portable-edited.nx");
         let stats = restore_extraction(
-            &portable,
+            portable,
             &edited,
             &WriterOptions {
                 max_temporary_disk_bytes: std::fs::metadata(&f.original).unwrap().len(),
@@ -2023,7 +1976,6 @@ mod tests {
                 f.original.to_string_lossy().into_owned(),
                 f.dir.join("invalid").to_string_lossy().into_owned(),
                 "--portable-restore".into(),
-                "--no-restore".into()
             ],
             None,
             None

@@ -746,8 +746,6 @@ impl App {
                     let mut args = vec!["extract".into(), path.clone(), text(&folder.join(stem))];
                     if !self.restore_recipe {
                         args.push("--no-restore".into());
-                    } else if self.portable_restore {
-                        args.push("--portable-restore".into());
                     }
                     action = Some(("Extracting archive".into(), args));
                 }
@@ -755,11 +753,7 @@ impl App {
         });
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.restore_recipe, "Keep restoration recipe");
-            theme::info(ui, &["Compact recipe by default", "When extracting, save instructions to recreate the original NX from the extracted files later. The compact mode avoids copying game data when it can reconstruct it exactly.", "Some original data may still need to be retained, so size depends on the archive. This does not change the NX you already have."]);
-            ui.add_space(8.0);
-            ui.add_enabled(self.restore_recipe, egui::Checkbox::new(&mut self.portable_restore, "Larger portable recipe"));
-            let space = format!("Optional: may add roughly {} to the extracted folder by keeping original compressed data. Leave off to use the compact recipe, which needs a compatible compressor for exact reconstruction.", bytes(archive.size));
-            theme::info(ui, &["Larger, encoder-independent recipe", "Preserve original compressed blocks instead of reconstructing them from the extracted files. This mode can approach the NX size; it is not the compact recipe.", &space]);
+            theme::info(ui, &["Compact restoration recipe", "When extracting, save instructions to recreate the original NX from the extracted files later. The recipe avoids copying game data when it can reconstruct it exactly.", "Some original data may still need to be retained, so size depends on the archive. This does not change the NX you already have."]);
         });
         if archive.snapshots.iter().any(|s| s.native) {
             ui.label("Native NCA content: extraction reads ExeFS and RomFS and verifies IVFC integrity. BKTR updates require their exact base. Unsupported layouts or missing bases stop extraction and remove its output.");

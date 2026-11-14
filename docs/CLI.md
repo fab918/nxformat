@@ -446,10 +446,11 @@ the already extracted files; failure while extracting the files still removes
 incomplete output. ExeFS-only Program NCAs are exported with an explicit missing
 RomFS notice, and data-only updates use their exact inherited Program dependency.
 
-`extract ... --portable-restore` keeps original compressed block bytes, making
-exact restoration independent of the Zstd encoder version. Both recipe modes
-warn that additional disk use may approach the source NX size. The flags
-`--portable-restore` and `--no-restore` are mutually exclusive. Modified repacks
+Compact reconstruction is the only recipe creation mode. It references extracted
+file ranges and retains metadata or original blocks only when needed for exact
+replay. Recipe size depends on the archive; exact recompression requires a
+compatible Zstd encoder. Recipes from the former portable mode remain readable.
+Modified repacks
 preserve original NACP, localized artwork and titles, execution metadata and
 source resources in addition to the declared game-file paths.
 Edited restoration uses a compact metadata/resource store instead of a temporary

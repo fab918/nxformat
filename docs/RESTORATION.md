@@ -79,14 +79,19 @@ Original Zstd blocks depend on reproducible encoder output; an incompatible
 future Zstd encoder fails the final SHA-256 check instead of publishing different
 bytes. The bundled Zstd dependency is pinned.
 
-For encoder-independent long-term storage, use
-`nxconvert extract GAME.nx NEW_FOLDER --portable-restore`, or enable **Portable
-restoration** in the desktop application. This mode stores original block bytes
-as literals and never emits encoder-dependent reconstruction operations. It
-still uses a standard Zstd level 13 frame, so exact replay needs a decoder but
-not the original encoder. The recipe can approach the original archive size.
-Both modes warn about that possible additional disk cost before extraction;
-`--no-restore` and the desktop checkbox can disable recipe creation.
+Compact reconstruction is the only recipe creation mode. `--no-restore` and
+the desktop checkbox can disable recipe creation. Existing recipes that retain
+original blocks as literals remain readable, including recipes produced by the
+former portable mode; the restoration stream format is unchanged.
+
+On the local Kirby Switch 2 roundtrip, a 15,969,850,688-byte NX extracted to
+17,773,456,082 bytes of files and a **6,559,628-byte compact recipe**. A repeated
+extraction with periodic file-size sampling peaked at 17,780,015,710 bytes
+of file content, including its temporary recipe; no original-size NX copy was
+observed during extraction. These are file lengths, excluding filesystem
+allocation overhead and the already existing input NX. Restoring produced the
+exact original SHA-256, and both extractions produced identical recipe bytes.
+This is a measured case, not a fixed recipe-size guarantee for other archives.
 
 During an edited repack, only the header and active metadata tail (tables and
 native media) are retained in a compact private store. An in-memory range map
@@ -183,8 +188,8 @@ The default exit status still permits a successful extraction with recipe failur
 keeping the extracted files and warning about the missing recipe. Automation that
 requires reversible extraction should use `extract GAME.nx FOLDER --require-restore`:
 a recipe failure then returns an error/nonzero exit status, still emits `failed`,
-and retains extracted files. It can be combined with `--portable-restore`, but not
-with `--no-restore`. An extraction failure itself returns an error before this
+and retains extracted files. It cannot be combined with `--no-restore`.
+An extraction failure itself returns an error before this
 recipe status is emitted.
 
 ## Independent declarations and platform-qualified paths
