@@ -136,7 +136,6 @@ fn extracted(
                             .find_map(|p| bounded(&path.join(p), 16 * 1024 * 1024));
                     }
                 }
-                source.issue = "Extracted updates must contain complete materialized files; no missing base content is reconstructed.".into();
                 return Some(source);
             }
             Err(error) => {
