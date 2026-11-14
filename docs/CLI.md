@@ -211,8 +211,9 @@ Unsupported or invalid NACP title tables are not displayed as text; explicit
 NUP titles supply missing display metadata while the original NACP is preserved.
 
 If a producer zeroed a declared RomFS root's child count, the importer can
-recover an interior child-table gap only when it has one unambiguous RomFS
-owner and its entries have no other parent. Bounds, names, cycles and file
+recover an interior or trailing child-table gap only when it has one unambiguous
+RomFS owner and its entries have no other parent. Multiple missing directory
+counts are rejected instead of flattening nested paths. Bounds, names, cycles and file
 hashes are still checked; unexplained gaps and overlaps remain errors.
 
 Packages with an additional `program1` through `program15` directory, each

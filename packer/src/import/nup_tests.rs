@@ -917,6 +917,126 @@ fn real_producer_edition_layouts_preserve_legacy_and_ounce_programs() {
 }
 
 #[test]
+fn missing_romfs_count_at_end_of_child_table_is_recovered() {
+    let dir = work("romfs-trailing-children");
+    let nup = dir.join("game.nup");
+    let out = dir.join("game.nx");
+    let options = WriterOptions::default();
+    let mut package = base(APP);
+    package.romfs = Some(vec![
+        Node::Dir("empty", vec![]),
+        Node::File("last.bin", vec![0x55; 4096]),
+    ]);
+    for compressed in [false, true] {
+        let mut bytes = build(std::slice::from_ref(&package), compressed);
+        let toc = &bytes[SUPERBLOCK..];
+        let dirs = u64_at(toc, 0x08) as usize;
+        let files = u64_at(toc, 0x10) as usize;
+        let pool = u64_at(toc, 0x18) as usize;
+        let slots_start = 0x30 + PACKAGE + dirs * DIRECTORY + files * FILE;
+        let romfs = u32_at(&bytes, SUPERBLOCK + 0x30 + 0x10) as usize;
+        let row = SUPERBLOCK + 0x30 + PACKAGE + romfs * DIRECTORY;
+        let first = u32_at(&bytes, row + 8) as usize;
+        let count = u32_at(&bytes, row + 12) as usize;
+        assert_eq!(first + count, (pool - slots_start) / 4);
+        bytes[row + 12..row + 16].fill(0);
+        let toc_size = u64_at(&bytes, 0x10) as usize;
+        let digest = crate::hash::sha256(&bytes[SUPERBLOCK..SUPERBLOCK + toc_size]);
+        bytes[0x18..0x38].copy_from_slice(&digest);
+        fs::write(&nup, bytes).unwrap();
+        for stream in [false, true] {
+            convert_nup(
+                &nup,
+                &out,
+                &NupOptions {
+                    stream,
+                    ..nup_options()
+                },
+                &limits(),
+                &options,
+            )
+            .unwrap();
+            let archive = inspect_archive(&out, &options, IntegrityPolicy::Strict).unwrap();
+            let mut data = [0; 4096];
+            crate::read_snapshot_file_range(
+                &out,
+                archive.applications[0].snapshots[0].identity,
+                "romfs/last.bin",
+                0,
+                &mut data,
+                &options,
+            )
+            .unwrap();
+            assert_eq!(data, [0x55; 4096]);
+            fs::remove_file(&out).unwrap();
+        }
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn two_missing_directory_counts_do_not_flatten_nested_romfs() {
+    let dir = work("romfs-two-missing-counts");
+    let nup = dir.join("game.nup");
+    let options = WriterOptions::default();
+    let out = dir.join("game.nx");
+    for trailing in [false, true] {
+        for compressed in [false, true] {
+            let mut packages = vec![base(APP)];
+            if !trailing {
+                // A following package bounds an interior gap. Without the guard,
+                // its nested file is silently recovered at the RomFS root.
+                packages.push(addon(APP));
+            }
+            let mut bytes = build(&packages, compressed);
+            let toc = &bytes[SUPERBLOCK..];
+            let dirs = u64_at(toc, 0x08) as usize;
+            let files = u64_at(toc, 0x10) as usize;
+            let row_start = SUPERBLOCK + 0x30 + packages.len() * PACKAGE;
+            let slots_start = row_start + dirs * DIRECTORY + files * FILE;
+            let romfs = u32_at(&bytes, SUPERBLOCK + 0x30 + 0x10) as usize;
+            let row = row_start + romfs * DIRECTORY;
+            let first = u32_at(&bytes, row + 8) as usize;
+            let count = u32_at(&bytes, row + 12) as usize;
+            let sub = (first..first + count)
+                .map(|i| u32_at(&bytes, slots_start + i * 4) as usize)
+                .find(|&i| i < dirs && i != romfs)
+                .unwrap();
+            assert!(u32_at(&bytes, row_start + sub * DIRECTORY + 12) > 0);
+            bytes[row + 12..row + 16].fill(0);
+            bytes[row_start + sub * DIRECTORY + 12..row_start + sub * DIRECTORY + 16].fill(0);
+            let toc_size = u64_at(&bytes, 0x10) as usize;
+            let digest = crate::hash::sha256(&bytes[SUPERBLOCK..SUPERBLOCK + toc_size]);
+            bytes[0x18..0x38].copy_from_slice(&digest);
+            fs::write(&nup, bytes).unwrap();
+            let error = inspect_nup(&nup, &limits(), &options.cancellation)
+                .err()
+                .expect("ambiguous RomFS recovery must be rejected");
+            assert!(
+                error.to_string().contains("multiple directory owners"),
+                "{error}"
+            );
+            for stream in [false, true] {
+                assert!(convert_nup(
+                    &nup,
+                    &out,
+                    &NupOptions {
+                        stream,
+                        ..nup_options()
+                    },
+                    &limits(),
+                    &options,
+                )
+                .is_err());
+                assert!(!out.exists());
+                assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+            }
+        }
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn indexed_updates_require_the_exact_declared_program() {
     let dir = work("indexed-update-program-proof");
     let nup = dir.join("indexed.nup");

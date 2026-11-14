@@ -466,6 +466,11 @@ fn recover_empty_romfs(
         }
         end = *next;
     }
+    // An omitted count on the last RomFS directory leaves a trailing gap.
+    // Ignore only zero padding; never silently drop occupied child slots.
+    if let Some(last) = children[end..].iter().rposition(|&node| node != 0) {
+        gaps.push((end, end + last + 1));
+    }
     let referenced: BTreeSet<_> = ranges
         .iter()
         .flat_map(|(a, b)| children[*a..*b].iter().copied())
@@ -485,13 +490,23 @@ fn recover_empty_romfs(
         if candidates.len() != 1 {
             continue;
         }
+        let owner = *candidates.iter().next().unwrap();
+        // A second missing directory count can look like a single large gap.
+        // Do not absorb nested children into RomFS and change their paths.
+        if dirs.iter().enumerate().any(|(i, d)| {
+            i != owner && d.child_count == 0 && (first..end).contains(&(d.first_child as usize))
+        }) {
+            return Err(bad(
+                "ambiguous missing RomFS child count: multiple directory owners",
+            ));
+        }
         let nodes = &children[first..end];
         let unique: BTreeSet<_> = nodes.iter().copied().collect();
         if unique.len() != nodes.len() || nodes.iter().any(|n| referenced.contains(n)) {
             return Err(bad("ambiguous missing RomFS child count"));
         }
         // Tree walking still checks bounds, names, cycles and file hashes.
-        dirs[*candidates.iter().next().unwrap()].child_count = (end - first)
+        dirs[owner].child_count = (end - first)
             .try_into()
             .map_err(|_| bad("recovered RomFS child count overflows"))?;
     }
