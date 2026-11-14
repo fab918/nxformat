@@ -645,6 +645,38 @@ fn read_toc(file: &mut File, limits: &ImportLimits) -> Result<(Toc, u64), Writer
 }
 
 impl Toc {
+    /// A native control file may be retained at the package root as well as
+    /// in metadata TLVs. Its exact TOC digest disambiguates mixed-TLV writers.
+    fn root_nacp_index(&self, p: &Package) -> Result<Option<usize>, WriterError> {
+        let root = self
+            .dirs
+            .get(p.root as usize)
+            .ok_or_else(|| bad("package root out of range"))?;
+        let end = root.first_child as u64 + root.child_count as u64;
+        let children = self
+            .children
+            .get(
+                root.first_child as usize
+                    ..usize::try_from(end).map_err(|_| bad("root children overflow"))?,
+            )
+            .ok_or_else(|| bad("root children out of bounds"))?;
+        let mut found = None;
+        for &node in children {
+            let Some(index) = (node as usize).checked_sub(self.dirs.len()) else {
+                continue;
+            };
+            if let Some(file) = self.files.get(index).filter(|f| f.name == "control.nacp") {
+                if file.size != 0x4000 {
+                    return Err(bad("root control.nacp is not 0x4000 bytes"));
+                }
+                if found.replace(index).is_some() {
+                    return Err(bad("duplicate root control.nacp"));
+                }
+            }
+        }
+        Ok(found)
+    }
+
     /// Resolve a directory into `tree` under `prefix`. Every node may appear
     /// once per walk, so cycles and shared subtrees are rejected.
     fn walk(
@@ -723,11 +755,17 @@ impl Toc {
         let mut data = None;
         let mut children = Vec::new();
         let mut ancillary = Vec::new();
+        let root_nacp = self.root_nacp_index(p)?;
+        let mut root_files = Vec::new();
         for &node in &self.children[root.first_child as usize..end as usize] {
             if !root_seen.insert(node) {
                 return Err(bad("duplicate package root entry"));
             }
             if node != p.exefs && node != p.romfs {
+                if root_nacp.is_some_and(|index| node as usize == self.dirs.len() + index) {
+                    root_files.push(node);
+                    continue;
+                }
                 if let Some(dir) = self.dirs.get(node as usize) {
                     if dir.name == "data" && data.replace(node).is_none() {
                         continue;
@@ -783,6 +821,23 @@ impl Toc {
                 return Err(bad("duplicate child Program directory"));
             }
             self.walk(dir, &name, &mut tree, &mut seen, 1, limits)?;
+        }
+        for node in root_files {
+            let path = "data/control.nacp";
+            if tree
+                .files
+                .keys()
+                .chain(tree.dirs.iter())
+                .any(|existing| existing.eq_ignore_ascii_case(path))
+            {
+                return Err(bad("root control.nacp collides with data/control.nacp"));
+            }
+            if !seen.insert(node) {
+                return Err(bad("root control.nacp is referenced more than once"));
+            }
+            tree.dirs.insert("data".into());
+            tree.files
+                .insert(path.into(), node as usize - self.dirs.len());
         }
         Ok(tree)
     }
@@ -982,11 +1037,15 @@ impl Meta {
     }
 }
 
-fn read_meta(file: &mut File, p: &Package, physical: u64) -> Result<Meta, WriterError> {
-    let meta = Meta::default();
-    if p.meta_offset == 0 && p.meta_size == 0 {
-        return Ok(meta);
-    }
+fn read_meta(
+    path: &Path,
+    file: &mut File,
+    toc: &Toc,
+    p: &Package,
+    physical: u64,
+    token: &crate::CancellationToken,
+) -> Result<Meta, WriterError> {
+    let root_nacp = toc.root_nacp_index(p)?.map(|index| &toc.files[index]);
     if p.meta_offset
         .checked_add(p.meta_size as u64)
         .map_or(true, |e| e > physical)
@@ -995,9 +1054,33 @@ fn read_meta(file: &mut File, p: &Package, physical: u64) -> Result<Meta, Writer
         return Err(bad("meta block is out of bounds"));
     }
     let mut block = vec![0; p.meta_size as usize];
-    file.seek(SeekFrom::Start(p.meta_offset))?;
-    file.read_exact(&mut block)?;
-    parse_meta(&block, meta)
+    if !block.is_empty() {
+        file.seek(SeekFrom::Start(p.meta_offset))?;
+        file.read_exact(&mut block)?;
+    }
+    let mut meta = parse_meta(&block, Meta::default(), root_nacp.map(|f| f.sha256))?;
+    if let Some(f) = root_nacp {
+        if let Some(nacp) = &meta.nacp {
+            if crate::hash::sha256(nacp) != f.sha256 {
+                return Err(bad("root control.nacp disagrees with NACP metadata"));
+            }
+        } else {
+            let mut nacp = Vec::new();
+            NupExtent {
+                path: std::sync::Arc::new(path.to_owned()),
+                name: f.name.clone(),
+                offset: f.extent_offset,
+                stored: f.extent_size,
+                codec: f.codec,
+                size: f.size,
+                sha256: f.sha256,
+            }
+            .reader(token)?
+            .read_to_end(&mut nacp)?;
+            meta.nacp = Some(nacp);
+        }
+    }
+    Ok(meta)
 }
 
 /// Meta TLV records as stored: (type, payload).
@@ -1028,17 +1111,34 @@ fn shifted_meta(records: &[(u16, &[u8])]) -> bool {
             .is_some_and(|&(_, body)| body.len() != 32)
 }
 
-fn parse_meta(block: &[u8], mut meta: Meta) -> Result<Meta, WriterError> {
+fn parse_meta(
+    block: &[u8],
+    mut meta: Meta,
+    root_nacp: Option<[u8; 32]>,
+) -> Result<Meta, WriterError> {
     let records = meta_records(block)?;
     let shifted = shifted_meta(&records);
     for (kind, body) in records {
-        let kind = if shifted && kind <= 0x0009 {
+        let kind = if kind == 2
+            && body.len() == 0x4000
+            && root_nacp.is_some_and(|digest| crate::hash::sha256(body) == digest)
+        {
+            // Some writers append a spec-numbered NACP to older shifted TLVs.
+            // Require equality with the declared root control file, rather
+            // than guessing from a 16 KiB icon's size.
+            2
+        } else if shifted && kind <= 0x0009 {
             kind + 1
         } else {
             kind
         };
         match kind {
-            0x0002 if body.len() == 0x4000 => meta.nacp = Some(body.to_vec()),
+            0x0002 if body.len() == 0x4000 => {
+                if meta.nacp.as_ref().is_some_and(|previous| previous != body) {
+                    return Err(bad("conflicting NACP metadata records"));
+                }
+                meta.nacp = Some(body.to_vec());
+            }
             0x0002 => return Err(bad("NACP record is not 0x4000 bytes")),
             0x0003 => meta.icon = Some(body.to_vec()),
             0x0004 => meta.display_version = Some(String::from_utf8_lossy(body).into_owned()),
@@ -1530,11 +1630,13 @@ fn nup_multi_base_plan(
             let index = p.title_id & 0xfff;
             if (1..=15).contains(&index) {
                 let program = family | index;
+                // The DLC index is an add-on identity, not a declaration that
+                // an executable with that index must exist. Editions retain
+                // ordinary legacy DLC too (for example indices 2..6 and 99).
+                // Only a matching, NPDM-verified base Program can identify an
+                // upgrade candidate. Other related DLC remains data-only.
                 if !provisional.programs.contains_key(&program) {
-                    return Err(bad(&format!(
-                        "Switch 2 upgrade DLC {:016x} references absent Program index {index}",
-                        p.title_id
-                    )));
+                    continue;
                 }
                 if upgrade_index
                     .replace(program)
@@ -1696,11 +1798,16 @@ pub fn inspect_nup(
             ));
         }
         let display_version = if kind != SnapshotType::Dlc {
-            metadata_bytes += u64::from(p.meta_size);
+            metadata_bytes += u64::from(p.meta_size)
+                + if toc.root_nacp_index(p)?.is_some() {
+                    0x4000
+                } else {
+                    0
+                };
             if metadata_bytes > limits.max_inventory_bytes {
                 return Err(limit("NUP display metadata exceeds the inspection budget"));
             }
-            let mut meta = read_meta(&mut file, p, size)?;
+            let mut meta = read_meta(path, &mut file, &toc, p, size, token)?;
             if let Some(nacp) = &meta.nacp {
                 let (titles, version, _) = crate::native::parse_nacp_text(nacp);
                 if let Some(title) = titles.first() {
@@ -2336,9 +2443,10 @@ fn stage_nup_bounded(
                 }
             }
         }
-        let meta = read_meta(&mut source, p, physical)?;
-        if !dlc && meta.nacp.is_none() {
-            // Switch 2 packages have no NACP: keep their own title and icons.
+        let meta = read_meta(nup, &mut source, &toc, p, physical, token)?;
+        if !dlc {
+            // Explicit package text is also a fallback when a retained NACP
+            // has an opaque/unsupported title table. Never decode it as text.
             if let Some(m) = meta.package_metadata() {
                 metadata.insert(key.clone(), m);
             }
@@ -2663,7 +2771,7 @@ pub fn check_nup(
                 }
             }
         }
-        let meta = read_meta(&mut source, p, physical)?;
+        let meta = read_meta(nup, &mut source, &toc, p, physical, &options.cancellation)?;
         if let (true, Some(nacp)) = (p.kind != 2, &meta.nacp) {
             let stored = crate::read_snapshot_nacp(archive, snapshot.identity, options)?;
             if stored.as_deref() != Some(nacp.as_slice()) {

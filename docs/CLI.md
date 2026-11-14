@@ -197,8 +197,18 @@ Switch 2 Edition packages may combine a native Ounce Program with a legacy
 Program 0 whose NPDM retains its Switch 1 identity. Each NPDM is validated
 against its own structural profile and family; the upgrade DLC selects the
 primary Ounce Program. A lone Ounce base with its matching legacy upgrade DLC
-is supported too. Root `control`, `logo`, `legal` and `meta` directories are
-preserved under `data/` with their original directory names.
+is supported too. Ordinary legacy DLC remains data-only: its add-on index does
+not require a corresponding executable Program. Only a matching, validated
+Program can make an add-on an upgrade candidate; ambiguous matches are rejected.
+Root `control`, `logo`, `legal` and `meta` directories are preserved under
+`data/` with their original directory names.
+
+A root `control.nacp` is retained as `data/control.nacp` and can supply native
+metadata. Conflicting NACP copies and destination collisions are rejected.
+For older shifted TLVs with an appended standard-numbered NACP, the root file's
+declared digest must match before the appended record is interpreted as NACP.
+Unsupported or invalid NACP title tables are not displayed as text; explicit
+NUP titles supply missing display metadata while the original NACP is preserved.
 
 If a producer zeroed a declared RomFS root's child count, the importer can
 recover an interior child-table gap only when it has one unambiguous RomFS

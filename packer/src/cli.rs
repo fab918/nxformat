@@ -1303,18 +1303,16 @@ fn field(text: &str) -> String {
 /// Name (first non-empty language, American English first) and display
 /// version of a control.nacp.
 fn nacp_texts(nacp: &[u8]) -> (String, String) {
-    let text = |bytes: &[u8]| {
-        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-        String::from_utf8_lossy(&bytes[..end]).to_string()
-    };
     if nacp.len() < 0x4000 {
         return (String::new(), String::new());
     }
-    let name = (0..16)
-        .map(|i| text(&nacp[i * 0x300..i * 0x300 + 0x200]))
+    let (titles, version, _) = native::parse_nacp_text(&nacp[..0x4000]);
+    let name = titles
+        .into_iter()
+        .filter_map(|title| title.name)
         .find(|n| !n.trim().is_empty())
         .unwrap_or_default();
-    (field(&name), field(&text(&nacp[0x3060..0x3070])))
+    (field(&name), field(&version.unwrap_or_default()))
 }
 fn meta_kind(t: native::ContentMetaType) -> Option<&'static str> {
     match t {
@@ -2833,6 +2831,19 @@ fn rebuild_name(name: &str) -> Option<std::ffi::OsString> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nacp_display_does_not_turn_opaque_or_invalid_titles_into_text() {
+        let mut nacp = vec![0; 0x4000];
+        nacp[..4].copy_from_slice(b"Game");
+        nacp[0x3060..0x3065].copy_from_slice(b"1.2.3");
+        assert_eq!(super::nacp_texts(&nacp), ("Game".into(), "1.2.3".into()));
+        nacp[0] = 0xff;
+        assert_eq!(super::nacp_texts(&nacp), (String::new(), "1.2.3".into()));
+        nacp[0x3215] = 1;
+        nacp[..0x3000].fill(0xff);
+        assert_eq!(super::nacp_texts(&nacp), (String::new(), "1.2.3".into()));
+    }
+
     use super::rebuild_name;
     use std::path::{Component, Path};
 

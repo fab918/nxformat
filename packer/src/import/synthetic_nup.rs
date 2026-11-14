@@ -20,7 +20,7 @@ pub struct Pkg {
     pub exefs: Option<Vec<Node>>,
     pub romfs: Option<Vec<Node>>,
     pub data: Option<Vec<Node>>,
-    /// Additional top-level package trees, including program1/exefs.
+    /// Additional top-level entries, including program1/exefs or control.nacp.
     pub extras: Vec<Node>,
     pub meta: Vec<(u16, Vec<u8>)>,
 }
@@ -105,10 +105,12 @@ pub fn build(packages: &[Pkg], zstd: bool) -> Vec<u8> {
             kids.push(ro);
         }
         for node in &p.extras {
-            if let Node::Dir(name, nested) = node {
-                kids.push(add(&mut flat, name, nested));
-            } else {
-                panic!("synthetic NUP package root extras must be directories");
+            match node {
+                Node::Dir(name, nested) => kids.push(add(&mut flat, name, nested)),
+                Node::File(name, bytes) => {
+                    flat.files.push((name.to_string(), bytes.clone()));
+                    kids.push(FILE_FLAG | (flat.files.len() as u32 - 1));
+                }
             }
         }
         flat.dirs[root as usize].1 = kids;

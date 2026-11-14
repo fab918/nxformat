@@ -60,6 +60,28 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         packages
     };
+    let ordinary_dlcs = || {
+        let mut packages = vec![base(ounce)];
+        for index in [1, 2, 0x63] {
+            let mut dlc = addon(legacy);
+            dlc.title_id = legacy + 0x1000 + index;
+            dlc.romfs = Some(vec![Node::File("dlc.bin", vec![index as u8; 37])]);
+            packages.push(dlc);
+        }
+        packages
+    };
+    let root_control = nacp(&[(0, "Root metadata")]);
+    let mut root_control_package = base(ounce);
+    root_control_package
+        .extras
+        .push(Node::File("control.nacp", root_control.clone()));
+    root_control_package.meta = vec![
+        (
+            0,
+            import::synthetic::npdm(ounce, import::structures::NpdmProfile::MetaAcid3072V1),
+        ),
+        (2, root_control.clone()),
+    ];
     let cases = [
         (
             "edition",
@@ -74,6 +96,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         ("multi-program", vec![multi, update(native, 65536, 0)]),
         ("multi-base", separate_programs(false)),
         ("multi-base-edition", separate_programs(true)),
+        ("edition-ordinary-dlcs", ordinary_dlcs()),
+        (
+            "root-control-mixed-tlvs",
+            vec![root_control_package, addon(legacy)],
+        ),
     ];
     let limits = import::ImportLimits::default();
     let options = WriterOptions::default();
@@ -101,10 +128,52 @@ fn main() -> Result<(), Box<dyn Error>> {
                         "edition" => 4,
                         "standalone-edition" => 2,
                         "multi-base" => 5,
+                        "edition-ordinary-dlcs" => 4,
+                        "root-control-mixed-tlvs" => 2,
                         _ => 6,
                     }
                 );
                 let archive = inspect_archive(&out, &options, IntegrityPolicy::Strict)?;
+                if name == "edition-ordinary-dlcs" {
+                    let app = &archive.applications[0];
+                    assert_eq!(app.programs.len(), 1);
+                    assert_eq!(app.programs[0].program_id, ounce);
+                    let mut expected_files = String::new();
+                    for index in [1, 2, 0x63] {
+                        let title = legacy + 0x1000 + index;
+                        let snapshot = app
+                            .snapshots
+                            .iter()
+                            .position(|s| s.addon_title_id == Some(title))
+                            .ok_or("ordinary DLC identity missing")?;
+                        let expected = root.join(format!("ordinary-dlc-{index}.bin"));
+                        fs::write(&expected, vec![index as u8; 37])?;
+                        expected_files.push_str(&format!(
+                            "{snapshot}\tromfs/dlc.bin\t{}\t0\t37\n",
+                            expected.display()
+                        ));
+                    }
+                    fs::write(out.with_extension("tsv"), expected_files)?;
+                    continue;
+                }
+                if name == "root-control-mixed-tlvs" {
+                    let snapshot = archive.applications[0]
+                        .snapshots
+                        .iter()
+                        .position(|s| s.snapshot_type == SnapshotType::Base)
+                        .ok_or("base missing")?;
+                    let expected = out.with_extension("bin");
+                    fs::write(&expected, &root_control)?;
+                    fs::write(
+                        out.with_extension("tsv"),
+                        format!(
+                            "{snapshot}\tdata/control.nacp\t{}\t0\t{}\n",
+                            expected.display(),
+                            root_control.len()
+                        ),
+                    )?;
+                    continue;
+                }
                 if name.starts_with("multi-base") {
                     let app = &archive.applications[0];
                     let primary = if name == "multi-base-edition" { 1 } else { 0 };

@@ -564,9 +564,19 @@ fn switch2_multi_base_rejects_unrelated_and_unverified_packages() {
     let mut missing_program = valid();
     missing_program.push(missing_exefs);
     cases.push(missing_program);
-    let mut missing_upgrade = valid();
-    missing_upgrade.push(addon(XENOBLADE_LEGACY + 2));
-    cases.push(missing_upgrade);
+    let mut absent_program_update = update(XENOBLADE_OUNCE, 65536, 0);
+    absent_program_update.title_id = XENOBLADE_OUNCE | 0x802;
+    absent_program_update.exefs = Some(exefs(0x5d, XENOBLADE_OUNCE | 2));
+    let mut absent_program = valid();
+    absent_program.push(absent_program_update);
+    cases.push(absent_program);
+    let mut ambiguous_upgrade = valid();
+    ambiguous_upgrade.push(base(XENOBLADE_OUNCE | 2));
+    ambiguous_upgrade.push(addon(XENOBLADE_LEGACY));
+    let mut second_upgrade = addon(XENOBLADE_LEGACY);
+    second_upgrade.title_id += 1;
+    ambiguous_upgrade.push(second_upgrade);
+    cases.push(ambiguous_upgrade);
     let mut unrelated_addon = valid();
     unrelated_addon.push(addon(0x0100_aaaa_0e34_a000));
     cases.push(unrelated_addon);
@@ -591,6 +601,243 @@ fn switch2_multi_base_rejects_unrelated_and_unverified_packages() {
         "{error}"
     );
     assert!(convert_nup(&nup, &out, &nup_options(), &limits(), &options).is_err());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn edition_keeps_ordinary_legacy_dlcs_without_inventing_programs() {
+    let dir = work("edition-with-ordinary-dlcs");
+    let nup = dir.join("edition.nup");
+    let out = dir.join("edition.nx");
+    let options = WriterOptions::default();
+    let indices = [1, 2, 6, 0x10, 0x63, 0xfff];
+    for anchor in 0..3 {
+        for compressed in [false, true] {
+            let mut packages = vec![base(OUNCE)];
+            if anchor != 0 {
+                let mut p0 = base(OUNCE & !0xfff);
+                if anchor == 2 {
+                    p0.exefs = Some(vec![
+                        Node::File("main", super::super::synthetic::nso(0x42, false)),
+                        Node::File("main.npdm", npdm(LEGACY, NpdmProfile::MetaAcid2048V1)),
+                    ]);
+                }
+                packages.push(p0);
+            }
+            for index in indices {
+                let mut dlc = addon(LEGACY);
+                dlc.title_id = LEGACY + 0x1000 + index;
+                dlc.version = index as u32;
+                dlc.romfs = Some(vec![Node::File("dlc.bin", vec![index as u8; 41])]);
+                packages.push(dlc);
+            }
+            fs::write(&nup, build(&packages, compressed)).unwrap();
+            let info = inspect_nup(&nup, &limits(), &options.cancellation).unwrap();
+            assert_eq!(info.application_id, LEGACY);
+            assert_eq!(info.platform, crate::Platform::Switch2);
+            assert_eq!(info.packages.len(), packages.len());
+            for stream in [false, true] {
+                for skip_addons in [false, true] {
+                    convert_nup(
+                        &nup,
+                        &out,
+                        &NupOptions {
+                            stream,
+                            skip_addons,
+                            ..nup_options()
+                        },
+                        &limits(),
+                        &options,
+                    )
+                    .unwrap();
+                    let archive = inspect_archive(&out, &options, IntegrityPolicy::Strict).unwrap();
+                    let app = &archive.applications[0];
+                    assert_eq!(app.application_id, LEGACY);
+                    assert_eq!(app.programs.len(), if anchor == 0 { 1 } else { 2 });
+                    assert_eq!(
+                        app.programs
+                            .iter()
+                            .find(|p| p.kind == crate::ProgramKind::Primary)
+                            .unwrap()
+                            .program_id,
+                        OUNCE
+                    );
+                    let mut dlcs: Vec<_> = app
+                        .snapshots
+                        .iter()
+                        .filter_map(|s| s.addon_title_id)
+                        .collect();
+                    dlcs.sort_unstable();
+                    let expected: Vec<_> = indices
+                        .into_iter()
+                        .filter(|_| !skip_addons)
+                        .map(|index| LEGACY + 0x1000 + index)
+                        .collect();
+                    assert_eq!(dlcs, expected);
+                    assert_eq!(
+                        check_nup(&nup, &out, skip_addons, &limits(), &options)
+                            .unwrap()
+                            .snapshots,
+                        if anchor == 0 { 1 } else { 2 } + expected.len()
+                    );
+                    fs::remove_file(&out).unwrap();
+                }
+            }
+        }
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn root_control_metadata_and_mixed_tlvs_are_preserved() {
+    let dir = work("root-control-metadata");
+    let nup = dir.join("control.nup");
+    let out = dir.join("control.nx");
+    let control = nacp(&[(0, "Root Metadata")]);
+    let options = WriterOptions::default();
+    for variant in 0..7 {
+        let mut control = control.clone();
+        if variant == 5 {
+            control[..0x3000].fill(0xff);
+            control[0x3215] = 1;
+        } else if variant == 6 {
+            control[0] = 0xff;
+        }
+        let expected_title = if variant >= 5 {
+            "Declared metadata"
+        } else {
+            "Root Metadata"
+        };
+        let mut package = base(APP);
+        package
+            .extras
+            .push(Node::File("control.nacp", control.clone()));
+        package.data = Some(vec![Node::File("other.bin", vec![42; 17])]);
+        let mut icon = PNG.to_vec();
+        icon.resize(0x4000, 0);
+        package.meta = match variant {
+            0 => vec![(2, control.clone())],
+            1 => vec![
+                (0, npdm(APP, NpdmProfile::MetaAcid3072V1)),
+                (4, b"fallback".to_vec()),
+                (2, control.clone()),
+            ],
+            2 => vec![
+                (0, npdm(APP, NpdmProfile::MetaAcid3072V1)),
+                (1, control.clone()),
+            ],
+            3 => Vec::new(),
+            4 => vec![
+                (0, npdm(APP, NpdmProfile::MetaAcid3072V1)),
+                (2, icon.clone()),
+            ],
+            _ => vec![
+                (0, npdm(APP, NpdmProfile::MetaAcid3072V1)),
+                (4, b"Declared metadata".to_vec()),
+                (2, control.clone()),
+            ],
+        };
+        for compressed in [false, true] {
+            fs::write(&nup, build(std::slice::from_ref(&package), compressed)).unwrap();
+            let info = inspect_nup(&nup, &limits(), &options.cancellation).unwrap();
+            assert_eq!(info.title.as_deref(), Some(expected_title));
+            if variant == 4 {
+                assert_eq!(info.icon.as_ref(), Some(&icon));
+            }
+            for stream in [false, true] {
+                convert_nup(
+                    &nup,
+                    &out,
+                    &NupOptions {
+                        stream,
+                        ..nup_options()
+                    },
+                    &limits(),
+                    &options,
+                )
+                .unwrap();
+                let summary = inspect_archive(&out, &options, IntegrityPolicy::Strict).unwrap();
+                let snapshot = &summary.applications[0].snapshots[0];
+                let display =
+                    crate::read_snapshot_display(&out, snapshot.identity, &options, true).unwrap();
+                assert_eq!(display.title.as_deref(), Some(expected_title));
+                assert_eq!(display.nacp.as_ref(), Some(&control));
+                let mut bytes = vec![0; control.len()];
+                crate::read_snapshot_file_range(
+                    &out,
+                    snapshot.identity,
+                    "data/control.nacp",
+                    0,
+                    &mut bytes,
+                    &options,
+                )
+                .unwrap();
+                assert_eq!(bytes, control);
+                assert_eq!(
+                    check_nup(&nup, &out, false, &limits(), &options)
+                        .unwrap()
+                        .nacp_checked,
+                    1
+                );
+                fs::remove_file(&out).unwrap();
+            }
+        }
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn root_control_rejects_conflicts_collisions_and_corrupt_file_bytes() {
+    let dir = work("root-control-invalid");
+    let nup = dir.join("bad.nup");
+    let out = dir.join("bad.nx");
+    let control = nacp(&[(0, "Root Metadata")]);
+    let options = WriterOptions::default();
+    for case in 0..5 {
+        let mut package = base(APP);
+        package
+            .extras
+            .push(Node::File("control.nacp", control.clone()));
+        package.meta = vec![(2, control.clone())];
+        match case {
+            0 => package.meta.push((2, nacp(&[(0, "Conflicting metadata")]))),
+            1 => package.meta = vec![(2, nacp(&[(0, "Different root control")]))],
+            2 => package.data = Some(vec![Node::File("Control.NaCp", control.clone())]),
+            3 => package.data = Some(vec![Node::Dir("control.nacp", vec![])]),
+            _ => {}
+        }
+        fs::write(&nup, build(&[package], false)).unwrap();
+        if case == 4 {
+            let (toc, _) = read_toc(&mut File::open(&nup).unwrap(), &limits()).unwrap();
+            let index = toc.root_nacp_index(&toc.packages[0]).unwrap().unwrap();
+            let offset = toc.files[index].extent_offset as usize;
+            let mut bytes = fs::read(&nup).unwrap();
+            bytes[offset] ^= 1;
+            fs::write(&nup, bytes).unwrap();
+        }
+        for stream in [false, true] {
+            let error = convert_nup(
+                &nup,
+                &out,
+                &NupOptions {
+                    stream,
+                    ..nup_options()
+                },
+                &limits(),
+                &options,
+            )
+            .err()
+            .expect("conflicting or damaged root metadata was accepted");
+            let message = error.to_string();
+            assert!(
+                message.contains("NACP")
+                    || message.contains("control.nacp")
+                    || message.contains("SHA-256"),
+                "{message}"
+            );
+            assert!(!out.exists());
+        }
+    }
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1267,7 +1514,7 @@ fn shifted_meta_types_read_like_spec_types() {
         (0x0007, &build_id[..]),
     ];
     let check = |records: &[(u16, &[u8])]| {
-        let meta = parse_meta(&meta_block(records), Meta::default()).unwrap();
+        let meta = parse_meta(&meta_block(records), Meta::default(), None).unwrap();
         assert_eq!(meta.title.as_deref(), Some("Game"));
         assert_eq!(meta.publisher.as_deref(), Some("Publisher"));
         assert_eq!(meta.display_version.as_deref(), Some("1.0.0"));

@@ -19,12 +19,15 @@ fn bounded(path: &Path, limit: u64) -> Option<Vec<u8>> {
 }
 
 fn display_text(nacp: &[u8]) -> (String, String) {
-    if nacp.len() < 0x4000 {
+    if nacp.len() < 0x4000 || nacp[0x3215] != 0 {
         return Default::default();
     }
     let text = |field: &[u8]| {
         let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
-        String::from_utf8_lossy(&field[..end]).trim().to_owned()
+        std::str::from_utf8(&field[..end])
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
     };
     (0..16)
         .find_map(|i| {
@@ -546,4 +549,22 @@ pub fn scan(paths: Vec<PathBuf>, token: &CancellationToken) -> Result<Vec<Source
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nacp_display_rejects_opaque_and_invalid_title_tables() {
+        let mut nacp = vec![0; 0x4000];
+        nacp[..4].copy_from_slice(b"Game");
+        nacp[0x200..0x209].copy_from_slice(b"Publisher");
+        assert_eq!(display_text(&nacp), ("Game".into(), "Publisher".into()));
+        nacp[0x3215] = 1;
+        assert_eq!(display_text(&nacp), Default::default());
+        nacp[0x3215] = 0;
+        nacp[0] = 0xff;
+        assert_eq!(display_text(&nacp), Default::default());
+    }
 }
