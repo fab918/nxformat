@@ -160,6 +160,25 @@ does not authenticate Nintendo signatures or validate every native RomFS/BKTR
 execution path. NX `IntegrityPolicy::Strict` independently checks NX payloads and
 file digests. See [SECURITY.md](SECURITY.md) for Fast/Strict editing policies.
 
+## Extracted dumps with separate Programs
+
+Extracted dumps also support separate `program/0` through `program/15` trees:
+at the package root, under `base/`, under `updates/<version>/`, and under
+`dlc/<title>/<version>/` with an optional `base/` wrapper. A CNMT descriptor in
+the package's `meta/` or a sibling Program's `meta/` supplies the application,
+type and numeric version; conflicting names/metadata are rejected. Each
+executable Program must match its CNMT index and validated NPDM. The interface
+and `pack-tree` use the same associations, including explicit tree selections.
+
+Legacy and Ounce Programs remain separate, with their own control metadata.
+Ancillary `control/`, `logo/`, `legal/` and `meta/` trees are preserved below
+`data/`. DLC minimum application versions from CNMT become dependencies;
+an absent required version is rejected. Without a supplied base, extracted
+updates use the existing automatic-import contract: the selected trees must
+already contain complete materialized files. CNMT does not prove that property,
+and the importer cannot reconstruct missing base data from directory names.
+Use an explicit import manifest for layouts or associations outside this policy.
+
 ## NUP migration
 
 ```text
@@ -267,6 +286,7 @@ compose TAB key TAB replace-delete-v1 TAB base-key TAB base-identity-hex64
 remove TAB key TAB exact-path
 exclude TAB key TAB exact-path
 program-view TAB key TAB programN
+data-view TAB key TAB control|logo|legal|meta
 build TAB key TAB expected-build-id-hex64
 content TAB key TAB content-id-hex32
 addon TAB key TAB addon-title-id-hex16
@@ -283,6 +303,12 @@ and version, with its own Program ID and NPDM. For example, a source rooted at
 `base/program1/exefs/main.npdm` (auxiliary). `program-view` prevents the primary
 snapshot from absorbing or duplicating the child Program's files. These are
 import declarations only: the NX 1.0 wire format and reader are unchanged.
+
+`data-view` explicitly maps one ancillary directory from the selected source
+root to `data/<name>` in that snapshot. Its files remain part of the imported
+content and source verification; missing directories and destination collisions
+are rejected. This declaration changes only source interpretation, not NX bytes
+or the reader API.
 
 DLC needs a source content ID or a declared add-on title ID. Executable or partial
 DLC is unsupported. Declared text remains provenance; native display metadata is

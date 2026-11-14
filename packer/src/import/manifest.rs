@@ -32,6 +32,8 @@ pub struct SnapshotDeclaration {
     /// Child `programN` directories represented by separate executable snapshots.
     /// They are excluded from this snapshot's logical file tree, not discarded.
     pub program_views: BTreeSet<String>,
+    /// Explicit ancillary root directories preserved below `data/`.
+    pub data_views: BTreeSet<String>,
     pub presentation: BTreeMap<String, String>,
     /// Package-relative exact `control.nacp` (0x4000 bytes), outside the tree.
     pub nacp: Option<String>,
@@ -378,6 +380,7 @@ impl DeclarationManifest {
                     composition: None,
                     exclusions: BTreeSet::new(),
                     program_views: BTreeSet::new(),
+                    data_views: BTreeSet::new(),
                     presentation: BTreeMap::new(),
                     nacp: None,
                     icons: BTreeMap::new(),
@@ -447,6 +450,13 @@ impl DeclarationManifest {
                     }
                     if !s.exclusions.insert(f[2].into()) {
                         return Err(invalid("duplicate exclusion"));
+                    }
+                }
+                ("data-view", 3) => {
+                    if !matches!(f[2], "control" | "logo" | "legal" | "meta")
+                        || !s.data_views.insert(f[2].to_owned())
+                    {
+                        return Err(invalid("invalid or duplicate ancillary data view"));
                     }
                 }
                 ("program-view", 3) => {

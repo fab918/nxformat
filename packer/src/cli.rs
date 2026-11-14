@@ -562,6 +562,48 @@ fn automatic_manifest(
         ..Default::default()
     };
     limits.validate()?;
+    if let Some(plan) = import::plan_program_dump(
+        package,
+        &o.tree_roots.iter().cloned().collect::<Vec<_>>(),
+        &limits,
+        &command_token(o),
+    )? {
+        let expected = match plan.manifest.snapshots[0].platform {
+            Platform::Switch2 => "switch2",
+            _ => "switch1",
+        };
+        if o.platform.as_deref().is_some_and(|p| p != expected) {
+            return Err("selected platform conflicts with extracted Program metadata".into());
+        }
+        let parent = Path::new(output)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        if parent.canonicalize()?.starts_with(package.canonicalize()?) {
+            return Err("output must be outside source package".into());
+        }
+        let measured = walk(package, limits.max_nodes)?;
+        let manifest = format!("{output}.nximport");
+        let assumptions = format!("{output}.assumptions.txt");
+        let mut note = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&assumptions)?;
+        note.write_all(plan.notes.as_bytes())?;
+        note.sync_all()?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&manifest)?;
+        file.write_all(plan.manifest.bytes())?;
+        file.sync_all()?;
+        eprintln!("OBSERVED extracted Program associations from CNMT/NPDM; automatic import requires complete materialized update trees.");
+        return Ok(AutoPlan {
+            manifest,
+            receipt: format!("{output}.nxreceipt"),
+            walk: measured,
+        });
+    }
     let candidates = import::discover(package, &limits)?;
     for root in &o.tree_roots {
         if !candidates

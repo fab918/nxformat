@@ -135,12 +135,12 @@ pub fn discover(package: &Path, limits: &ImportLimits) -> Result<Vec<TreeCandida
             });
             return Ok(());
         }
-        if level >= 3 {
+        if level >= limits.max_depth.min(64) {
             return Ok(());
         }
         for n in names {
             portable_path(&n, limits)?;
-            if level == 0 && !["base", "updates", "dlc"].contains(&n.as_str()) {
+            if level == 0 && !["base", "updates", "dlc", "program"].contains(&n.as_str()) {
                 continue;
             }
             let p = if at.is_empty() {
@@ -761,11 +761,19 @@ pub(crate) fn inspect_pinned_with(
         view.accounted_bytes += scratch;
         for entry in entries {
             let name = entry.name.clone();
-            let path = if logical.is_empty() {
+            let mut path = if logical.is_empty() {
                 name.clone()
             } else {
                 format!("{logical}/{name}")
             };
+            let ancillary = logical.is_empty() && view.declaration.data_views.contains(&name);
+            if ancillary {
+                if !entry.dir {
+                    return Err(invalid("ancillary data view is not a directory"));
+                }
+                path = format!("data/{name}");
+                view.directories.insert("data".to_owned());
+            }
             portable_path(&path, limits)?;
             if !folded.insert(path.to_ascii_lowercase()) {
                 return Err(invalid("case-colliding source paths"));
@@ -775,7 +783,13 @@ pub(crate) fn inspect_pinned_with(
             } else {
                 format!("{source}/{name}")
             };
-            namespace_row(namespace, &path, &entry);
+            let selected = &view.watch.selected;
+            let source_relative = if selected.is_empty() {
+                at.as_str()
+            } else {
+                &at[selected.len() + 1..]
+            };
+            namespace_row(namespace, source_relative, &entry);
             if logical.is_empty() && view.declaration.program_views.contains(&path) {
                 if !entry.dir {
                     return Err(invalid("child Program view is not a directory"));
@@ -804,7 +818,10 @@ pub(crate) fn inspect_pinned_with(
                 excluded.insert(path);
                 continue;
             }
-            if logical.is_empty() && !["exefs", "romfs", "data"].contains(&path.as_str()) {
+            if logical.is_empty()
+                && !ancillary
+                && !["exefs", "romfs", "data"].contains(&path.as_str())
+            {
                 return Err(unsupported(
                     "unknown root entry; declare an explicit artifact exclusion",
                 ));
@@ -887,6 +904,18 @@ pub(crate) fn inspect_pinned_with(
         &mut buffer,
     )?;
     view.watch.expected = namespace.finish();
+    for name in &view.declaration.data_views {
+        let at = if selected.is_empty() {
+            name.clone()
+        } else {
+            format!("{selected}/{name}")
+        };
+        if !root.open_relative(&at)?.metadata()?.is_dir()
+            || !view.directories.contains(&format!("data/{name}"))
+        {
+            return Err(invalid("declared ancillary data view is absent"));
+        }
+    }
     for (path, file) in external {
         cancelled(token)?;
         portable_path(path, limits)?;

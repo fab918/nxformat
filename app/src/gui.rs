@@ -698,6 +698,89 @@ mod tests {
         assert!(!snapshots.iter().any(|s| s.numeric_version == 131072));
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn indexed_dump_discovery_and_gui_conversion_share_native_associations() {
+        use nxformat_packer::{
+            import::{
+                self,
+                structures::NpdmProfile,
+                synthetic::{npdm, nso},
+            },
+            inspect_archive, IntegrityPolicy, ProgramKind, WriterOptions,
+        };
+        use std::fs;
+        const APP: u64 = 0x0100_4530_19aa_8000;
+        const OUNCE: u64 = 0x0400_4530_19aa_8001;
+        let dir =
+            std::env::temp_dir().join(format!("nxconvert-indexed-dump-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let package = dir.join("dump");
+        for (index, id, profile, name) in [
+            (0, APP, NpdmProfile::MetaAcid2048V1, "Legacy"),
+            (1, OUNCE, NpdmProfile::MetaAcid3072V1, "Ounce Edition"),
+        ] {
+            let root = package.join(format!("updates/196608/program/{index}"));
+            for child in ["exefs", "romfs", "control"] {
+                fs::create_dir_all(root.join(child)).unwrap();
+            }
+            fs::write(root.join("exefs/main.npdm"), npdm(id, profile)).unwrap();
+            fs::write(root.join("exefs/main"), nso(0x40 + index, false)).unwrap();
+            fs::write(root.join("romfs/common.bin"), [index; 17]).unwrap();
+            fs::write(
+                root.join("control/control.nacp"),
+                import::synthetic_nup::nacp(&[(0, name)]),
+            )
+            .unwrap();
+        }
+        let mut cnmt = vec![0u8; 0x20 + 0x18 + 2 * 0x38];
+        cnmt[..8].copy_from_slice(&(APP | 0x800).to_le_bytes());
+        cnmt[8..12].copy_from_slice(&196608u32.to_le_bytes());
+        cnmt[12] = 0x81;
+        cnmt[14] = 0x18;
+        cnmt[16] = 2;
+        cnmt[0x20..0x28].copy_from_slice(&APP.to_le_bytes());
+        for i in 0..2 {
+            cnmt[0x38 + i * 0x38 + 0x36] = 1;
+            cnmt[0x38 + i * 0x38 + 0x37] = i as u8;
+        }
+        fs::create_dir_all(package.join("updates/196608/program/0/meta")).unwrap();
+        fs::write(
+            package.join("updates/196608/program/0/meta/shared.cnmt"),
+            cnmt,
+        )
+        .unwrap();
+        let token = super::CancellationToken::default();
+        let selected =
+            super::discovery::scan(vec![package.join("updates/196608/program/1")], &token).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, package);
+        assert_eq!(selected[0].tree_roots, vec!["updates/196608/program/1"]);
+        assert_eq!(selected[0].contents.len(), 1);
+        assert_eq!(selected[0].contents[0].name, "Ounce Edition");
+        let mut app = App {
+            sources: super::discovery::scan(vec![package], &token).unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(app.sources.len(), 1);
+        assert!(app.sources[0].supported, "{}", app.sources[0].issue);
+        assert!(app.sources[0]
+            .contents
+            .iter()
+            .all(|c| c.application == APP && c.kind == "standalone"));
+        let output = app.games().remove(0).output.unwrap();
+        app.convert();
+        let job = app.queue.pop_front().unwrap();
+        super::cli::run_with_display(job.args, None, Some(token), job.display).unwrap();
+        let archive =
+            inspect_archive(output, &WriterOptions::default(), IntegrityPolicy::Strict).unwrap();
+        assert_eq!(archive.applications[0].snapshots.len(), 2);
+        assert!(archive.applications[0]
+            .programs
+            .iter()
+            .any(|p| p.program_id == OUNCE && p.kind == ProgramKind::Primary));
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 fn bytes(size: u64) -> String {
