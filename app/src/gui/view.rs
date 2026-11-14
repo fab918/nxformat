@@ -758,7 +758,7 @@ impl App {
             theme::info(ui, &["After extraction", "Adds a restoration file to the extracted folder. If you later drop that folder into NXConvert, it can recreate the original NX exactly.", "This does not change the NX you already have. Edited files are repacked instead."]);
             ui.add_space(8.0);
             ui.add_enabled(self.restore_recipe, egui::Checkbox::new(&mut self.portable_restore, "Portable restoration"));
-            let space = format!("Only applies to the extracted folder. May need roughly {} of extra space. Off: a smaller restoration file, but exact restoration needs a compatible compressor version.", bytes(archive.size));
+            let space = format!("For this {} NX, allow roughly another {} for the restoration file, on top of the extracted game files. Keeping the original NX uses its existing space too. Off: a smaller restoration file, but exact restoration needs a compatible compressor version.", bytes(archive.size), bytes(archive.size));
             theme::info(ui, &["Recreate the NX later", "When extracting, keep enough original data to recreate this exact NX later, even on another computer. It does not modify the existing NX.", &space]);
         });
         if archive.snapshots.iter().any(|s| s.native) {
