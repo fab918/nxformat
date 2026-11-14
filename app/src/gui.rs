@@ -152,6 +152,30 @@ enum Message {
     Done(Result<(), String>),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LogLevel {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+fn log_level(line: &str) -> LogLevel {
+    let text = line.trim_start().to_ascii_uppercase();
+    if text.starts_with("ERROR:") || text.starts_with("ERROR ") {
+        LogLevel::Error
+    } else if text.starts_with("WARNING") || text.starts_with("WARN:") {
+        LogLevel::Warning
+    } else if text.starts_with("PASS ")
+        || text.starts_with("SAVED ")
+        || text.starts_with("REBUILT ")
+    {
+        LogLevel::Success
+    } else {
+        LogLevel::Info
+    }
+}
+
 struct Running {
     job: Job,
     rx: mpsc::Receiver<Message>,
@@ -296,6 +320,57 @@ fn title_from_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn command_failure_keeps_its_cause_without_marking_stderr_diagnostics_as_errors() {
+        use super::*;
+        let (tx, rx) = mpsc::channel();
+        tx.send(Message::Line(true, "BUDGETS max_nodes=100000".into()))
+            .unwrap();
+        tx.send(Message::Line(
+            true,
+            "WARNING: restoration data could not be created".into(),
+        ))
+        .unwrap();
+        tx.send(Message::Done(Err(
+            "source file is truncated: romfs/game.bin".into(),
+        )))
+        .unwrap();
+        let mut app = App {
+            running: Some(Running {
+                job: Job {
+                    label: "Converting game".into(),
+                    args: vec![],
+                    purpose: Purpose::Pack,
+                    display: None,
+                    metadata: None,
+                    source_bytes: None,
+                },
+                rx,
+                cancel: CancellationToken::default(),
+                total: 0,
+                done: 0,
+                lines: vec![],
+                started: Instant::now(),
+            }),
+            ..Default::default()
+        };
+        app.poll(&egui::Context::default());
+        assert!(!app.busy());
+        assert_eq!(log_level(&app.log[0]), LogLevel::Info);
+        assert_eq!(log_level(&app.log[1]), LogLevel::Warning);
+        assert_eq!(
+            app.log
+                .iter()
+                .filter(|line| log_level(line) == LogLevel::Error)
+                .count(),
+            1
+        );
+        assert!(app
+            .status
+            .contains("source file is truncated: romfs/game.bin"));
+        assert_eq!(log_level(&app.status), LogLevel::Error);
+    }
+
     use super::{title_from_path, App, Content, Source};
     use std::path::Path;
 
@@ -1413,7 +1488,7 @@ impl App {
                         archive.metadata = metadata;
                     }
                 }
-                Message::Line(error, line) => {
+                Message::Line(_stderr, line) => {
                     if let Some(value) = line.strip_prefix("@TOTAL\t") {
                         // Each @TOTAL adds to what the command expects;
                         // @PROGRESS counts from the start of the command.
@@ -1423,8 +1498,9 @@ impl App {
                     } else if line.starts_with('@') {
                         running.lines.push(line);
                     } else if !line.is_empty() {
-                        self.log
-                            .push(if error { format!("! {line}") } else { line });
+                        // stderr also carries ordinary progress/diagnostics.
+                        // Only explicit messages or a failed command are errors.
+                        self.log.push(line);
                     }
                 }
                 Message::Done(result) => finished = Some(result),
@@ -1461,7 +1537,7 @@ impl App {
                     .push(format!("{}: {note}", file_name(Path::new(path)))),
                 ["ISSUE", path, issue, ..] if running.job.purpose != Purpose::Scan => self
                     .log
-                    .push(format!("! {}: {issue}", file_name(Path::new(path)))),
+                    .push(format!("ERROR: {}: {issue}", file_name(Path::new(path)))),
                 ["SKIPPED", path, _, _, why, ..] => self
                     .log
                     .push(format!("{}: {why}", file_name(Path::new(path)))),
@@ -1479,8 +1555,9 @@ impl App {
                 format!("{}: cancelled, nothing was changed", running.job.label)
             }
             (Err(e), _) => {
-                self.log.push(format!("! {}: {e}", running.job.label));
-                format!("{}: failed", running.job.label)
+                let error = format!("ERROR: {}: {e}", running.job.label);
+                self.log.push(error.clone());
+                error
             }
             (Ok(()), _) => {
                 let output = running.job.args.iter().rev().find(|a| a.ends_with(".nx"));
@@ -1575,7 +1652,7 @@ impl App {
             }
         }
         if let Some(error) = error {
-            self.log.push(format!("! {error}"));
+            self.log.push(format!("ERROR: {error}"));
         }
     }
 
