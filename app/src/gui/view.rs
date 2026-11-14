@@ -704,14 +704,14 @@ impl App {
                 }
             }
         });
-        ui.checkbox(&mut self.restore_recipe, "Keep restoration recipe after extraction")
-            .on_hover_text("Create .nxrestore.zst after extracting. If recipe creation fails, the extracted files are kept and a warning is shown.");
-        ui.add_enabled(self.restore_recipe, egui::Checkbox::new(&mut self.portable_restore, "Portable restoration (independent of encoder version)"))
-            .on_hover_text("Preserve original compressed blocks instead of recompressing them. The recipe may approach the original NX size.");
-        if self.restore_recipe {
-            ui.label(theme::muted(format!("Allow roughly {} of additional space for the recipe, besides extracted files. Compact mode may be much smaller but needs a compatible Zstd encoder for exact restoration.", bytes(archive.size))));
-        }
-        ui.label(theme::muted("The optional compressed .nxrestore.zst recipe in the folder lets you drop the whole folder back to restore the exact NX and its original package recipes. Edited files are repacked at the same relative paths; original-package reconstruction is then unavailable."));
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.restore_recipe, "Keep restoration data");
+            theme::info(ui, &["Restoration data", "Keep a file with the extracted folder to recreate the exact NX later. Drop the whole folder into NXConvert to restore it.", "Edited files are repacked instead. If restoration data cannot be created, extracted files are kept."]);
+            ui.add_space(8.0);
+            ui.add_enabled(self.restore_recipe, egui::Checkbox::new(&mut self.portable_restore, "Portable restoration"));
+            let space = format!("May need roughly {} of extra space, besides extracted files. Off: a smaller file, but restoration needs a compatible compressor version.", bytes(archive.size));
+            theme::info(ui, &["Portable restoration", "Restore the exact NX even with a different compressor version, for example on another computer.", &space]);
+        });
         if archive.snapshots.iter().any(|s| s.native) {
             ui.label("Native NCA content: extraction reads ExeFS and RomFS and verifies IVFC integrity. BKTR updates require their exact base. Unsupported layouts or missing bases stop extraction and remove its output.");
             ui.label(theme::muted("Native extraction supports decrypted IVFC content and internal RAW/zero/LZ4 compression. Advanced bucket trees, unknown compression codecs and sparse RomFS are not supported. Memory limits may reject large metadata tables."));
@@ -735,15 +735,10 @@ impl App {
             )));
         }
         ui.add_space(16.0);
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.scope(|ui| {
             ui.strong("Archive contents");
             ui.add_space(6.0);
             for snapshot in &archive.snapshots {
-                ui.label(theme::muted(if snapshot.native {
-                    "Native NCA snapshot · ExeFS / RomFS"
-                } else {
-                    "Extracted tree · stored files"
-                }));
                 theme::card().inner_margin(14).show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.horizontal(|ui| {
@@ -769,11 +764,16 @@ impl App {
                             ));
                             ui.label(
                                 theme::muted(format!(
-                                    "{:016X}",
+                                    "{:016X} · {}",
                                     if snapshot.kind == "base" {
                                         snapshot.application
                                     } else {
                                         snapshot.title
+                                    },
+                                    if snapshot.native {
+                                        "Native NCA"
+                                    } else {
+                                        "Extracted files"
                                     }
                                 ))
                                 .small(),
@@ -1000,7 +1000,10 @@ impl eframe::App for App {
                     if busy {
                         self.progress_view(ui);
                     } else if self.archive.is_some() {
-                        self.archive_view(ui);
+                        egui::ScrollArea::vertical()
+                            .id_salt("archive-page")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.archive_view(ui));
                     } else if self.sources.is_empty() {
                         self.empty(ui, false);
                     } else {
