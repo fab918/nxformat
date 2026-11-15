@@ -80,7 +80,8 @@ NX reads independent blocks and reuses integrity checks for immutable data.
 This keeps small reads fast without caching whole decoded files.
 
 The comparison below uses **native C++ readers**, the same compiler, Zstd library
-and mapped input provider. **NX** enables verification reuse and the explicit
+and mapped input provider. NUP v1 uses [Eglantine's C++ NUP reader](https://github.com/fab918/Eglantine/blob/6da821f83f402cb288f6d078b9e3c21955e0b54f/src/core/file_sys/nup_container.cpp),
+compiled without modifying its source. **NX** enables verification reuse and the explicit
 selective-batching prototype.
 Each reader receives the same **16 already-pending requests**, with no queue-fill
 wait. Values are medians of five runs on the same real archive.
