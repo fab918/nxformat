@@ -114,6 +114,12 @@ of them, takes **82.6 ms for NUP / 0.76 ms for NX** for eight initial 4 KiB read
 On repetition both serve those reads in microseconds. This isolates the benefit
 of independent blocks on cache misses; it is not an overall-game speedup.
 
+![Targeted compressed-file access: initial and repeated reads](docs/benchmarks/low-memory-reader-cache/real-compressed-access.png)
+
+*Left panel, initial access: 82.61 / 0.7568 ≈ **109×** for these eight reads.
+Real archive bytes, generated access pattern targeting compressed files; this
+is not a captured emulator loading trace. The OS cache was not flushed.*
+
 The [full native benchmark report](docs/benchmarks/low-memory-reader-cache/README.md)
 includes seven access patterns, RAW/mixed/real inputs, 0/8/32 MiB budgets,
 original-reader and input-provider controls, repeated-run ranges, temporary disk
