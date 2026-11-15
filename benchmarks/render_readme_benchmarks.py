@@ -35,7 +35,11 @@ labels=['Random 4 KiB','Sequential 256 KiB','Interleaved 64 KiB']
 fig=plt.figure(figsize=(13,7.5));header(fig,'Fast repeated reads. A smaller memory footprint.','Real archive A  ·  32 MiB cache budget  ·  Repeated access patterns')
 for rect,field,title,unit in [([.19,.27,.31,.46],'p99_us','Read latency · P99','Microseconds · lower is better'),([.66,.27,.28,.46],'peak_resident_mib','Peak resident memory','MiB · lower is better')]:
  ax=fig.add_axes(rect);bars(ax,labels if field=='p99_us' else ['','',''],[round(get(s,'nup_mapped',field),1) for s in scenarios],[round(get(s,'nx_verify_mapped',field),1) for s in scenarios],unit);ax.set_title(title,loc='left',fontsize=14,fontweight='bold',pad=18)
-fig.text(.055,.115,'32% less resident memory on the random-read trace: 59 MiB vs 87 MiB.',fontsize=13,fontweight='bold')
+ if field=='p99_us':
+  ratio=get('interleaved_8files','nup_mapped',field)/get('interleaved_8files','nx_verify_mapped',field)
+  ax.text(3.2,2,f'NX: ~{ratio:.1f}× faster (P99)',va='center',color=NX,fontsize=10,fontweight='bold')
+ratio=get('random_4096','nup_mapped','peak_resident_mib')/get('random_4096','nx_verify_mapped','peak_resident_mib')
+fig.text(.055,.115,f'Random reads: NX uses 32% less resident memory. NUP v1 uses ~{ratio:.1f}× as much.',fontsize=13,fontweight='bold')
 fig.text(.055,.065,'Native C++ readers · same mapped input · median of 3 runs · OS cache not flushed.',fontsize=10,color=MUTED)
 fig.text(.055,.035,'Generated access patterns on real content. NUP v1 also wins reads shown here. These are not gameplay measurements.',fontsize=9,color=MUTED)
 fig.savefig(OUT/'readme-repeated-reads.png',dpi=170);plt.close(fig)
@@ -52,7 +56,11 @@ for i,(s,p,title,note) in enumerate(cases):
   v=x if t.get_fontweight()=='bold' else n
   t.set_text(f'{v:.3f}' if v<1 else f'{v:.2f}')
  ax.set_title(title,loc='left',fontsize=13,fontweight='bold',pad=15)
- fig.text(left,bottom+.21,note,fontsize=11,color=NX if i!=2 else MUTED,fontweight='bold')
+ winner='NX' if n>x else 'NUP v1'
+ ratio=max(n,x)/min(n,x)
+ value=f'{ratio:.0f}' if ratio>=100 else f'{ratio:.1f}'
+ note=f'{winner}: ~{value}× faster' + (' on these initial reads' if i==0 else ' on this trace')
+ fig.text(left,bottom+.21,note,fontsize=11,color=NX if winner=='NX' else NUP,fontweight='bold')
 fig.text(.055,.10,'First access: NX decodes small blocks; NUP v1 decodes whole files and caches them.',fontsize=12,fontweight='bold')
 fig.text(.055,.06,'Eight largest compressed members · generated traces · median of 3 runs · OS cache not flushed.',fontsize=10,color=MUTED)
 fig.text(.055,.03,'Each panel starts at zero and uses its own scale. The 109× result is a targeted case, not an overall-game speedup.',fontsize=9,color=MUTED)
