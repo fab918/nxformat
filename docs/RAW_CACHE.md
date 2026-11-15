@@ -58,7 +58,7 @@ the immutable-source contract, as are external/device-level modifications.
 Mapped pages can still consume resident physical RAM and page tables. Private
 commitment and resident working set measure different costs; neither is total
 system RAM. See [Microsoft's mapping documentation](https://learn.microsoft.com/en-us/windows/win32/memory/file-mapping)
-and the [measured resident/private results](benchmarks/low-memory-reader-cache/README.md).
+and the [measured resident/private results](../README.md#performance-nx-vs-nup).
 This optimization removes repeated CRC work and private RAW duplicates; it does
 not guarantee lower resident memory than every other reader on every workload.
 
@@ -73,4 +73,4 @@ tests continue to exercise the default fallback path.
 
 ## Optional scheduling hint
 
-`Archive::range_verification_cached(file, offset, length)` reports whether all slices currently have reusable RAW verification or verified Zstd cache entries, without source IO or data retention. It never replaces normal read checks; eviction may change the answer immediately. Batching callers can use it to avoid extra copies for already-cheap large reads. [Measured selector](benchmarks/low-memory-reader-cache/VERIFIED_BATCH.md).
+`Archive::range_verification_cached(file, offset, length)` reports whether all slices currently have reusable RAW verification or verified Zstd cache entries, without source IO or data retention. It never replaces normal read checks; eviction may change the answer immediately. Batching callers can use it to avoid extra copies for already-cheap large reads. [Reproducible selector](../benchmarks/native_three_way_batch.cpp).

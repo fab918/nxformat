@@ -85,7 +85,7 @@ selective-batching prototype.
 Each reader receives the same **16 already-pending requests**, with no queue-fill
 wait. Values are medians of five runs on the same real archive.
 
-![Read performance: NUP v1 and NX](docs/benchmarks/three-way-reader-2026-11-15/pending-batch-comparison.png)
+![Read performance: NUP v1 and NX](docs/benchmarks/native-read-performance.png)
 
 **Read time in milliseconds — lower is better.**
 
@@ -101,7 +101,7 @@ The targeted first-access case is about **114× faster than NUP v1**. It include
 storage-policy differences: five requested NX starting blocks are RAW and three
 are Zstd, while all eight NUP files are compressed.
 
-![Memory usage: NUP v1 and NX](docs/benchmarks/three-way-reader-2026-11-15/pending-batch-memory.png)
+![Memory usage: NUP v1 and NX](docs/benchmarks/native-read-memory.png)
 
 **Peak resident / private memory in MiB — same workloads, lower is better.**
 
@@ -121,10 +121,10 @@ output buffers, metadata and decoder scratch; private commitment is not physical
 RAM, and resident memory includes mapped file pages. Selective batching requires
 an integration with pending requests; it is not automatically used by every reader.
 
-[Full results, direct-read controls, run ranges and method](docs/benchmarks/three-way-reader-2026-11-15/README.md)
-include 1,894 process runs, byte checks, RAW/mixed controls, other cache budgets,
-private/resident memory and NUP temporary-file usage.
-
+[Method and reproduction tools](benchmarks/README.md#native-nup-v1-comparison)
+cover generated RAW/mixed controls, optional local real inputs, cache budgets,
+resident/private memory and temporary-file usage. Detailed run outputs stay local
+under the ignored `results/` directory.
 
 ## Developer integration
 

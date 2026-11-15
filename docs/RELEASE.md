@@ -4,8 +4,8 @@
   with bounded bitmap metadata and no RAW payload copies. Add optional bounded
   Windows file mapping with leased views. Existing integrations retain defaults.
 - Replace the Python-NUP versus C++-NX headline benchmark with native C++ reader
-  comparisons, representative access patterns, private/resident memory, complete
-  measurements and reproducible synthetic workloads. Include NUP-favorable cases.
+  comparisons, representative access patterns, private/resident memory and
+  reproducible synthetic workloads. Include NUP-favorable cases.
 
 # NXFormat 1.0.4
 
