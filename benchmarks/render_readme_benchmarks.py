@@ -46,7 +46,7 @@ fig.savefig(OUT/'readme-repeated-reads.png',dpi=170);plt.close(fig)
 
 r=json.loads((OUT/'real-compressed-results.json').read_text())
 def measure(s,m,p):return statistics.median(x['phases'][p]['total_ms'] for x in r['records'] if (x['scenario'],x['budget_mib'],x['reader'])==(s,128,m))
-fig=plt.figure(figsize=(13,9));header(fig,'Read the block you need. Skip the rest.','Targeted compressed-file test  ·  Real archive A  ·  128 MiB cache fits all eight files')
+fig=plt.figure(figsize=(13,9));header(fig,'Read the block you need. Skip the rest.','Real archive A  ·  Eight NUP-compressed files  ·  128 MiB cache fits all eight')
 cases=[('first_touch_4k',0,'8 first accesses · 4 KiB','~109× faster for these initial reads'),('scatter_4k',0,'512 scattered reads · first pass','~6.8× faster on this trace'),('scatter_4k',1,'512 scattered reads · repeated','NUP v1 is faster once files are cached'),('sequential_256k',0,'Sequential · first 32 MiB','~1.9× faster on this trace')]
 for i,(s,p,title,note) in enumerate(cases):
  col=i%2;row=i//2;left=.12+col*.46;bottom=.54-row*.30
@@ -61,7 +61,7 @@ for i,(s,p,title,note) in enumerate(cases):
  value=f'{ratio:.0f}' if ratio>=100 else f'{ratio:.1f}'
  note=f'{winner}: ~{value}× faster' + (' on these initial reads' if i==0 else ' on this trace')
  fig.text(left,bottom+.21,note,fontsize=11,color=NX if winner=='NX' else NUP,fontweight='bold')
-fig.text(.055,.10,'First access: NX decodes small blocks; NUP v1 decodes whole files and caches them.',fontsize=12,fontweight='bold')
+fig.text(.055,.10,'NX reads RAW or Zstd blocks; NUP v1 decodes whole compressed files and caches them.',fontsize=12,fontweight='bold')
 fig.text(.055,.06,'Eight largest compressed members · generated traces · median of 3 runs · OS cache not flushed.',fontsize=10,color=MUTED)
 fig.text(.055,.03,'Each panel starts at zero and uses its own scale. The 109× result is a targeted case, not an overall-game speedup.',fontsize=9,color=MUTED)
 fig.savefig(OUT/'readme-first-access.png',dpi=170);plt.close(fig)

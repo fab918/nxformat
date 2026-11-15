@@ -115,3 +115,7 @@ its benchmark binary is not included in NXConvert release packages.
 ## Small-read optimization experiments
 
 [Two rejected prototypes and longer A/B measurements](SMALL_READ_EXPERIMENTS.md) document attempts to reduce cached-read overhead without extra payload caching. The production reader is unchanged because no consistent gain without regressions was established.
+
+## Batching and prefetch
+
+[840 process runs, initial and replay traces](BATCH_PREFETCH.md) test bounded merging of pending reads and two sequential prediction thresholds, including CPU, RAM and wasted decode work. No default reader change is applied.

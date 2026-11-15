@@ -31,9 +31,15 @@ The eight files range from 8.79 to 17.48 MiB, totaling 107.50 MiB decoded. Thus 
 
 ![Initial and repeated compressed-file reads](real-compressed-access.png)
 
-NX avoids decoding unrelated parts of each file on first access. With 128 MiB,
-NUP pays whole-file decompression once and then serves cached bytes. Its warm
-scatter and sequential traces beat NX; those results remain in the table.
+NX avoids decoding unrelated parts when reading compressed blocks, and can
+read RAW blocks directly. A subsequent codec inspection found **five RAW and
+three Zstd starting blocks** for these eight initial requests in NX, while all
+eight source members are Zstd-compressed in NUP. The ~109x result therefore
+includes the tools' compression-policy choices; it does not isolate independent
+block decompression alone. Both original archives are unchanged.
+
+With 128 MiB, NUP pays whole-file decompression once and then serves cached bytes.
+Its warm scatter and sequential traces beat NX; those results remain in the table.
 With 32 MiB, cycling through these files repeatedly evicts NUP decoded files,
 whereas NX retains the accessed blocks. This is a deliberate working-set stress
 case, not evidence that every game behaves this way.

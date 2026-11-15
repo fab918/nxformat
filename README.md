@@ -94,8 +94,9 @@ warm-cache reads are fast with both readers; NUP v1 also wins some cases.
 The second test targets the eight largest compressed files, with **128 MiB of
 cache so all eight fit in NUP v1**. Eight initial 4 KiB reads take **82.61 ms with
 NUP v1 and 0.76 ms with NX**, about **109× faster in this specific case**. Once
-files are cached, the gap narrows or NUP v1 wins. This illustrates the benefit
-of independent blocks, not an overall-game speedup.
+files are cached, the gap narrows or NUP v1 wins. This compares block access
+and storage policies: of the eight requested starting blocks, NX stores five RAW
+and three with Zstd. It is not an overall-game speedup.
 
 These are generated access patterns on real content, not recorded gameplay.
 The OS cache was not flushed. Resident memory includes mapped file pages; it
