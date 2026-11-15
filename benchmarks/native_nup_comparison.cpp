@@ -42,7 +42,7 @@ public:
     bool immutable_reads() const noexcept override { return true; }
     nx::ImmutableReadView immutable_view(std::uint64_t offset,std::size_t n) const noexcept override {
         if(!views)return {};
-        auto view=views->pin(offset,n);return {view.data,std::move(view.owner)};
+        auto view=views->pin(offset,n);return {view.data,std::move(view.owner),&nx::detail::MappedViews::guarded_access,&nx::detail::MappedViews::copy};
     }
 #endif
     std::string GetName() const override { return "benchmark"; }
@@ -56,7 +56,7 @@ public:
     std::size_t Write(const u8*, std::size_t, std::size_t) override { return 0; }
     std::size_t Read(u8* data, std::size_t n, std::size_t offset) const override {
         if (offset>length || n>length-offset) return 0;
-        if (views) { auto view=views->pin(offset,n); if(view.data) { std::memcpy(data,view.data,n); return n; } }
+        if (views) { auto view=views->pin(offset,n); if(view.data) { return nx::detail::MappedViews::copy(view.data,data,n) ? n : 0; } }
         if (_fseeki64(file, static_cast<long long>(offset), SEEK_SET)) return 0;
         return std::fread(data, 1, n, file);
     }

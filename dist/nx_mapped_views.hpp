@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <mutex>
 
@@ -40,12 +41,46 @@ class MappedViews {
     mutable std::array<bool,64> referenced_{};
     mutable std::size_t cursor_=0;
 public:
+    using ReadOperation = void (*)(void*);
+#if defined(_MSC_VER)
+    static constexpr bool fault_guard_supported=true;
+#else
+    static constexpr bool fault_guard_supported=false;
+#endif
+    // Leaf SEH frames intentionally own no C++ objects. Owners and operation
+    // state stay in the caller so an asynchronous IO fault cannot skip RAII.
+    static int mapped_fault_filter(const EXCEPTION_POINTERS* fault,const std::uint8_t* base,std::size_t length) noexcept {
+        const auto* record=fault->ExceptionRecord;
+        if (record->ExceptionCode!=EXCEPTION_IN_PAGE_ERROR || record->NumberParameters<3 ||
+            record->ExceptionInformation[0]!=0) return EXCEPTION_CONTINUE_SEARCH;
+        const auto address=static_cast<std::uintptr_t>(record->ExceptionInformation[1]);
+        const auto begin=reinterpret_cast<std::uintptr_t>(base);
+        return address>=begin && address-begin<length ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH;
+    }
+    static bool guarded_access(const std::uint8_t* base,std::size_t length,ReadOperation operation,void* context) {
+#if defined(_MSC_VER)
+        __try { operation(context); return true; }
+        __except(mapped_fault_filter(GetExceptionInformation(),base,length)) { return false; }
+#else
+        (void)base; (void)length; (void)operation; (void)context;
+        return false; // never expose fallible views without a compiler SEH guard
+#endif
+    }
+    static bool copy(const std::uint8_t* source,std::uint8_t* output,std::size_t length) {
+#if defined(_MSC_VER)
+        __try { std::memcpy(output,source,length); return true; }
+        __except(mapped_fault_filter(GetExceptionInformation(),source,length)) { return false; }
+#else
+        (void)source; (void)output; (void)length;
+        return false;
+#endif
+    }
     MappedViews()=default;
     MappedViews(const MappedViews&)=delete;
     MappedViews& operator=(const MappedViews&)=delete;
     ~MappedViews()=default;
     bool open(HANDLE pinned_file,std::uint64_t size) {
-        if(section_)return false;
+        if(!fault_guard_supported || section_)return false;
         size_=size;
         if(!size)return true;
         auto section=std::make_shared<Section>();

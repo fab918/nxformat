@@ -2,7 +2,8 @@
 
 - Add opt-in verification-only RAW caching for immutable C++ reader sources,
   with bounded bitmap metadata and no RAW payload copies. Add optional bounded
-  Windows file mapping with leased views. Existing integrations retain defaults.
+  Windows file mapping with leased views and SEH-protected CRC/copy operations
+  that report mapped IO faults as read errors. Existing integrations retain defaults.
 - Replace the Python-NUP versus C++-NX headline benchmark with native C++ reader
   comparisons, representative access patterns, private/resident memory and
   reproducible synthetic workloads. Include NUP-favorable cases.

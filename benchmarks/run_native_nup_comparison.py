@@ -147,7 +147,7 @@ def main():
                                        output=result.stdout.strip(),
                                        metrics={k:int(v) for k,v in re.findall(r'(\w+)=(\d+)',result.stdout)}))
                 print(label, budget, repetition, result.stdout.strip(), flush=True)
-    provenance['adapter_sha256'] = digest(adapter or ROOT/'benchmarks/native_nup_comparison.cpp')
+    provenance['adapter_sha256'] = digest(ROOT/'benchmarks/native_nup_comparison.cpp')
     provenance['raw_verification'] = (not args.original_reader and args.reader_mode != 'nup' and
                                       'NX_BENCH_RAW_VERIFY' in os.environ)
     provenance['reader_mode'] = args.reader_mode

@@ -268,6 +268,13 @@ struct PartialRead : Status {
 struct ImmutableReadView {
     const std::uint8_t* data=nullptr;
     std::shared_ptr<const void> owner;
+    using ReadOperation = void (*)(void*);
+    using Guard = bool (*)(const std::uint8_t*, std::size_t, ReadOperation, void*);
+    // Fallible file mappings supply a guard; ordinary stable RAM leaves it null.
+    Guard guard=nullptr;
+    using Copy = bool (*)(const std::uint8_t*, std::uint8_t*, std::size_t);
+    // Optional leaf copy guard avoids the generic callback on verified hits.
+    Copy guarded_copy=nullptr;
 };
 struct RandomAccessSource {
     virtual ~RandomAccessSource() = default;
@@ -1169,9 +1176,11 @@ private:
     // `verified`, when given, receives how many leading bytes passed before a mismatch.
     Status verify_slices(const Block& block, const std::uint8_t* bytes, std::size_t first_slice, std::size_t size,
                          std::size_t* verified = nullptr) const;
+    enum class Sink { caller, staging, partial };
     void remember_raw_verification(const Block& block, std::size_t first_slice, std::size_t size) const;
+    void forget_raw_verification(const Block& block, std::size_t first_slice, std::size_t size) const;
     Status read_immutable_raw(const Block& block, std::size_t offset, std::size_t wanted,
-                              std::uint8_t* output, std::size_t& copied, ReadBuffer& stored, bool partial, const ImmutableReadView& pinned) const;
+                              std::uint8_t* output, std::size_t& copied, ReadBuffer& stored, Sink sink, const ImmutableReadView& pinned) const;
     Status read_cached_slice(std::uint32_t id, std::size_t offset, std::size_t wanted,
                              std::uint8_t* output, std::size_t& copied, ReadBuffer& stored) const;
     Status load_block(std::uint32_t id, bool verify, detail::LogicalBytes& logical,
@@ -1187,7 +1196,6 @@ private:
     // piece (single-block read_file). `staging`: private memory, so RAW
     // slices may be read and verified in place. `partial`: the caller's
     // buffer, committed block by block, with a RAW slice-prefix on mismatch.
-    enum class Sink { caller, staging, partial };
     struct RawPiece { Block block; std::size_t in_chunk = 0, amount = 0, begin = 0, span = 0; };
     static constexpr std::size_t max_raw_run = 64;
     static constexpr std::size_t raw_run_bytes = 1024 * 1024;
@@ -2186,7 +2194,7 @@ inline Status Archive::read_range(std::uint32_t file_id, std::uint64_t offset, s
                 // twice (which would serialize a second mapping lookup).
                 if (pinned.data || amount==length-done) {
                     std::size_t copied=0;
-                    st=read_immutable_raw(block,in_chunk,length-done,target,copied,stored,sink==Sink::partial,pinned);
+                    st=read_immutable_raw(block,in_chunk,length-done,target,copied,stored,sink,pinned);
                     done+=copied;
                     if (!st) return st;
                     continue;
@@ -2402,10 +2410,21 @@ inline void Archive::remember_raw_verification(const Block& block, std::size_t f
     }
 }
 
+inline void Archive::forget_raw_verification(const Block& block, std::size_t first_slice, std::size_t size) const {
+    auto index=std::size_t(block.first_check)+first_slice;
+    auto remaining=(size+check_size-1)/check_size;
+    while (remaining) {
+        const auto bit=index%64, n=std::min<std::size_t>(remaining,64-bit);
+        const auto mask=(n==64 ? ~0ull : ((1ull<<n)-1))<<bit;
+        raw_verified_[index/64].fetch_and(~mask,std::memory_order_release);
+        index+=n; remaining-=n;
+    }
+}
+
 // Cache verification state, never RAW payload. This is safe only for sources
 // which pin their bytes immutable; all other adapters retain normal verification.
 inline Status Archive::read_immutable_raw(const Block& block, std::size_t offset, std::size_t wanted,
-                                         std::uint8_t* output, std::size_t& copied, ReadBuffer& stored, bool partial, const ImmutableReadView& pinned) const {
+                                         std::uint8_t* output, std::size_t& copied, ReadBuffer& stored, Sink sink, const ImmutableReadView& pinned) const {
     copied=0;
     if (offset>=block.logical) return fail(ErrorCode::format,"RAW offset outside block");
     const auto amount=std::min<std::size_t>(wanted,block.logical-offset);
@@ -2427,7 +2446,71 @@ inline Status Archive::read_immutable_raw(const Block& block, std::size_t offset
         return complete;
     };
     const bool verified=visit_words();
+    const bool partial=sink==Sink::partial;
     const auto* view=pinned.data;
+    if (view && pinned.guard) {
+        // Keep all RAII state outside the SEH callback. Atomic single-block
+        // output is staged: a mapping can fault during copying after its CRC.
+        const bool atomic_output=sink==Sink::caller;
+        if (atomic_output) stored.reserve(amount);
+        if (verified) {
+            auto status=check_cancelled(); if (!status) return status;
+            struct Copy { const std::uint8_t* source; std::uint8_t* target; std::size_t length; };
+            Copy copy{view+offset-begin,atomic_output?stored.bytes.get():output,amount};
+            const auto operation=[](void* context) {
+                const auto& c=*static_cast<const Copy*>(context);
+                std::memcpy(c.target,c.source,c.length);
+            };
+            const bool complete=pinned.guarded_copy
+                ? pinned.guarded_copy(copy.source,copy.target,copy.length)
+                : pinned.guard(view,end-begin,operation,&copy);
+            if (!complete) {
+                forget_raw_verification(block,first,end-begin);
+                if (partial) std::memset(output,0,amount);
+                return fail(ErrorCode::io,"mapped RAW read failed");
+            }
+            if (atomic_output) std::memcpy(output,stored.bytes.get(),amount);
+            copied=amount;
+            return ok_status();
+        }
+        struct Access {
+            const Archive* archive; const Block* block;
+            const std::uint8_t* bytes; std::uint8_t* target;
+            std::size_t first, span, relative, amount, good=0, copied=0;
+            bool verified, partial;
+            Status status;
+        } access{this,&block,view,atomic_output?stored.bytes.get():output,
+                 first,end-begin,offset-begin,amount,0,0,verified,partial,ok_status()};
+        const auto operation=[](void* context) {
+            auto& a=*static_cast<Access*>(context);
+            if (!a.verified) {
+                a.status=a.archive->verify_slices(*a.block,a.bytes,a.first,a.span,a.partial?&a.good:nullptr);
+                if (!a.status) {
+                    if (a.partial && a.good>a.relative) {
+                        a.copied=std::min(a.amount,a.good-a.relative);
+                        std::memcpy(a.target,a.bytes+a.relative,a.copied);
+                    }
+                    return;
+                }
+            }
+            a.status=a.archive->check_cancelled(); if (!a.status) return;
+            std::memcpy(a.target,a.bytes+a.relative,a.amount);
+            a.copied=a.amount;
+        };
+        if (!pinned.guard(view,end-begin,operation,&access)) {
+            forget_raw_verification(block,first,end-begin);
+            // Partial reads may have received bytes before a page fault. Scrub
+            // this attempted block, without touching previously committed data.
+            if (partial) std::memset(output,0,amount);
+            return fail(ErrorCode::io,"mapped RAW read failed");
+        }
+        copied=access.copied;
+        if (access.status) {
+            if (!verified) remember_raw_verification(block,first,end-begin);
+            if (atomic_output) std::memcpy(output,stored.bytes.get(),amount);
+        }
+        return std::move(access.status);
+    }
     const std::uint8_t* bytes=view;
     std::size_t origin=begin;
     if (!view) {

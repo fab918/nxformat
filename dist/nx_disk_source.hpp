@@ -34,6 +34,8 @@ private:
         try {
             auto source=std::shared_ptr<DiskSource>(new DiskSource);
 #if defined(_WIN32)
+            if (mapped && !detail::MappedViews::fault_guard_supported)
+                return Result<std::shared_ptr<DiskSource>>::failure(ErrorCode::unsupported,"mapped source requires compiler SEH support; use open()");
             source->file_=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_DELETE,nullptr,
                                      OPEN_EXISTING,FILE_FLAG_OVERLAPPED|FILE_FLAG_RANDOM_ACCESS,nullptr);
             LARGE_INTEGER size{};
@@ -84,7 +86,7 @@ public:
 #if defined(_WIN32)
         if (!views_) return {};
         auto view=views_->pin(offset,length);
-        return {view.data,std::move(view.owner)};
+        return {view.data,std::move(view.owner),&detail::MappedViews::guarded_access,&detail::MappedViews::copy};
 #else
         (void)offset; (void)length; return {};
 #endif
@@ -96,7 +98,7 @@ public:
         ++calls_;
 #if defined(_WIN32)
         if (!length) return true;
-        if (views_) { auto view=views_->pin(offset,length); if (view.data) { std::memcpy(output,view.data,length); bytes_+=length; return true; } }
+        if (views_) { auto view=views_->pin(offset,length); if (view.data) { if (!detail::MappedViews::copy(view.data,output,length)) return false; bytes_+=length; return true; } }
         // Source-owned reuse, not TLS: caller threads may outlive the DLL that
         // implements this reader. Overflow events are local to one completed IO.
         EventLease lease(*this);
