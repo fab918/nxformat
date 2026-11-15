@@ -1,4 +1,11 @@
-# Unreleased
+# NXFormat 1.0.4
+
+NXFormat 1.0.4 improves Switch 2 Edition and multi-Program imports, handles
+incomplete sparse native bases with their matching updates, and makes extracted
+games reversible with compact restoration recipes. The NX wire versions remain
+`(0,2)` and `(0,3)`; existing reader APIs and the C ABI remain compatible.
+
+## What is new in 1.0.4
 
 - Add opt-in verification-only RAW caching for immutable C++ reader sources,
   with bounded bitmap metadata and no RAW payload copies. Add optional bounded
@@ -7,16 +14,18 @@
 - Replace the Python-NUP versus C++-NX headline benchmark with native C++ reader
   comparisons, representative access patterns, private/resident memory and
   reproducible synthetic workloads. Include NUP-favorable cases.
-
-# NXFormat 1.0.4
-
-NXFormat 1.0.4 improves Switch 2 Edition and multi-Program imports, handles
-incomplete sparse native bases with their matching updates, and makes extracted
-games reversible with compact restoration recipes. The NX wire versions remain
-`(0,2)` and `(0,3)`; existing C/C++ readers and the C ABI are unchanged.
-
-## What is new in 1.0.4
-
+- Expose allocation-free program fingerprints for an explicitly selected
+  executable snapshot. Add an optional archive-wide tree for extra files,
+  independent of game snapshot identities, and preserve it through repack and
+  compaction. No shader, mod or NXDB path convention or activation is defined.
+  Adding extras alone to an existing archive and merging two extra trees remain
+  unsupported pending an explicit editing/conflict policy.
+- Keep game reading compatible with the unmodified C++ reader from `43b1a61`,
+  now tested in CI. That older Rust packer rejects archives with extras because
+  of its global-extension parser; editing them requires the updated packer.
+  Archives without extras retain their existing encoding. Independent checks
+  confirmed 19 byte-identical writer outputs and no measured RAW/Zstandard read
+  regression across seven alternating baseline/current benchmark runs.
 - Import Switch 2 Editions with legacy and native Programs, indexed updates and
   ordinary DLC. Validate each Program using its own NPDM and preserve exact
   Program/version dependencies rather than guessing from package names.
