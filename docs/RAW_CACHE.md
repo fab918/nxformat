@@ -70,3 +70,7 @@ without exposing invalid output. The mapping probe exercises eviction across
 70 windows, retained leases, cross-window reads, concurrency and write exclusion
 after the source object is destroyed. The standard parser and persistent-session
 tests continue to exercise the default fallback path.
+
+## Optional scheduling hint
+
+`Archive::range_verification_cached(file, offset, length)` reports whether all slices currently have reusable RAW verification or verified Zstd cache entries, without source IO or data retention. It never replaces normal read checks; eviction may change the answer immediately. Batching callers can use it to avoid extra copies for already-cheap large reads. [Measured selector](benchmarks/low-memory-reader-cache/VERIFIED_BATCH.md).

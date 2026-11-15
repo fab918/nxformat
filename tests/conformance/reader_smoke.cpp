@@ -561,10 +561,16 @@ static int review_regressions(const std::string& directory) {
         ImmutableMemorySource pinned(bytes,view);
         auto read_only=nx::Archive::open(pinned,immutable);
         if(!read_only || !read_only.value->mount())return 1;
+        if(!check(!read_only.value->range_verification_cached(nx::FileId{0},0,1),"unread RAW range marked verified"))return 1;
         pinned.payload_bytes=0;
         if(!check(read_only.value->read_file(nx::FileId{0},0,1,&out,1) && out==7,
                   "immutable RAW initial validation failed"))return 1;
         if(!check(pinned.payload_bytes==(view?0:16384),"immutable RAW first-slice IO changed"))return 1;
+        if(!check(read_only.value->range_verification_cached(nx::FileId{0},0,16384) &&
+                  !read_only.value->range_verification_cached(nx::FileId{0},0,16385) &&
+                  !read_only.value->range_verification_cached(nx::FileId{0xffffffffu},0,1) &&
+                  !read_only.value->range_verification_cached(nx::FileId{0},~0ull,1),
+                  "verified-range hint ignored slice or file boundaries"))return 1;
         pinned.payload_bytes=0;
         if(!check(read_only.value->read_file(nx::FileId{0},1,1,&out,1) && out==38 && pinned.payload_bytes==(view?0:1),
                   "immutable RAW verification hit failed"))return 1;
@@ -590,6 +596,8 @@ static int review_regressions(const std::string& directory) {
         if(!check(uncached.value->cache_stats().raw_verification_bytes==0 &&
                   uncached.value->read_file(nx::FileId{0},0,1,&out,1) && out==7,
                   "zero metadata budget did not fall back safely"))return 1;
+        if(!check(!uncached.value->range_verification_cached(nx::FileId{0},0,1),
+                  "disabled RAW bitmap reported reusable verification"))return 1;
         auto damaged=bytes;
         damaged[static_cast<std::size_t>(read_u64_le(damaged.data()+56))]^=1;
         ImmutableMemorySource bad_source(std::move(damaged),view);
@@ -599,6 +607,7 @@ static int review_regressions(const std::string& directory) {
         auto failed=bad.value->read_file(nx::FileId{0},0,1,&out,1);
         if(!check(!failed && failed.error.code==nx::ErrorCode::integrity && out==0xa5,
                   "immutable RAW corrupt bytes escaped before verification"))return 1;
+        if(!check(!bad.value->range_verification_cached(nx::FileId{0},0,1),"corrupt RAW range marked verified"))return 1;
     }
     bytes[static_cast<std::size_t>(read_u64_le(bytes.data()+56))]^=1;
     if (!check(!archive.verify_all(),"full verification trusted a stale decoded cache")) return 1;
@@ -653,6 +662,14 @@ static int review_regressions(const std::string& directory) {
                   !guarded.value->read_file(nx::FileId{0xffffffffu},262145,1,&out,1) && out==0xa5,
                   "small cache hit bypassed buffer/file bounds"))return 1;
     }
+    if(!check(compressed.value->range_verification_cached(nx::FileId{0},262144,1) &&
+              !compressed.value->range_verification_cached(nx::FileId{0},262143,2),
+              "verified-range hint ignored mixed RAW/Zstd boundary"))return 1;
+    auto no_cache_options=compressed_options;no_cache_options.max_cached_block_bytes=1;
+    auto no_cache=nx::Archive::open(compressed_source,no_cache_options);
+    if(!no_cache || !no_cache.value->mount() || !no_cache.value->read_file(nx::FileId{0},262144,1,&out,1))return 1;
+    if(!check(!no_cache.value->range_verification_cached(nx::FileId{0},262144,1),
+              "uncacheable Zstd range reported cached verification"))return 1;
     std::vector<std::uint8_t> shared;
     if (!load_archive_bytes(directory+"/shared_snapshots.nx",shared)) return 2;
     MemorySource shared_source(shared);

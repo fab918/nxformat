@@ -82,6 +82,17 @@ int main(int argc,char** argv) try {
             group=a.file.value==b.file.value && a.file.value==c.file.value &&
                 (a.offset>>a.chunk)==(b.offset>>b.chunk) && (a.offset>>a.chunk)==(c.offset>>c.chunk);
         }
+        // Large reads already verified/cached do not benefit from another
+        // merged buffer and scatter copy. The hint is never used to skip
+        // checks: each chosen path still goes through Session::read().
+        if(mode=="adaptive" && group && requests[first].size>4096) {
+            bool all_cached=true;
+            for(size_t i=0;i<count;++i) {
+                const auto& r=requests[first+i];
+                if(!session->archive().range_verification_cached(r.file,r.offset,r.size)) {all_cached=false;break;}
+            }
+            if(all_cached)group=false;
+        }
         if(group)++grouped_windows;
         if(group)std::sort(order.begin(),order.end(),[&](size_t a,size_t b) {
             const auto& x=requests[first+a];const auto& y=requests[first+b];

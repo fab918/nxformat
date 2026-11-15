@@ -48,3 +48,5 @@ python benchmarks/run_batch_prefetch_probe.py --nup LOCAL.nup --nx LOCAL.nx --sy
 ```
 
 Completed **573** process runs.
+
+[Verification-aware selector resolves the warm sequential regression in the next campaign](VERIFIED_BATCH.md), without changing default reads or adding a payload cache.

@@ -824,6 +824,40 @@ struct Archive {
         return Result<FileInfo>::success({id, EntryType::file, file.size, file.chunk_log2});
     }
 
+    // A scheduling hint only: true when every requested slice can reuse its
+    // verification state (RAW bitmap or a verified decoded Zstd cache entry).
+    // It performs no IO, retains no payload and never replaces read checks.
+    // Zstd entries may be evicted immediately after this hint is returned.
+    bool range_verification_cached(FileId id, std::uint64_t offset, std::size_t length) const {
+        if (!mounted_ || !options_.verify_read_blocks || id.value>=files_.size()) return false;
+        const auto& file=files_[id.value];
+        if (offset>file.size || length>file.size-offset) return false;
+        while (length) {
+            const auto in_chunk=static_cast<std::size_t>(offset&((1ull<<file.chunk_log2)-1));
+            const auto block_id=block_refs_[file.first+static_cast<std::uint32_t>(offset>>file.chunk_log2)];
+            Block block;
+            if (!block_record(block_id,block) || in_chunk>=block.logical) return false;
+            const auto amount=std::min<std::size_t>(length,block.logical-in_chunk);
+            if (block.codec==0) {
+                if (!raw_verified_) return false;
+                auto index=std::size_t(block.first_check)+in_chunk/check_size;
+                auto remaining=(in_chunk+amount-1)/check_size-in_chunk/check_size+1;
+                while (remaining) {
+                    const auto bit=index%64, n=std::min<std::size_t>(remaining,64-bit);
+                    const auto mask=(n==64 ? ~0ull : ((1ull<<n)-1))<<bit;
+                    if ((raw_verified_[index/64].load(std::memory_order_acquire)&mask)!=mask) return false;
+                    index+=n; remaining-=n;
+                }
+            } else {
+                if (!block_cache_) return false;
+                std::shared_lock<std::shared_mutex> lock(block_cache_->mutex);
+                if (block_cache_->entries.find(block_id)==block_cache_->entries.end()) return false;
+            }
+            offset+=amount; length-=amount;
+        }
+        return true;
+    }
+
     // True when the block holding `offset` is Zstandard and not cached yet,
     // so warming it ahead of a demand read saves a decode on that thread.
     bool block_needs_decode(FileId id, std::uint64_t offset) const {

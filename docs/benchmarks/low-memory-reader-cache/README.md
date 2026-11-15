@@ -123,3 +123,5 @@ its benchmark binary is not included in NXConvert release packages.
 ## Selective batching
 
 [A locality filter removes the dispersed-read penalty in the tested traces](ADAPTIVE_BATCH.md), retaining initial sequential and clustered gains. Warm sequential regression remains documented; this is a prototype, not a default change.
+
+[Verification-aware selector resolves the warm sequential regression in the next campaign](VERIFIED_BATCH.md), without changing default reads or adding a payload cache.
