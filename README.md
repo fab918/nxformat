@@ -76,56 +76,34 @@ integration; format validation alone does not establish game compatibility.
 
 ## Performance: NX vs NUP
 
+NX reads compressed data in small, independent blocks. A small read can decode
+just the blocks it needs, keeping first accesses fast without caching whole files.
+
 Both readers below are **native C++**, built with the same compiler and Zstd
-library. Files are opened before timing and both use the same bounded mapped
-input adapter. NX uses the opt-in immutable-source verification cache described
-in [Reader caching](docs/RAW_CACHE.md).
+library, using the same mapped input adapter. Values are medians of three runs
+on a local real archive. NX enables its [immutable-source verification cache](docs/RAW_CACHE.md).
 
-![Representative native-reader comparison](docs/benchmarks/low-memory-reader-cache/representative-real-archive.png)
+![Repeated reads and resident memory: NX vs NUP v1](docs/benchmarks/low-memory-reader-cache/readme-repeated-reads.png)
 
-Selected representative workloads, repeated pass, 32 MiB data-cache budget.
-Times are median / P99 in microseconds; memory is peak private commitment /
-resident working set in MiB. Values are medians of three runs.
+On the repeated random-read trace, NX uses **59 MiB of resident memory versus
+87 MiB for NUP v1**, with P99 read times of **0.5 / 0.4 microseconds**. Small
+warm-cache reads are fast with both readers; NUP v1 also wins some cases.
 
-| Corpus / access pattern | NUP median / P99 | NX median / P99 | NUP private / resident | NX private / resident |
-|---|---:|---:|---:|---:|
-| Synthetic RAW · random 4 KiB | 0.1 / 0.3 | 0.2 / 0.3 | 2.1 / 17.4 | 2.1 / 26.1 |
-| Synthetic mixed · random 4 KiB | 0.1 / 0.2 | 0.2 / 0.4 | 38.3 / 62.8 | 14.2 / 30.3 |
-| Real archive A · random 4 KiB | 0.1 / 0.4 | 0.2 / 0.5 | 48.1 / 87.0 | 22.2 / 59.0 |
-| Real archive A · sequential 256 KiB | 3.8 / 8.6 | 7.2 / 8.9 | 39.3 / 79.3 | 22.5 / 69.3 |
-| Real archive A · interleaved 64 KiB | 0.9 / 1.9 | 1.0 / 1.3 | 26.8 / 46.1 | 17.6 / 37.9 |
+![Initial and repeated compressed-file reads: NX vs NUP v1](docs/benchmarks/low-memory-reader-cache/readme-first-access.png)
 
-**NX's advantage here is memory efficiency with very short repeated reads:**
-about 54% less private commitment and 32% less resident memory on the real-archive
-random trace. NUP remains faster in several warm-cache cases. Sub-microsecond
-differences are close to timer granularity; these are not gameplay or FPS results.
-RAW is an explicit counterexample to a general RAM advantage: NX touches more
-resident pages for initial integrity checks, despite retaining no RAW payload.
+The second test targets the eight largest compressed files, with **128 MiB of
+cache so all eight fit in NUP v1**. Eight initial 4 KiB reads take **82.61 ms with
+NUP v1 and 0.76 ms with NX**, about **109× faster in this specific case**. Once
+files are cached, the gap narrows or NUP v1 wins. This illustrates the benefit
+of independent blocks, not an overall-game speedup.
 
-When the data cache is constrained to **8 MiB**, the same real random-read trace
-has a P99 of **3178.6 µs for NUP / 0.5 µs for NX**, with **75.1 / 59.0 MiB** peak
-resident memory. This demonstrates resistance to whole-file cache misses on this
-trace, not a universal speedup. With zero RAM payload cache, NUP's temporary decoded
-files can instead make repeated compressed reads faster than NX.
-
-A [targeted first-access test](docs/benchmarks/low-memory-reader-cache/REAL_COMPRESSED.md)
-on the eight largest compressed members, with **128 MiB** so NUP can retain all
-of them, takes **82.6 ms for NUP / 0.76 ms for NX** for eight initial 4 KiB reads.
-On repetition both serve those reads in microseconds. This isolates the benefit
-of independent blocks on cache misses; it is not an overall-game speedup.
-
-![Targeted compressed-file access: initial and repeated reads](docs/benchmarks/low-memory-reader-cache/real-compressed-access.png)
-
-*Left panel, initial access: 82.61 / 0.7568 ≈ **109×** for these eight reads.
-Real archive bytes, generated access pattern targeting compressed files; this
-is not a captured emulator loading trace. The OS cache was not flushed.*
-
-The [full native benchmark report](docs/benchmarks/low-memory-reader-cache/README.md)
-includes seven access patterns, RAW/mixed/real inputs, 0/8/32 MiB budgets,
-original-reader and input-provider controls, repeated-run ranges, temporary disk
-usage, raw timing samples and reproducible tools. The OS file cache was not
-flushed. The real corpus is a seeded subset of one archive, not all games.
-These results replace the earlier Python-NUP versus C++-NX headline comparison.
+These are generated access patterns on real content, not recorded gameplay.
+The OS cache was not flushed. Resident memory includes mapped file pages; it
+is not total system RAM. RAW data and other cache budgets can give different
+results. [Full results and method](docs/benchmarks/low-memory-reader-cache/README.md)
+cover seven access patterns, RAW/mixed/real inputs, 0/8/32 MiB budgets and original
+reader controls. [Compressed-file details](docs/benchmarks/low-memory-reader-cache/REAL_COMPRESSED.md)
+include both initial and repeated passes, memory and byte-for-byte checks.
 
 ## Developer integration
 
