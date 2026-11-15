@@ -1550,7 +1550,15 @@ impl App {
         self.status = match (&result, cancelled) {
             (_, true) => {
                 self.queue.retain(|j| j.purpose == Purpose::Contents);
-                format!("{}: cancelled, nothing was changed", running.job.label)
+                // extract creates its target itself: a cancel during the file extraction
+                // removes it, a later cancel (restoration recipe) keeps the extracted files.
+                let kept = running.job.args.first().map(String::as_str) == Some("extract")
+                    && running.job.args.get(2).is_some_and(|t| Path::new(t).exists());
+                if kept {
+                    format!("{}: cancelled, the extracted files were kept", running.job.label)
+                } else {
+                    format!("{}: cancelled, nothing was changed", running.job.label)
+                }
             }
             (Err(e), _) => {
                 let error = format!("ERROR: {}: {e}", running.job.label);
