@@ -77,6 +77,15 @@ retain the pinned file handle, excluding writers until the final lease is releas
 Existing writes through mappings created before opening the source are outside
 the immutable-source contract, as are external/device-level modifications.
 
+Measured cost (Windows 11, SATA SSD, 6.2 GB archive, default `Session`,
+1 MiB sequential loads and 4/64 KiB random reads, 1 and 4 threads): mapped views
+were 17-43 % slower than `open()` with a cold OS cache, and 2-4x slower with a
+warm OS cache, because the first touch of each page faults even when the file is
+cached. They were faster only when the same data, under the 1 GiB of views, was
+read again in the same process (sequential reload about 3x). Random reads across
+a larger archive keep remapping windows and stay slower. Prefer `open()` unless
+the workload is known to re-read a small hot set.
+
 Mapped pages can still consume resident physical RAM and page tables. Private
 commitment and resident working set measure different costs; neither is total
 system RAM. See [Microsoft's mapping documentation](https://learn.microsoft.com/en-us/windows/win32/memory/file-mapping)

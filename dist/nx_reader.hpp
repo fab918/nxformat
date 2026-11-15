@@ -2587,7 +2587,7 @@ inline Status Archive::read_immutable_raw(const Block& block, std::size_t offset
         if (verified) {
             auto status=check_cancelled(); if (!status) return status;
             struct Copy { const std::uint8_t* source; std::uint8_t* target; std::size_t length; };
-            Copy copy{view+offset-begin,atomic_output?stored.bytes.get():output,amount};
+            Copy copy{view+(offset-begin),atomic_output?stored.bytes.get():output,amount};
             const auto operation=[](void* context) {
                 const auto& c=*static_cast<const Copy*>(context);
                 std::memcpy(c.target,c.source,c.length);
@@ -2654,18 +2654,18 @@ inline Status Archive::read_immutable_raw(const Block& block, std::size_t offset
     }
     if (!verified) {
         std::size_t good=0;
-        auto checked=verify_slices(block,bytes+begin-origin,first,end-begin,partial?&good:nullptr);
+        auto checked=verify_slices(block,bytes+(begin-origin),first,end-begin,partial?&good:nullptr);
         if (!checked) {
             if (partial && begin+good>offset) {
                 copied=std::min(amount,begin+good-offset);
-                std::memcpy(output,bytes+offset-origin,copied);
+                std::memcpy(output,bytes+(offset-origin),copied);
             }
             return checked;
         }
         remember_raw_verification(block,first,end-begin);
     }
     auto status=check_cancelled(); if (!status) return status;
-    std::memcpy(output,bytes+offset-origin,amount);
+    std::memcpy(output,bytes+(offset-origin),amount);
     copied=amount;
     return ok_status();
 }
