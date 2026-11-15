@@ -7,7 +7,7 @@ from nup_vs_nx import parse,walk
 ROOT=Path(__file__).resolve().parents[1]
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--nup',type=Path,required=True);p.add_argument('--nx',type=Path,required=True);p.add_argument('--synthetic',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--repetitions',type=int,default=5);p.add_argument('--warm',action='store_true');a=p.parse_args();
+ p=argparse.ArgumentParser();p.add_argument('--nup',type=Path,required=True);p.add_argument('--nx',type=Path,required=True);p.add_argument('--synthetic',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--repetitions',type=int,default=5);p.add_argument('--warm',action='store_true');p.add_argument('--modes',nargs='+',choices=('off','batch','adaptive','prefetch','guarded'),default=['off','batch','prefetch','guarded']);p.add_argument('--think',type=int,nargs='+',default=[0,50]);a=p.parse_args();
  if not 1<=a.repetitions<=20:p.error('repetitions must be 1..20')
  a.output=a.output.resolve();a.output.mkdir(exist_ok=True,parents=True)
  sys.path.insert(0,str(ROOT/'tests/conformance'));from test_native_conversion import compile_reader
@@ -39,11 +39,12 @@ def main():
    for budget in ((0,8,32) if name=='clustered4k' else (8,32)):
     for think in (0,50):cases.append((kind,name,nx,manifest,budget,think))
  if a.warm:cases=[c for c in cases if c[4]==32 and c[5]==0]
- records=[];expected={};modes=['off','batch','prefetch','guarded']
+ cases=[c for c in cases if c[5] in a.think]
+ records=[];expected={};modes=a.modes
  for kind,name,nx,manifest,budget,think in cases:
   key=(kind,name)
   for rep in range(a.repetitions):
-   rotation=modes[rep%4:]+modes[:rep%4]
+   rotation=modes[rep%len(modes):]+modes[:rep%len(modes)]
    for mode in rotation:
     output=a.output/'output.bin'
     run=subprocess.run([str(exe),str(nx),str(manifest),mode,str(budget),str(think),str(output),'16',*(['warm'] if a.warm else [])],capture_output=True,text=True,check=True)

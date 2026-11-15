@@ -27,7 +27,7 @@ int main(int argc,char** argv) try {
     if(argc!=8 && argc!=9)throw std::runtime_error("NX TRACE MODE CACHE_MIB THINK_US OUTPUT BATCH");
     auto disk=nx::DiskSource::open_mapped(argv[1]);if(!disk)throw std::runtime_error("disk open");
     const std::string mode=argv[3];
-    if(mode!="off" && mode!="batch" && mode!="prefetch" && mode!="guarded")throw std::runtime_error("mode");
+    if(mode!="off" && mode!="batch" && mode!="prefetch" && mode!="guarded" && mode!="adaptive")throw std::runtime_error("mode");
     Decoder decoder;nx::SessionOptions options;
     options.reader.zstd=&Decoder::decode;options.reader.zstd_context=&decoder;
     options.reader.cache_raw_verification=true;
@@ -65,7 +65,7 @@ int main(int argc,char** argv) try {
     size_t output_at=0;
     const size_t horizon=std::stoull(argv[7]);if(!horizon || horizon>64)throw std::runtime_error("batch bound");
     const auto think=std::chrono::microseconds(std::stoull(argv[5]));
-    uint64_t service_ns=0,work_ns=0,calls=0,requested=0,merged_bytes=0,scratch_peak=0;
+    uint64_t service_ns=0,work_ns=0,calls=0,requested=0,merged_bytes=0,scratch_peak=0,grouped_windows=0;
     std::vector<std::vector<uint8_t>> buffers(horizon);
     std::vector<uint8_t> merged;
     std::vector<size_t> order(horizon);
@@ -76,7 +76,14 @@ int main(int argc,char** argv) try {
         for(size_t i=0;i<count;++i)buffers[i].resize(requests[first+i].size);
         auto start=Clock::now();
         order.resize(count);std::iota(order.begin(),order.end(),0);
-        if(mode=="batch")std::sort(order.begin(),order.end(),[&](size_t a,size_t b) {
+        bool group=mode=="batch";
+        if(mode=="adaptive" && count>=3) {
+            const auto& a=requests[first];const auto& b=requests[first+1];const auto& c=requests[first+2];
+            group=a.file.value==b.file.value && a.file.value==c.file.value &&
+                (a.offset>>a.chunk)==(b.offset>>b.chunk) && (a.offset>>a.chunk)==(c.offset>>c.chunk);
+        }
+        if(group)++grouped_windows;
+        if(group)std::sort(order.begin(),order.end(),[&](size_t a,size_t b) {
             const auto& x=requests[first+a];const auto& y=requests[first+b];
             return std::make_pair(x.file.value,x.offset)<std::make_pair(y.file.value,y.offset);
         });
@@ -84,12 +91,16 @@ int main(int argc,char** argv) try {
             const auto i=order[pos];const auto& r=requests[first+i];
             size_t end=pos+1;auto last=r.offset+r.size;
             const auto chunk_end=((r.offset>>r.chunk)+1)<<r.chunk;
-            if(mode=="batch" && last<=chunk_end) {
+            if(group && last<=chunk_end) {
                 while(end<count) {
                     const auto& next=requests[first+order[end]];
                     if(next.file.value!=r.file.value || next.offset<r.offset || next.offset+next.size>chunk_end)break;
                     last=std::max(last,next.offset+next.size);++end;
                 }
+            }
+            if(mode=="adaptive" && end>pos+1) {
+                size_t useful=0;for(auto j=pos;j<end;++j)useful+=requests[first+order[j]].size;
+                if(last-r.offset>useful+useful/4) {end=pos+1;last=r.offset+r.size;}
             }
             if(end>pos+1) {
                 merged.resize(static_cast<size_t>(last-r.offset));scratch_peak=std::max<uint64_t>(scratch_peak,merged.capacity());
@@ -122,7 +133,7 @@ int main(int argc,char** argv) try {
     cpu_ticks=(uint64_t(kernel.dwHighDateTime)<<32)+kernel.dwLowDateTime+(uint64_t(user.dwHighDateTime)<<32)+user.dwLowDateTime;
     PROCESS_MEMORY_COUNTERS_EX memory{};GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),sizeof(memory));resident=memory.PeakWorkingSetSize;commit=memory.PeakPagefileUsage;
 #endif
-    std::cout<<"{\"service_ms\":"<<service_ns/1e6<<",\"shutdown_ms\":"<<drain/1e6<<",\"service_and_shutdown_ms\":"<<(service_ns+drain)/1e6<<",\"cpu_ms\":"<<cpu_ticks/1e4<<",\"work_ms\":"<<work_ns/1e6<<",\"decodes\":"<<(decoder.calls.load()-decodes_before)<<",\"initial_compressed_requests\":"<<compressed_requests<<",\"source_bytes\":"<<(*disk.value)->bytes_read()<<",\"prefetch_submitted\":"<<stats.prefetch_submitted<<",\"prefetch_cancelled\":"<<stats.prefetch_cancelled<<",\"prefetch_dropped\":"<<stats.prefetch_dropped<<",\"payload_peak\":"<<stats.cache.peak_bytes<<",\"resident\":"<<resident<<",\"private_commit\":"<<commit<<",\"calls\":"<<calls<<",\"requested_bytes\":"<<requested<<",\"merged_bytes\":"<<merged_bytes<<",\"merge_scratch_peak\":"<<scratch_peak<<"}\n";
+    std::cout<<"{\"service_ms\":"<<service_ns/1e6<<",\"shutdown_ms\":"<<drain/1e6<<",\"service_and_shutdown_ms\":"<<(service_ns+drain)/1e6<<",\"cpu_ms\":"<<cpu_ticks/1e4<<",\"work_ms\":"<<work_ns/1e6<<",\"decodes\":"<<(decoder.calls.load()-decodes_before)<<",\"initial_compressed_requests\":"<<compressed_requests<<",\"source_bytes\":"<<(*disk.value)->bytes_read()<<",\"prefetch_submitted\":"<<stats.prefetch_submitted<<",\"prefetch_cancelled\":"<<stats.prefetch_cancelled<<",\"prefetch_dropped\":"<<stats.prefetch_dropped<<",\"payload_peak\":"<<stats.cache.peak_bytes<<",\"resident\":"<<resident<<",\"private_commit\":"<<commit<<",\"calls\":"<<calls<<",\"grouped_windows\":"<<grouped_windows<<",\"requested_bytes\":"<<requested<<",\"merged_bytes\":"<<merged_bytes<<",\"merge_scratch_peak\":"<<scratch_peak<<"}\n";
     std::ofstream output(argv[6],std::ios::binary);
     output.write(reinterpret_cast<const char*>(full_output.data()),full_output.size());
     if(!output.good())throw std::runtime_error("output");return 0;

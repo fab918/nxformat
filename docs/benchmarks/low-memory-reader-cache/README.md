@@ -119,3 +119,7 @@ its benchmark binary is not included in NXConvert release packages.
 ## Batching and prefetch
 
 [840 process runs, initial and replay traces](BATCH_PREFETCH.md) test bounded merging of pending reads and two sequential prediction thresholds, including CPU, RAM and wasted decode work. No default reader change is applied.
+
+## Selective batching
+
+[A locality filter removes the dispersed-read penalty in the tested traces](ADAPTIVE_BATCH.md), retaining initial sequential and clustered gains. Warm sequential regression remains documented; this is a prototype, not a default change.
