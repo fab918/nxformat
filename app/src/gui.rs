@@ -1552,19 +1552,21 @@ impl App {
                 self.queue.retain(|j| j.purpose == Purpose::Contents);
                 // extract creates its target itself: a cancel during the file extraction
                 // removes it, a later cancel (restoration recipe) keeps the extracted files.
-                let kept = running.job.args.first().map(String::as_str) == Some("extract")
-                    && running
-                        .job
-                        .args
-                        .get(2)
-                        .is_some_and(|t| Path::new(t).exists());
-                if kept {
-                    format!(
+                // A failed check is not a confirmed absence.
+                let target = match running.job.args.as_slice() {
+                    [command, _, target, ..] if command == "extract" => Some(target),
+                    _ => None,
+                };
+                match target.map(|t| (t, Path::new(t).try_exists())) {
+                    Some((_, Ok(true))) => format!(
                         "{}: cancelled, the extracted files were kept",
                         running.job.label
-                    )
-                } else {
-                    format!("{}: cancelled, nothing was changed", running.job.label)
+                    ),
+                    Some((t, Err(_))) => format!(
+                        "{}: cancelled, could not check whether {t} was removed",
+                        running.job.label
+                    ),
+                    _ => format!("{}: cancelled, nothing was changed", running.job.label),
                 }
             }
             (Err(e), _) => {
