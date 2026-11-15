@@ -27,7 +27,7 @@
   <a href="docs/SPEC.md">Format specification</a>
 </p>
 
-- 🚀 **Modern format built for speed.** Designed to reduce decompression-related stutter. **104× faster median random reads than NUP** in the local benchmark described below. [See performance](#performance-nx-vs-nup).
+- 🚀 **Fast reads with bounded caches.** Independent compressed blocks and verification-only RAW caching keep repeated reads fast without retaining RAW payload copies. [Native reader comparison](#performance-nx-vs-nup).
 - ✏️ **Updates and DLC, in place.** Add or remove content without copying the base game during normal edits.
 - 🧩 **Store shared content once.** Reuse identical blocks across game files, updates and DLC.
 - 🎮 **Switch 1 and Switch 2.** Convert supported decrypted **DNSP/DXCI** packages, extracted folders and NUP archives.
@@ -76,31 +76,56 @@ integration; format validation alone does not establish game compatibility.
 
 ## Performance: NX vs NUP
 
-Compression saves disk space, but decoding takes CPU time. When a game needs a few kilobytes from the middle of a compressed file, it should not have to decode everything before them. NX uses independent blocks to keep that work small.
+NX reads independent blocks and reuses integrity checks for immutable data.
+This keeps small reads fast without caching whole decoded files.
 
-A slow read can cause a hitch if a game is waiting for it. P99 measures the slow tail: roughly 99% of measured reads finish at or below this time. These read timings do not measure FPS or demonstrate an in-game stutter reduction.
+The comparison below uses **native C++ readers**, the same compiler, Zstd library
+and mapped input provider. NUP v1 uses [Eglantine's C++ NUP reader](https://github.com/fab918/Eglantine/blob/6da821f83f402cb288f6d078b9e3c21955e0b54f/src/core/file_sys/nup_container.cpp),
+compiled without modifying its source. **NX** enables verification reuse and the explicit
+selective-batching prototype.
+Each reader receives the same **16 already-pending requests**, with no queue-fill
+wait. Values are medians of five runs on the same real archive.
 
-![Random 4 KiB reads: NUP vs NX](docs/benchmarks/nup-vs-nx-random-reads.png)
+![Read performance: NUP v1 and NX](docs/benchmarks/native-read-performance.png)
 
-**Why?** NUP stores a compressed file in one Zstandard frame. Reading far into that file may require decoding data from its beginning. NX uses smaller, independently accessible compressed blocks. Raw data can be read directly without Zstandard decoding.
+**Read time in milliseconds — lower is better.**
 
-![Random reads inside compressed files: NUP vs NX](docs/benchmarks/nup-vs-nx-compressed-files.png)
+| Workload | Cache budget | NUP v1 | NX |
+|---|---:|---:|---:|
+| 8 first accesses · 4 KiB | 128 MiB | 86.129 | **0.758** |
+| 512 scattered reads · all files cached | 128 MiB | **0.081** | 0.161 |
+| Sequential 32 MiB · first pass | 32 MiB | 26.989 | **9.418** |
+| Sequential 32 MiB · repeated pass | 32 MiB | 2.663 | **1.788** |
 
-For reads inside compressed files, the tested median was **1.7 ms with NUP** versus **5.2 µs with NX**. The second chart also shows an especially slow NUP read, which is an example of a worst case, **not** a typical speedup.
+NUP v1 wins the cached scattered-read trace, while NX uses much less memory.
+The targeted first-access case is about **114× faster than NUP v1**. It includes
+storage-policy differences: five requested NX starting blocks are RAW and three
+are Zstd, while all eight NUP files are compressed.
 
-**Small reads. Big difference.** In the local NUP reference-reader benchmark, NX completed random 4 KiB reads **104× faster at the median** and **about 94× faster at P99**.
+![Memory usage: NUP v1 and NX](docs/benchmarks/native-read-memory.png)
 
-> **Benchmark details:** Donkey Kong Bananza, update 3.2.0 and DLC (Switch 2); Windows 11; 300 seeded random 4 KiB reads; warm operating-system cache. The comparison uses the NUP Python reference reader with libzstd and the NX C++17 reader. These are results for the tested implementations and workload, not a universal format speedup or an FPS benchmark. A native-to-native comparison and a larger sample are needed before making broader claims.
+**Peak resident / private memory in MiB — same workloads, lower is better.**
 
-The charts summarize an earlier local run whose individual read samples are not
-included. The [NUP comparison tools](benchmarks/README.md#nup-and-native-package-comparisons)
-can repeat this kind of measurement on your own dumps.
+| Workload | NUP v1 | NX |
+|---|---:|---:|
+| 8 first accesses | 222.3 / 134.5 | 33.9 / 17.6 |
+| 512 scattered reads · all files cached | 222.3 / 134.6 | 54.8 / 26.5 |
+| Sequential 32 MiB · first pass | 128.8 / 83.3 | 98.1 / 50.3 |
+| Sequential 32 MiB · repeated pass | 113.2 / 67.6 | 97.9 / 50.0 |
 
-### Faster packing
+On the cached scattered-read trace, **NUP v1 uses about 4.1× the resident memory**
+of NX. NX retains no additional RAW payload cache.
 
-![Packing a dump: NX vs NUP — Mario Kart World dump (Switch 2)](docs/benchmarks/nup-vs-nx-packing.png)
+These are generated access patterns on real content, not recorded gameplay or
+FPS measurements. The OS cache was not flushed. Memory includes common benchmark
+output buffers, metadata and decoder scratch; private commitment is not physical
+RAM, and resident memory includes mapped file pages. Selective batching requires
+an integration with pending requests; it is not automatically used by every reader.
 
-*NX skips compression with marginal savings, favoring faster packing and reads for a little extra space.*
+[Method and reproduction tools](benchmarks/README.md#native-nup-v1-comparison)
+cover generated RAW/mixed controls, optional local real inputs, cache budgets,
+resident/private memory and temporary-file usage. Detailed run outputs stay local
+under the ignored `results/` directory.
 
 ## Developer integration
 

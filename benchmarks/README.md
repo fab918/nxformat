@@ -75,7 +75,67 @@ measures archive edits. Native conversion/addition drivers accept private local
 inputs; retain those sources, detailed paths and result files outside this
 repository (`results/` is ignored by git).
 
-## NUP and native-package comparisons
+## Native NUP v1 comparison
+
+The README contains the selected timing and memory results. Only its two charts
+are committed; detailed reports, samples and experimental runs stay under ignored
+`results/`. The small reproduction chain is:
+
+- `native_nup_comparison.cpp`: our adapter for the external native NUP reader and
+  the NX SDK, using the same bounded mapped input provider.
+- `native_three_way_batch.cpp`: our 16-pending-request planner and measurement
+  loop, including the locality, amplification and already-verified-range guards.
+- `run_native_nup_comparison.py`: MSVC build helper (also usable for direct reads).
+- `run_native_three_way.py`: deterministic trace generation, rotated runs, full
+  output equality checks and resident/private memory measurements.
+- `packer/examples/native_nup_benchmark.rs`: generated RAW/mixed corpora, using
+  the project's artificial package builder. No game content or executable code.
+
+Use a Windows MSVC developer shell and an external Release Eglantine build with
+`compile_commands.json`, `build.ninja` and its static libraries:
+
+```text
+python benchmarks/run_native_three_way.py --egl-build PATH_TO_BUILD --output results/native-comparison
+```
+
+The runner generates synthetic inputs automatically. To reuse an existing corpus,
+pass `--synthetic PATH`. For private real-content traces, optionally add matching
+`--nup LOCAL.nup --nx LOCAL.nx`. Private member paths and full returned bytes stay
+under the output directory. The pinned baseline defaults to `b6a9de8` (the measured
+1.0.4 source), and `--main-ref REF` chooses another revision. The current SDK is
+compiled from `dist/`; regenerate it before running after edits.
+
+The native NUP source is compiled **in its external checkout**, without modification
+or copying it into this repository. The adapters are GPL-3.0-or-later because they
+link that reader. No third-party emulator source, benchmark binary, game code,
+keys or artwork is included in this change or the tests. The tests use generated
+marker bytes and artificial container fixtures. Benchmark adapters are not part
+of NXConvert release packages.
+
+Four controls are retained: NUP v1, pinned NX baseline, current NX direct reads,
+and current NX selective grouping. All receive identical logical requests and
+16-request timing windows, with no queue-fill wait. Grouping requires an explicit
+integration; it is not enabled for ordinary synchronous calls. There is no prefetch
+in this comparison. Output files are written after timing and memory sampling.
+
+Default five repetitions rotate the reader order. The two passes are separate
+process runs with and without priming the reader. A primed trace can still miss
+when its decoded working set exceeds the cache. The OS cache is not flushed.
+Data-cache budgets are 8/32 MiB, plus 0 MiB clustered and 128 MiB real-random
+controls. The targeted eight-file first-access case uses 128 MiB. The generators
+are not captured gameplay traces; the targeted case also reflects NX RAW/Zstd
+storage policy versus the NUP writer's choices.
+
+`results.json` records per-process times, resident/private peaks, cache bytes,
+decoded temporary files, grouping/copy work, compiler/source provenance and full
+output SHA-256 equality checks. Process memory includes common output staging,
+priming and metadata. Private commitment is not physical RAM; resident mapped
+pages share backing with the OS cache. Temporary-file OS-cache memory outside the
+reader process is not measured. None of these numbers measures FPS or universal
+format speedup. The README snapshot was measured on 2026-11-15, Ryzen 7 9800X3D,
+Windows 11 26200, MSVC /O2 and Zstd 1.5.8.
+
+## Historical NUP and native-package comparisons
 
 - `nup_layout.py` inspects NUP storage and compressed-file sizes.
 - `nup_vs_nx.py GAME.nup GAME.nx nx_read_list [--reads N] [--size BYTES]`
@@ -93,8 +153,8 @@ Zstandard runtime used by `real_zstd.hpp`.
 The NUP scripts require the reference NUP Python package and its dependencies;
 these are separate from the dependency-free NX conformance scripts.
 
-The NUP comparison mixes Python and C++ implementations; a native comparison
-and larger repeated samples are needed for general speedup claims.
+These historical tools mix Python and C++ implementations. Use the native
+comparison above for the current README; do not infer a format-wide speedup.
 NUP whole-file caching can make repeat reads faster at a larger memory cost.
 
 ## Integrity and tail latency
@@ -132,12 +192,6 @@ performance. CPU and wall throughput include correctness hashing outside each
 timed read. Allocation counters omit provider/C allocations and allocator
 bookkeeping; writer accounting is an estimate, not process RSS. Report these
 limits alongside measurements. Do not pool per-repetition percentiles.
-
-The README's NUP comparison charts summarize separate local runs. Their original individual read samples are not distributed; the comparison
-tools and separate settings-run reports listed above are now included. They compare the Python NUP
-reference reader using libzstd with the C++ NX reader; the results are specific
-to those implementations and workloads. A native-to-native comparison and a
-larger, representative sample are needed for broader claims.
 
 ## Real-content acceptance
 

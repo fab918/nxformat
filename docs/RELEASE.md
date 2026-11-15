@@ -1,3 +1,13 @@
+# Unreleased
+
+- Add opt-in verification-only RAW caching for immutable C++ reader sources,
+  with bounded bitmap metadata and no RAW payload copies. Add optional bounded
+  Windows file mapping with leased views and SEH-protected CRC/copy operations
+  that report mapped IO faults as read errors. Existing integrations retain defaults.
+- Replace the Python-NUP versus C++-NX headline benchmark with native C++ reader
+  comparisons, representative access patterns, private/resident memory and
+  reproducible synthetic workloads. Include NUP-favorable cases.
+
 # NXFormat 1.0.4
 
 NXFormat 1.0.4 improves Switch 2 Edition and multi-Program imports, handles

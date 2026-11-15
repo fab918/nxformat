@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-HEADERS = ("nx_reader.hpp", "nx_session.hpp", "nx_disk_source.hpp", "nx_native_sha256.hpp", "nx_read_trace.hpp")
+HEADERS = ("nx_reader.hpp", "nx_session.hpp", "nx_disk_source.hpp", "nx_mapped_views.hpp", "nx_native_sha256.hpp", "nx_read_trace.hpp")
 
 
 def main() -> int:
