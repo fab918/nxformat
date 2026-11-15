@@ -2050,3 +2050,151 @@ fn raw_compaction_failures_preserve_original_archive() {
     assert_eq!(fs::read(&archive).unwrap(), damaged);
     assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
 }
+
+#[test]
+fn source_removal_prunes_all_dependent_recipes_but_keeps_independent_or_shared_copies() {
+    use nxformat_packer::native::synthetic::{dnsp, title_entries, TitleSpec};
+    use nxformat_packer::recipe::{build_recipe, check_embedded, embed_recipes, embedded_recipes};
+    let temp = TempDir::new();
+    let options = WriterOptions::default();
+    let a = title_entries(&TitleSpec::application(APP, 0, 1));
+    let b = title_entries(&TitleSpec::application(APP, 0, 9));
+    let payload_a = a
+        .iter()
+        .max_by_key(|(_, bytes)| bytes.len())
+        .unwrap()
+        .1
+        .clone();
+    let payload_b = b
+        .iter()
+        .max_by_key(|(_, bytes)| bytes.len())
+        .unwrap()
+        .1
+        .clone();
+    assert_ne!(payload_a, payload_b);
+    let packages: Vec<_> = [
+        ("old-a.nsp", &a),
+        ("old-b.nsp", &a),
+        ("independent.nsp", &b),
+    ]
+    .into_iter()
+    .map(|(name, entries)| {
+        let path = temp.path().join(name);
+        fs::write(&path, dnsp(entries)).unwrap();
+        path
+    })
+    .collect();
+    for retained_copy in [false, true] {
+        for in_place in [false, true] {
+            let source = temp
+                .path()
+                .join(format!("recipe-{retained_copy}-{in_place}.nx"));
+            let dest = temp.path().join("edited.nx");
+            let mut input = base_input(vec![0x55; 4096]);
+            let mut entries = vec![
+                EntryInput::file("old.rec", FileInput::from_bytes(payload_a.clone())),
+                EntryInput::file("keep.rec", FileInput::from_bytes(payload_b.clone())),
+            ];
+            if retained_copy {
+                entries.push(EntryInput::file(
+                    "copy.rec",
+                    FileInput::from_bytes(payload_a.clone()),
+                ));
+            }
+            input.source_resources.push(SourceResourceInput {
+                platform: Platform::Switch1,
+                application_id: APP,
+                kind: 0,
+                root: tree(entries),
+            });
+            write_archive(input, &source, &options).unwrap();
+            let recipes: Vec<_> = packages
+                .iter()
+                .map(|p| build_recipe(p, &source, &options).unwrap().0)
+                .collect();
+            embed_recipes(&source, recipes, &options).unwrap();
+            let before = embedded_recipes(&source, &options).unwrap();
+            assert_eq!(before.len(), 3);
+            let dependencies: Vec<_> = before
+                .iter()
+                .filter(|r| r.info.name.starts_with("old-"))
+                .collect();
+            assert_eq!(dependencies[0].info.files, dependencies[1].info.files);
+            let original = fs::read(&source).unwrap();
+            let output = if in_place { &source } else { &dest };
+            repack_archive_with_source_removals(
+                &source,
+                output,
+                RepackPlan::new(),
+                vec![resource_selector(&source, "old.rec")],
+                &options,
+                IntegrityPolicy::Strict,
+            )
+            .unwrap();
+            let after = embedded_recipes(output, &options).unwrap();
+            assert_eq!(after.len(), if retained_copy { 3 } else { 1 });
+            assert!(after.iter().any(|r| r.info.name == "independent.nsp"));
+            for recipe in &after {
+                check_embedded(output, &recipe.bytes, &options).unwrap();
+            }
+            if !in_place {
+                assert_eq!(fs::read(&source).unwrap(), original);
+            }
+        }
+    }
+}
+
+#[test]
+fn source_resource_removal_edits_real_v103_fixture_without_reconversion() {
+    let temp = TempDir::new();
+    let original = include_bytes!("fixtures/source_resource_v103.nx");
+    let options = WriterOptions::default();
+    for in_place in [false, true] {
+        let source = temp.path().join(format!("legacy-{in_place}.nx"));
+        let separate = temp.path().join("edited.nx");
+        fs::write(&source, original).unwrap();
+        let before = inspect_archive(&source, &options, IntegrityPolicy::Strict).unwrap();
+        let app = &before.applications[0];
+        let resources =
+            inspect_source_resources(&source, app.platform, app.application_id, &options).unwrap();
+        let file = resources
+            .iter()
+            .flat_map(|(_, files)| files)
+            .find(|f| f.path == "old.rec")
+            .unwrap();
+        let selector = SourceResourceRemoval {
+            platform: app.platform,
+            application_id: app.application_id,
+            kind: 0,
+            filename: file.path.clone(),
+            size: file.size,
+            sha256: file.digest,
+        };
+        let output = if in_place { &source } else { &separate };
+        repack_archive_with_source_removals(
+            &source,
+            output,
+            RepackPlan::new(),
+            vec![selector],
+            &options,
+            IntegrityPolicy::Strict,
+        )
+        .unwrap();
+        let after = inspect_archive(output, &options, IntegrityPolicy::Strict).unwrap();
+        assert_eq!(
+            after.applications[0].snapshots[0].identity,
+            app.snapshots[0].identity
+        );
+        let resources =
+            inspect_source_resources(output, app.platform, app.application_id, &options).unwrap();
+        let names: Vec<_> = resources
+            .iter()
+            .flat_map(|(_, files)| files)
+            .map(|f| f.path.as_str())
+            .collect();
+        assert_eq!(names, vec!["keep.rec"]);
+        if !in_place {
+            assert_eq!(fs::read(&source).unwrap(), original);
+        }
+    }
+}
