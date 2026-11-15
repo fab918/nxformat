@@ -66,7 +66,11 @@ not guarantee lower resident memory than every other reader on every workload.
 
 The conformance tests cover ordinary and direct-view immutable sources, bitmap
 limits, zero payload cache, shared Archive copies, concurrent reads and corruption
-without exposing invalid output. The mapping probe exercises eviction across
+without exposing invalid output. Failed mounts release their bitmap; partial
+reads preserve the exact verified prefix on corruption, while atomic reads keep
+all caller output unchanged. Large positional reads without direct views retain
+multi-block IO coalescing, including verification reuse on subsequent reads.
+The mapping probe exercises eviction across
 70 windows, retained leases, cross-window reads, concurrency and write exclusion
 after the source object is destroyed. The standard parser and persistent-session
 tests continue to exercise the default fallback path.

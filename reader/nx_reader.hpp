@@ -655,6 +655,8 @@ struct Archive {
             std::vector<std::uint32_t>().swap(block_logical_sizes_);
             std::vector<std::uint8_t>().swap(index_bytes_);
             block_cache_.reset();
+            raw_verified_.reset();
+            raw_verification_bytes_=0;
         };
         reset_mount();
         try {
@@ -1167,8 +1169,9 @@ private:
     // `verified`, when given, receives how many leading bytes passed before a mismatch.
     Status verify_slices(const Block& block, const std::uint8_t* bytes, std::size_t first_slice, std::size_t size,
                          std::size_t* verified = nullptr) const;
+    void remember_raw_verification(const Block& block, std::size_t first_slice, std::size_t size) const;
     Status read_immutable_raw(const Block& block, std::size_t offset, std::size_t wanted,
-                              std::uint8_t* output, std::size_t& copied, ReadBuffer& stored) const;
+                              std::uint8_t* output, std::size_t& copied, ReadBuffer& stored, bool partial, const ImmutableReadView& pinned) const;
     Status read_cached_slice(std::uint32_t id, std::size_t offset, std::size_t wanted,
                              std::uint8_t* output, std::size_t& copied, ReadBuffer& stored) const;
     Status load_block(std::uint32_t id, bool verify, detail::LogicalBytes& logical,
@@ -2172,16 +2175,25 @@ inline Status Archive::read_range(std::uint32_t file_id, std::uint64_t offset, s
         Block block;
         st=block_record(block_id,block); if (!st) return st;
         if (block.codec==0) {
+            if (in_chunk>=block.logical) return fail(ErrorCode::format,"file offset maps outside RAW block");
             if (raw_verified_) {
-                std::size_t copied=0;
-                st=read_immutable_raw(block,in_chunk,length-done,target,copied,stored);
-                if (!st) return st;
-                done+=copied;
-                continue;
+                const auto amount=std::min<std::size_t>(length-done,block.logical-in_chunk);
+                const auto begin=in_chunk/check_size*check_size;
+                const auto end=std::min<std::size_t>(block.logical,((in_chunk+amount-1)/check_size+1)*check_size);
+                const auto pinned=source_->immutable_view(block.offset+begin,end-begin);
+                // Without direct views, preserve multi-block positional IO
+                // coalescing. A direct view is passed through, never probed
+                // twice (which would serialize a second mapping lookup).
+                if (pinned.data || amount==length-done) {
+                    std::size_t copied=0;
+                    st=read_immutable_raw(block,in_chunk,length-done,target,copied,stored,sink==Sink::partial,pinned);
+                    done+=copied;
+                    if (!st) return st;
+                    continue;
+                }
             }
             // RAW: read and verify only the 16 KiB slices covering the request.
             // Bytes reach the caller only after their slices have verified.
-            if (in_chunk>=block.logical) return fail(ErrorCode::format,"file offset maps outside RAW block");
             const auto amount=std::min<std::size_t>(length-done,block.logical-in_chunk);
             if (options_.verify_read_blocks) {
                 // A run of RAW blocks stored back to back is fetched with one
@@ -2235,7 +2247,8 @@ inline Status Archive::read_range(std::uint32_t file_id, std::uint64_t offset, s
                     const auto& piece=pieces[i];
                     std::uint8_t* const out=destination+done;
                     std::size_t verified=0;
-                    st=verify_slices(piece.block,bytes,piece.begin/check_size,piece.span,sink==Sink::partial ? &verified : nullptr);
+                    const bool known=raw_verified_ && range_verification_cached(FileId{file_id},offset+done,piece.amount);
+                    st=known ? ok_status() : verify_slices(piece.block,bytes,piece.begin/check_size,piece.span,sink==Sink::partial ? &verified : nullptr);
                     if (!st) {
                         // Partial reads keep the verified slices in front of the bad one.
                         if (sink==Sink::partial && piece.begin+verified>piece.in_chunk) {
@@ -2246,6 +2259,7 @@ inline Status Archive::read_range(std::uint32_t file_id, std::uint64_t offset, s
                         scrub();
                         return st;
                     }
+                    if (raw_verified_ && !known) remember_raw_verification(piece.block,piece.begin/check_size,piece.span);
                     if (!direct) std::memcpy(out,bytes+(piece.in_chunk-piece.begin),piece.amount);
                     done+=piece.amount;
                     bytes+=piece.span;
@@ -2377,10 +2391,21 @@ inline Status Archive::verify_slices(const Block& block, const std::uint8_t* byt
     return ok_status();
 }
 
+inline void Archive::remember_raw_verification(const Block& block, std::size_t first_slice, std::size_t size) const {
+    auto index=std::size_t(block.first_check)+first_slice;
+    auto remaining=(size+check_size-1)/check_size;
+    while (remaining) {
+        const auto bit=index%64, n=std::min<std::size_t>(remaining,64-bit);
+        const auto mask=(n==64 ? ~0ull : ((1ull<<n)-1))<<bit;
+        raw_verified_[index/64].fetch_or(mask,std::memory_order_release);
+        index+=n; remaining-=n;
+    }
+}
+
 // Cache verification state, never RAW payload. This is safe only for sources
 // which pin their bytes immutable; all other adapters retain normal verification.
 inline Status Archive::read_immutable_raw(const Block& block, std::size_t offset, std::size_t wanted,
-                                         std::uint8_t* output, std::size_t& copied, ReadBuffer& stored) const {
+                                         std::uint8_t* output, std::size_t& copied, ReadBuffer& stored, bool partial, const ImmutableReadView& pinned) const {
     copied=0;
     if (offset>=block.logical) return fail(ErrorCode::format,"RAW offset outside block");
     const auto amount=std::min<std::size_t>(wanted,block.logical-offset);
@@ -2389,21 +2414,19 @@ inline Status Archive::read_immutable_raw(const Block& block, std::size_t offset
     const auto end=std::min<std::size_t>(block.logical,(last+1)*check_size);
     const auto first_index=static_cast<std::size_t>(block.first_check)+first;
     const auto count=last-first+1;
-    const auto visit_words=[&](bool mark) {
+    const auto visit_words=[&]() {
         bool complete=true;
         auto index=first_index, remaining=count;
         while (remaining) {
             const auto bit=index%64, n=std::min<std::size_t>(remaining,64-bit);
             const auto mask=(n==64 ? ~0ull : ((1ull<<n)-1))<<bit;
             auto& word=raw_verified_[index/64];
-            if (mark) word.fetch_or(mask,std::memory_order_release);
-            else if ((word.load(std::memory_order_acquire)&mask)!=mask) complete=false;
+            if ((word.load(std::memory_order_acquire)&mask)!=mask) complete=false;
             index+=n; remaining-=n;
         }
         return complete;
     };
-    const bool verified=visit_words(false);
-    const auto pinned=source_->immutable_view(block.offset+begin,end-begin);
+    const bool verified=visit_words();
     const auto* view=pinned.data;
     const std::uint8_t* bytes=view;
     std::size_t origin=begin;
@@ -2416,9 +2439,16 @@ inline Status Archive::read_immutable_raw(const Block& block, std::size_t offset
         if (block_cache_) { BlockCache::add(block_cache_->counter().raw_reads); BlockCache::add(block_cache_->counter().raw_bytes,n); }
     }
     if (!verified) {
-        auto checked=verify_slices(block,bytes+begin-origin,first,end-begin);
-        if (!checked) return checked;
-        visit_words(true);
+        std::size_t good=0;
+        auto checked=verify_slices(block,bytes+begin-origin,first,end-begin,partial?&good:nullptr);
+        if (!checked) {
+            if (partial && begin+good>offset) {
+                copied=std::min(amount,begin+good-offset);
+                std::memcpy(output,bytes+offset-origin,copied);
+            }
+            return checked;
+        }
+        remember_raw_verification(block,first,end-begin);
     }
     auto status=check_cancelled(); if (!status) return status;
     std::memcpy(output,bytes+offset-origin,amount);

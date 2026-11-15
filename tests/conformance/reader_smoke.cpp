@@ -81,7 +81,7 @@ class ImmutableMemorySource final : public nx::RandomAccessSource {
     const std::vector<std::uint8_t> bytes_;
     bool view_;
 public:
-    std::atomic<std::uint64_t> payload_bytes{0};
+    std::atomic<std::uint64_t> payload_bytes{0}, payload_calls{0};
     explicit ImmutableMemorySource(std::vector<std::uint8_t> bytes,bool view):bytes_(std::move(bytes)),view_(view){}
     std::uint64_t size() const noexcept override { return bytes_.size(); }
     bool immutable_reads() const noexcept override { return true; }
@@ -91,7 +91,7 @@ public:
     bool read_at(std::uint64_t at,std::uint8_t* out,std::size_t n) override {
         if(at>bytes_.size() || n>bytes_.size()-at)return false;
         const auto begin=read_u64_le(bytes_.data()+56),end=begin+read_u64_le(bytes_.data()+64);
-        if(at<end && at+n>begin)payload_bytes+=std::min<std::uint64_t>(at+n,end)-std::max(at,begin);
+        if(at<end && at+n>begin) {payload_bytes+=std::min<std::uint64_t>(at+n,end)-std::max(at,begin);++payload_calls;}
         std::memcpy(out,bytes_.data()+at,n);return true;
     }
 };
@@ -576,6 +576,72 @@ static int review_regressions(const std::string& directory) {
                   "immutable RAW verification hit failed"))return 1;
         if(!check(read_only.value->cache_stats().bytes==0 && read_only.value->cache_stats().raw_verification_bytes<=8,
                   "verification cache retained RAW payload"))return 1;
+        ImmutableMemorySource large_source(bytes,view);
+        auto large_read=nx::Archive::open(large_source,immutable);
+        if(!large_read || !large_read.value->mount())return 1;
+        std::vector<std::uint8_t> whole(65537);
+        for(unsigned repeat=0;repeat<2;++repeat) {
+            large_source.payload_calls=0;
+            if(!check(large_read.value->read_file(nx::FileId{0},0,whole.size(),whole.data(),whole.size()) &&
+                      large_source.payload_calls==(view?0:1) &&
+                      large_read.value->range_verification_cached(nx::FileId{0},0,whole.size()),
+                      "immutable RAW large read lost IO coalescing or verification state"))return 1;
+            for(std::size_t i=0;i<whole.size();++i)
+                if(!check(whole[i]==static_cast<std::uint8_t>((i*31+7)%256),"coalesced immutable RAW bytes differ"))return 1;
+        }
+        large_source.payload_bytes=0;
+        if(!check(large_read.value->verify_all() && large_source.payload_bytes>=whole.size(),
+                  "full verification bypassed physical payload with RAW bitmap populated"))return 1;
+        for(bool atomic:{false,true}) {
+            auto damaged_tail=bytes;
+            damaged_tail[static_cast<std::size_t>(read_u64_le(bytes.data()+56))+65536]^=1;
+            ImmutableMemorySource tail_source(std::move(damaged_tail),view);
+            auto tail_options=immutable;tail_options.atomic_reads=atomic;
+            auto tail=nx::Archive::open(tail_source,tail_options);
+            if(!tail || !tail.value->mount())return 1;
+            std::vector<std::uint8_t> output(65537,0xa5);
+            auto failure=tail.value->read_file(nx::FileId{0},0,output.size(),output.data(),output.size());
+            const std::size_t good=atomic?0:65536;
+            if(!check(!failure && failure.error.code==nx::ErrorCode::integrity && failure.bytes==good,
+                      "coalesced immutable RAW corruption lost verified prefix"))return 1;
+            for(std::size_t i=0;i<output.size();++i) {
+                const auto expected=i<good?static_cast<std::uint8_t>((i*31+7)%256):std::uint8_t(0xa5);
+                if(!check(output[i]==expected || (!atomic && i==good && output[i]==0),
+                          "coalesced immutable RAW corruption exposed unverified data"))return 1;
+            }
+        }
+        // A failed mount must release the optional verification bitmap too.
+        auto rejected_options=immutable;rejected_options.max_total_snapshot_nodes=0;
+        ImmutableMemorySource rejected_source(bytes,view);
+        auto rejected=nx::Archive::open(rejected_source,rejected_options);
+        if(!rejected)return 1;
+        for(unsigned retry=0;retry<2;++retry) {
+            auto failed_mount=rejected.value->mount();
+            if(!check(!failed_mount && !rejected.value->mounted() &&
+                      rejected.value->cache_stats().raw_verification_bytes==0,
+                      "failed mount retained verification bitmap"))return 1;
+        }
+        // Corruption in a later RAW slice preserves the exact verified prefix
+        // in partial mode, and preserves all output in atomic mode.
+        for(bool atomic:{false,true}) {
+            auto damaged_prefix=bytes;
+            damaged_prefix[static_cast<std::size_t>(read_u64_le(bytes.data()+56))+16384+5]^=1;
+            ImmutableMemorySource prefix_source(std::move(damaged_prefix),view);
+            auto prefix_options=immutable;prefix_options.atomic_reads=atomic;
+            auto prefix=nx::Archive::open(prefix_source,prefix_options);
+            if(!prefix || !prefix.value->mount())return 1;
+            std::vector<std::uint8_t> output(32768+23,0xa5);
+            auto failure=prefix.value->read_file(nx::FileId{0},1,output.size(),output.data(),output.size());
+            const std::size_t good=atomic?0:16383;
+            if(!check(!failure && failure.error.code==nx::ErrorCode::integrity && failure.bytes==good,
+                      "immutable RAW corruption lost partial-read progress"))return 1;
+            for(std::size_t i=0;i<output.size();++i) {
+                const auto expected=i<good?static_cast<std::uint8_t>(((i+1)*31+7)%256):std::uint8_t(0xa5);
+                if(!check(output[i]==expected,"immutable RAW corruption exposed invalid bytes"))return 1;
+            }
+            if(!check(!prefix.value->range_verification_cached(nx::FileId{0},16384,1),
+                      "corrupt slice was recorded as verified"))return 1;
+        }
         auto copy=*read_only.value;
         if(!check(copy.read_file(nx::FileId{0},2,1,&out,1) && out==69,"copied immutable archive lost verification state"))return 1;
         std::atomic<unsigned> immutable_errors{0};
@@ -608,6 +674,17 @@ static int review_regressions(const std::string& directory) {
         if(!check(!failed && failed.error.code==nx::ErrorCode::integrity && out==0xa5,
                   "immutable RAW corrupt bytes escaped before verification"))return 1;
         if(!check(!bad.value->range_verification_cached(nx::FileId{0},0,1),"corrupt RAW range marked verified"))return 1;
+    }
+    {
+        CountingMemorySource uncertified(bytes);
+        auto options=cached;options.cache_raw_verification=true;
+        auto fallback=nx::Archive::open(uncertified,options);
+        if(!fallback || !fallback.value->mount())return 1;
+        uncertified.reset_data_counts();
+        if(!check(fallback.value->read_file(nx::FileId{0},0,1,&out,1) &&
+                  fallback.value->read_file(nx::FileId{0},1,1,&out,1) &&
+                  fallback.value->cache_stats().raw_verification_bytes==0 &&
+                  uncertified.data_bytes()==32768,"uncertified source reused RAW verification"))return 1;
     }
     bytes[static_cast<std::size_t>(read_u64_le(bytes.data()+56))]^=1;
     if (!check(!archive.verify_all(),"full verification trusted a stale decoded cache")) return 1;
