@@ -174,6 +174,44 @@ alive and not throw. Zstandard must consume exactly one independent frame.
 subsequent demand work and checks cancellation after in-flight callbacks return;
 it cannot forcibly interrupt an OS read or external decoder callback.
 
+## Recommended source settings for emulators
+
+Use these settings for a game archive on a local disk (Lichii does):
+
+```cpp
+auto source = nx::DiskSource::open(path);  // not open_mapped()
+options.reader.cache_raw_verification = source->immutable_reads();
+```
+
+- `DiskSource::open()`: positional reads (overlapped `ReadFile` on Windows,
+  `pread` on POSIX). It was the fastest source in every measured case below
+  except re-reading a small hot set.
+- `cache_raw_verification = immutable_reads()`: on Windows the handle denies
+  writers, so a RAW slice checked once does not need its CRC again (about 3 us
+  saved per small re-read, +15-25 % on random 4 KiB reads). On POSIX
+  `immutable_reads()` is false: locks are only advisory, another process may
+  change the bytes, so every read keeps its CRC check. Do not force it on.
+- A wrapper source (decoder pool, logging) must forward `immutable_reads()`
+  and `immutable_view()` to the wrapped source, or the cache stays off.
+
+Why not `open_mapped()` everywhere: mapped views copy from file pages, and the
+first touch of each 4 KiB page is a page fault, even when the OS already caches
+the file. Measured on Windows 11 (6.2 GB archive, SATA SSD, default `Session`,
+1 MiB sequential loads and 4/64 KiB random reads, 1 and 4 threads):
+
+| Case | `open_mapped()` vs `open()` |
+|---|---|
+| First load, cold OS cache | 17-43 % slower |
+| OS cache warm, new process | 2-4x slower |
+| Random reads over a game larger than the 1 GiB of views, repeated | about 4x slower (views keep being remapped) |
+| Same data under 1 GiB re-read in one process | about 3x faster |
+
+An emulator mostly does the first three. Keep `open_mapped()` for workloads
+known to re-read a small hot set. It is Windows-only; it is not ported to POSIX
+because it would be slower there too and POSIX cannot exclude writers. On Linux,
+`POSIX_FADV_RANDOM` was also measured and rejected: random reads +5-8 %,
+sequential loads 20-55 % slower (the kernel read-ahead helps loading).
+
 ## NXEmu integration
 
 `vfs_nx.cpp` supplies read-only `VfsFile`/`VfsDirectory` objects. Handles retain
