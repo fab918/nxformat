@@ -265,10 +265,21 @@ struct PartialRead : Status {
 
 // Backing bytes must remain immutable from open() until Archive destruction.
 // File adapters must prevent writes; remote adapters must pin an object version.
+struct ImmutableReadView {
+    const std::uint8_t* data=nullptr;
+    std::shared_ptr<const void> owner;
+};
 struct RandomAccessSource {
     virtual ~RandomAccessSource() = default;
     virtual std::uint64_t size() const noexcept = 0;
     virtual bool read_at(std::uint64_t offset, std::uint8_t* destination, std::size_t length) = 0;
+    // Opt-in only for adapters which actually prevent writes for this source's
+    // lifetime (for example an OS file handle denying shared write access).
+    virtual bool immutable_reads() const noexcept { return false; }
+    // Optional stable, read-only view. Bytes must remain immutable and the
+    // pointer valid while owner is held (or until source destruction if owner
+    // is empty). A lease permits bounded providers to evict views safely.
+    virtual ImmutableReadView immutable_view(std::uint64_t, std::size_t) const noexcept { return {}; }
 };
 
 // The callback must decode exactly one standard frame, reject dictionaries,
@@ -319,6 +330,11 @@ struct OpenOptions {
     // Diagnostic clocks require NX_READER_DIAGNOSTICS at build time as well.
     // Normal builds contain no added clock calls or hot copy-path branches.
     bool collect_read_timing = false;
+    // Verification-only RAW caching is opt-in and requires a source which
+    // guarantees immutability. No RAW payload is retained.
+    bool cache_raw_verification = false;
+    std::uint64_t max_raw_verification_bytes = 1024*1024;
+
 };
 
 // Per mounted archive; keys are physical block IDs shared by every file/snapshot.
@@ -328,6 +344,7 @@ struct CacheStats {
     std::uint64_t stored_bytes_read = 0, evictions = 0;
     std::uint64_t bytes = 0, peak_bytes = 0, entries = 0;
     std::uint64_t io_ns = 0, hash_ns = 0, copy_ns = 0;
+    std::uint64_t raw_verification_bytes = 0;
 };
 
 // Source data has independent roots, never executable snapshot ownership.
@@ -686,7 +703,7 @@ struct Archive {
             bytes(directories_)+bytes(entries_)+bytes(files_)+bytes(block_refs_)+bytes(block_logical_sizes_);
     }
     CacheStats cache_stats() const {
-        if (!block_cache_) return {};
+        if (!block_cache_) { CacheStats result; result.raw_verification_bytes=raw_verification_bytes_; return result; }
         std::lock_guard<std::shared_mutex> lock(block_cache_->mutex);
         auto result = block_cache_->stats;
         for (const auto& slot : block_cache_->counters) {
@@ -699,6 +716,7 @@ struct Archive {
         }
         result.bytes = block_cache_->bytes;
         result.entries = block_cache_->entries.size();
+        result.raw_verification_bytes=raw_verification_bytes_;
         return result;
     }
     // Relationships may refer to omitted provenance snapshots. A native loader
@@ -999,9 +1017,12 @@ private:
         std::list<std::uint32_t> spare_position;
         // Counters not in CounterSlot; written under the exclusive lock.
         CacheStats stats;
+
     };
     std::shared_ptr<BlockCache> block_cache_;
     std::vector<std::uint8_t> index_bytes_;
+    std::shared_ptr<std::atomic<std::uint64_t>[]> raw_verified_;
+    std::uint64_t raw_verification_bytes_=0;
     Status check_cancelled() const {
         return options_.is_cancelled && options_.is_cancelled(options_.cancellation_context)
             ? fail(ErrorCode::cancelled,"archive operation cancelled") : ok_status();
@@ -1112,6 +1133,8 @@ private:
     // `verified`, when given, receives how many leading bytes passed before a mismatch.
     Status verify_slices(const Block& block, const std::uint8_t* bytes, std::size_t first_slice, std::size_t size,
                          std::size_t* verified = nullptr) const;
+    Status read_immutable_raw(const Block& block, std::size_t offset, std::size_t wanted,
+                              std::uint8_t* output, std::size_t& copied, ReadBuffer& stored) const;
     Status read_cached_slice(std::uint32_t id, std::size_t offset, std::size_t wanted,
                              std::uint8_t* output, std::size_t& copied, ReadBuffer& stored) const;
     Status load_block(std::uint32_t id, bool verify, detail::LogicalBytes& logical,
@@ -1133,6 +1156,7 @@ private:
     static constexpr std::size_t raw_run_bytes = 1024 * 1024;
     Status read_range(std::uint32_t file_id, std::uint64_t offset, std::size_t length,
                       std::uint8_t* destination, Sink sink, std::size_t& done);
+
 };
 
 inline Status Archive::parse_catalog() {
@@ -1822,10 +1846,21 @@ inline Status Archive::mount_impl() {
     Status st=capture(index_offset_,block_count_*24ull,0); if (!st) return st;
     st=capture(integrity_offset_,integrity_size_,block_count_*24ull); if (!st) return st;
     if (index_hash.finish()!=index_digest_) return fail(ErrorCode::integrity,"index_sha256 mismatch");
+    if (options_.cache_raw_verification && options_.verify_read_blocks && source_->immutable_reads()) {
+        const auto words=(integrity_size_/4+63)/64;
+        const auto bytes=words*sizeof(std::atomic<std::uint64_t>);
+        if (bytes && bytes<=options_.max_raw_verification_bytes) {
+            raw_verified_.reset(new std::atomic<std::uint64_t>[static_cast<std::size_t>(words)],
+                                std::default_delete<std::atomic<std::uint64_t>[]>());
+            for (std::size_t i=0;i<words;++i) raw_verified_[i].store(0,std::memory_order_relaxed);
+            raw_verification_bytes_=bytes;
+        }
+    }
     if (options_.collect_read_stats || options_.collect_read_timing || (options_.max_cached_block_bytes && options_.max_cached_blocks)) {
         block_cache_=std::make_shared<BlockCache>();
         // No rehash while filling the cache up to its entry limit.
         block_cache_->entries.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(options_.max_cached_blocks,65536)));
+
     }
 
     manifest_bytes_.resize(static_cast<std::size_t>(manifest_size_));
@@ -2103,6 +2138,13 @@ inline Status Archive::read_range(std::uint32_t file_id, std::uint64_t offset, s
         Block block;
         st=block_record(block_id,block); if (!st) return st;
         if (block.codec==0) {
+            if (raw_verified_) {
+                std::size_t copied=0;
+                st=read_immutable_raw(block,in_chunk,length-done,target,copied,stored);
+                if (!st) return st;
+                done+=copied;
+                continue;
+            }
             // RAW: read and verify only the 16 KiB slices covering the request.
             // Bytes reach the caller only after their slices have verified.
             if (in_chunk>=block.logical) return fail(ErrorCode::format,"file offset maps outside RAW block");
@@ -2301,6 +2343,55 @@ inline Status Archive::verify_slices(const Block& block, const std::uint8_t* byt
     return ok_status();
 }
 
+// Cache verification state, never RAW payload. This is safe only for sources
+// which pin their bytes immutable; all other adapters retain normal verification.
+inline Status Archive::read_immutable_raw(const Block& block, std::size_t offset, std::size_t wanted,
+                                         std::uint8_t* output, std::size_t& copied, ReadBuffer& stored) const {
+    copied=0;
+    if (offset>=block.logical) return fail(ErrorCode::format,"RAW offset outside block");
+    const auto amount=std::min<std::size_t>(wanted,block.logical-offset);
+    const auto first=offset/check_size, last=(offset+amount-1)/check_size;
+    const auto begin=first*check_size;
+    const auto end=std::min<std::size_t>(block.logical,(last+1)*check_size);
+    const auto first_index=static_cast<std::size_t>(block.first_check)+first;
+    const auto count=last-first+1;
+    const auto visit_words=[&](bool mark) {
+        bool complete=true;
+        auto index=first_index, remaining=count;
+        while (remaining) {
+            const auto bit=index%64, n=std::min<std::size_t>(remaining,64-bit);
+            const auto mask=(n==64 ? ~0ull : ((1ull<<n)-1))<<bit;
+            auto& word=raw_verified_[index/64];
+            if (mark) word.fetch_or(mask,std::memory_order_release);
+            else if ((word.load(std::memory_order_acquire)&mask)!=mask) complete=false;
+            index+=n; remaining-=n;
+        }
+        return complete;
+    };
+    const bool verified=visit_words(false);
+    const auto pinned=source_->immutable_view(block.offset+begin,end-begin);
+    const auto* view=pinned.data;
+    const std::uint8_t* bytes=view;
+    std::size_t origin=begin;
+    if (!view) {
+        const auto n=verified ? amount : end-begin;
+        origin=verified ? offset : begin;
+        stored.reserve(n);
+        if (!read(block.offset+origin,stored.bytes.get(),n)) return fail(ErrorCode::io,"immutable RAW read failed");
+        bytes=stored.bytes.get();
+        if (block_cache_) { BlockCache::add(block_cache_->counter().raw_reads); BlockCache::add(block_cache_->counter().raw_bytes,n); }
+    }
+    if (!verified) {
+        auto checked=verify_slices(block,bytes+begin-origin,first,end-begin);
+        if (!checked) return checked;
+        visit_words(true);
+    }
+    auto status=check_cancelled(); if (!status) return status;
+    std::memcpy(output,bytes+offset-origin,amount);
+    copied=amount;
+    return ok_status();
+}
+
 inline Status Archive::read_cached_slice(std::uint32_t id, std::size_t offset, std::size_t wanted,
                                                 std::uint8_t* output, std::size_t& copied, ReadBuffer& stored) const {
     auto status=check_cancelled(); if (!status) return status;
@@ -2357,7 +2448,9 @@ inline Status Archive::read_cached_slice(std::uint32_t id, std::size_t offset, s
         reuse=std::move(cache.spare);
         if (reuse) logical.swap(reuse->bytes);
     }
-    status=load_block(id,true,logical,nullptr,&stored); if (!status) return status;
+    Block record;
+    status=block_record(id,record); if (!status) return status;
+    status=load_block(id,true,logical,&record,&stored); if (!status) return status;
     status=check_cancelled(); if (!status) return status;
     if (offset>=logical.size()) return fail(ErrorCode::format,"file offset maps outside decoded block");
     if (options_.max_cached_blocks && logical.size()<=options_.max_cached_block_bytes) {

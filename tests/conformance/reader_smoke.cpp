@@ -76,6 +76,26 @@ private:
     const std::vector<std::uint8_t>& bytes_;
 };
 
+static std::uint64_t read_u64_le(const std::uint8_t* p);
+class ImmutableMemorySource final : public nx::RandomAccessSource {
+    const std::vector<std::uint8_t> bytes_;
+    bool view_;
+public:
+    std::atomic<std::uint64_t> payload_bytes{0};
+    explicit ImmutableMemorySource(std::vector<std::uint8_t> bytes,bool view):bytes_(std::move(bytes)),view_(view){}
+    std::uint64_t size() const noexcept override { return bytes_.size(); }
+    bool immutable_reads() const noexcept override { return true; }
+    nx::ImmutableReadView immutable_view(std::uint64_t at,std::size_t n) const noexcept override {
+        return {view_ && at<=bytes_.size() && n<=bytes_.size()-at ? bytes_.data()+at : nullptr,{}};
+    }
+    bool read_at(std::uint64_t at,std::uint8_t* out,std::size_t n) override {
+        if(at>bytes_.size() || n>bytes_.size()-at)return false;
+        const auto begin=read_u64_le(bytes_.data()+56),end=begin+read_u64_le(bytes_.data()+64);
+        if(at<end && at+n>begin)payload_bytes+=std::min<std::uint64_t>(at+n,end)-std::max(at,begin);
+        std::memcpy(out,bytes_.data()+at,n);return true;
+    }
+};
+
 class FailPayloadSource final : public nx::RandomAccessSource {
 public:
     explicit FailPayloadSource(const std::vector<std::uint8_t>& bytes) : bytes_(bytes) {}
@@ -533,6 +553,53 @@ static int review_regressions(const std::string& directory) {
     if (!check(archive.read_file(nx::FileId{0},65536,1,&out,1) && counted.data_bytes()==32769,"short RAW tail block")) return 1;
     if (!check(archive.read_file(nx::FileId{0},0,1,&out,1) && counted.data_bytes()==49153 && archive.cache_stats().entries==0,"RAW block entered the decoded cache")) return 1;
     // verify_all must read physical payloads even when verified blocks are cached.
+    // Verification-only caching requires an owned immutable source. It keeps
+    // no payload and supports both stable views and ordinary bounded reads.
+    for (bool view:{false,true}) {
+        nx::OpenOptions immutable;
+        immutable.cache_raw_verification=true; immutable.max_cached_block_bytes=0;
+        ImmutableMemorySource pinned(bytes,view);
+        auto read_only=nx::Archive::open(pinned,immutable);
+        if(!read_only || !read_only.value->mount())return 1;
+        pinned.payload_bytes=0;
+        if(!check(read_only.value->read_file(nx::FileId{0},0,1,&out,1) && out==7,
+                  "immutable RAW initial validation failed"))return 1;
+        if(!check(pinned.payload_bytes==(view?0:16384),"immutable RAW first-slice IO changed"))return 1;
+        pinned.payload_bytes=0;
+        if(!check(read_only.value->read_file(nx::FileId{0},1,1,&out,1) && out==38 && pinned.payload_bytes==(view?0:1),
+                  "immutable RAW verification hit failed"))return 1;
+        if(!check(read_only.value->cache_stats().bytes==0 && read_only.value->cache_stats().raw_verification_bytes<=8,
+                  "verification cache retained RAW payload"))return 1;
+        auto copy=*read_only.value;
+        if(!check(copy.read_file(nx::FileId{0},2,1,&out,1) && out==69,"copied immutable archive lost verification state"))return 1;
+        std::atomic<unsigned> immutable_errors{0};
+        std::vector<std::thread> immutable_workers;
+        for(unsigned t=0;t<4;++t)immutable_workers.emplace_back([&,t]{
+            for(unsigned i=0;i<64;++i) {
+                const auto at=(i*1049+t*8191)%65536;
+                std::uint8_t byte=0;
+                if(!copy.read_file(nx::FileId{0},at,1,&byte,1) || byte!=static_cast<std::uint8_t>((at*31+7)%256))++immutable_errors;
+            }
+        });
+        for(auto& worker:immutable_workers)worker.join();
+        if(!check(immutable_errors==0,"concurrent immutable verification failed"))return 1;
+        auto disabled=immutable;disabled.max_raw_verification_bytes=0;
+        ImmutableMemorySource limited(bytes,view);
+        auto uncached=nx::Archive::open(limited,disabled);
+        if(!uncached || !uncached.value->mount())return 1;
+        if(!check(uncached.value->cache_stats().raw_verification_bytes==0 &&
+                  uncached.value->read_file(nx::FileId{0},0,1,&out,1) && out==7,
+                  "zero metadata budget did not fall back safely"))return 1;
+        auto damaged=bytes;
+        damaged[static_cast<std::size_t>(read_u64_le(damaged.data()+56))]^=1;
+        ImmutableMemorySource bad_source(std::move(damaged),view);
+        auto bad=nx::Archive::open(bad_source,immutable);
+        if(!bad || !bad.value->mount())return 1;
+        out=0xa5;
+        auto failed=bad.value->read_file(nx::FileId{0},0,1,&out,1);
+        if(!check(!failed && failed.error.code==nx::ErrorCode::integrity && out==0xa5,
+                  "immutable RAW corrupt bytes escaped before verification"))return 1;
+    }
     bytes[static_cast<std::size_t>(read_u64_le(bytes.data()+56))]^=1;
     if (!check(!archive.verify_all(),"full verification trusted a stale decoded cache")) return 1;
 
