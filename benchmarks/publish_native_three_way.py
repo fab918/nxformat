@@ -150,32 +150,32 @@ no emulator source, benchmark binary or game content is vendored in releases.
  plt.rcParams.update({'font.family':'DejaVu Sans','font.size':10,'text.color':'#19243C','axes.spines.top':False,'axes.spines.right':False,'figure.facecolor':'#F6F8FC','axes.facecolor':'white','savefig.facecolor':'#F6F8FC'})
  fig,axes=plt.subplots(1,2,figsize=(13,6),layout='constrained');scenarios=['random_4096','sequential_32mib','interleaved_8files'];names=['Random 4 KiB','Sequential 256 KiB','Interleaved 64 KiB']
  for ax,field,title,unit in zip(axes,('p99_us','peak_working_set'),('Read latency · P99','Peak resident memory'),('Microseconds','MiB')):
-  for j,(v,label) in enumerate(LABEL.items()):
+  for j,(v,label) in enumerate((('nup_mapped','NUP v1'),('nx_verify_mapped','NX'))):
    values=[get('real_A',sc,32,v)[field]/(2**20 if field=='peak_working_set' else 1) for sc in scenarios]
-   bars=ax.bar([i+(j-1)*.24 for i in range(3)],values,.24,label=label,color=COLORS[j]);ax.bar_label(bars,fmt='%.1f',padding=3,fontsize=8)
+   bars=ax.bar([i+(j-.5)*.3 for i in range(3)],values,.3,label=label,color=[COLORS[0],COLORS[2]][j]);ax.bar_label(bars,fmt='%.1f',padding=3,fontsize=8)
   ax.set_xticks(range(3),names);ax.set_title(title,fontweight='bold');ax.set_ylabel(unit+' · lower is better');ax.grid(axis='y',alpha=.2);ax.set_axisbelow(True);ax.margins(y=.25)
- axes[0].legend();fig.suptitle('NUP v1 / NX main / NX new — repeated real-archive reads',fontsize=16,fontweight='bold');fig.supxlabel('Same native C++ read calls · 32 MiB data cache · median of 3 runs · no OS-cache flush\nPrivate commitment, limits and all measurements are in the report. No batching in this figure.',fontsize=10);fig.savefig(out/'native-sdk-comparison.png',dpi=170);plt.close(fig)
+ axes[0].legend();fig.suptitle('NUP v1 / NX — repeated real-archive reads',fontsize=16,fontweight='bold');fig.supxlabel('Same native C++ read calls · 32 MiB data cache · median of 3 runs · no OS-cache flush\nPrivate commitment, limits and all measurements are in the report. No batching in this figure.',fontsize=10);fig.savefig(out/'native-sdk-comparison.png',dpi=170);plt.close(fig)
  fig,axes=plt.subplots(2,2,figsize=(13,8),layout='constrained');plotcases=[('first_touch4k',128,False,'8 first accesses · 4 KiB'),('random4k',128,True,'512 scattered reads · all files fit'),('sequential64k',32,False,'Sequential 32 MiB · initial'),('sequential64k',32,True,'Sequential 32 MiB · primed')]
  for ax,(sc,budget,warm,title) in zip(axes.flat,plotcases):
-  vals=[bg(sc,budget,warm,v)['service_ms'] for v in ('nup','main','selective')]
-  bars=ax.barh([0,1,2],vals,color=COLORS);ax.set_yticks([0,1,2],['NUP v1','NX main','NX new · selective']);ax.invert_yaxis()
+  vals=[bg(sc,budget,warm,v)['service_ms'] for v in ('nup','selective')]
+  bars=ax.barh([0,1],vals,color=[COLORS[0],COLORS[2]]);ax.set_yticks([0,1],['NUP v1','NX']);ax.invert_yaxis()
   ax.bar_label(bars,labels=[f'{v:.4f}' if v<1 else f'{v:.2f}' for v in vals],padding=5)
-  ax.set_xlim(0,max(vals)*1.25);ax.set_xlabel('Total read service · ms · lower is better');ratio=max(vals[0],vals[2])/min(vals[0],vals[2]);winner='NX new' if vals[2]<vals[0] else 'NUP v1';other='NUP v1' if vals[2]<vals[0] else 'NX new'
+  ax.set_xlim(0,max(vals)*1.25);ax.set_xlabel('Total read service · ms · lower is better');ratio=max(vals[0],vals[-1])/min(vals[0],vals[-1]);winner='NX' if vals[-1]<vals[0] else 'NUP v1';other='NUP v1' if vals[-1]<vals[0] else 'NX'
   gain=f'{ratio:.0f}' if ratio>=100 else f'{ratio:.1f}'
   ax.set_title(title+'  /  '+str(budget)+' MiB cache'+'\n'+winner+' ~'+gain+'× faster than '+other,fontsize=11,fontweight='bold');ax.grid(axis='x',alpha=.2);ax.set_axisbelow(True)
- fig.suptitle('Native readers with 16 already-pending requests',fontsize=17,fontweight='bold');fig.supxlabel('Median of 5 runs · NX new uses explicit selective batching; other readers use ordinary calls.\nReal content, generated traces. First-access selection includes RAW/Zstd policy differences. Each panel has its own scale.',fontsize=10);fig.savefig(out/'pending-batch-comparison.png',dpi=170);plt.close(fig)
+ fig.suptitle('Native readers with 16 already-pending requests',fontsize=17,fontweight='bold');fig.supxlabel('Median of 5 runs · NX uses explicit selective batching; NUP v1 uses ordinary calls.\nReal content, generated traces. First-access selection includes RAW/Zstd policy differences. Each panel has its own scale.',fontsize=10);fig.savefig(out/'pending-batch-comparison.png',dpi=170);plt.close(fig)
  fig,axes=plt.subplots(1,2,figsize=(13,6),layout='constrained')
  memcases=[('first_touch4k',128,False),('random4k',128,True),('sequential64k',32,False),('sequential64k',32,True)]
  names=['First accesses\n128 MiB cache','Scattered · cached\n128 MiB cache','Sequential · initial\n32 MiB cache','Sequential · cached\n32 MiB cache']
  for ax,field,title in zip(axes,('resident','private_commit'),('Peak resident memory','Peak private commitment')):
-  for j,(v,label) in enumerate(zip(('nup','main','selective'),('NUP v1','NX main','NX new'))):
+  for j,(v,label) in enumerate(zip(('nup','selective'),('NUP v1','NX'))):
    values=[bg(sc,budget,warm,v)[field]/2**20 for sc,budget,warm in memcases]
-   bars=ax.bar([i+(j-1)*.24 for i in range(4)],values,.24,label=label,color=COLORS[j])
+   bars=ax.bar([i+(j-.5)*.3 for i in range(4)],values,.3,label=label,color=[COLORS[0],COLORS[2]][j])
    ax.bar_label(bars,fmt='%.1f',padding=3,fontsize=8)
   ax.set_xticks(range(4),names,fontsize=8);ax.set_title(title,fontweight='bold');ax.set_ylabel('MiB · lower is better');ax.grid(axis='y',alpha=.2);ax.set_axisbelow(True);ax.margins(y=.2)
  axes[0].legend(fontsize=9)
  fig.suptitle('Memory on the same four read workloads',fontsize=17,fontweight='bold')
- fig.supxlabel('Median of 5 process peaks · same real archive and common output buffers · NX new uses selective batching.\nResident memory includes mapped file pages. Private commitment is not physical RAM.',fontsize=10)
+ fig.supxlabel('Median of 5 process peaks · same real archive and common output buffers · NX uses selective batching.\nResident memory includes mapped file pages. Private commitment is not physical RAM.',fontsize=10)
  fig.savefig(out/'pending-batch-memory.png',dpi=170);plt.close(fig)
  print('Published',len(rows),'sync and',len(brows),'batch configurations')
 if __name__=='__main__':main()

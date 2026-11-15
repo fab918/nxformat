@@ -80,41 +80,40 @@ NX reads independent blocks and reuses integrity checks for immutable data.
 This keeps small reads fast without caching whole decoded files.
 
 The comparison below uses **native C++ readers**, the same compiler, Zstd library
-and mapped input provider. **NX main** is `b6a9de8`; **NX new** is `5d4810a` with
-verification reuse and the explicit selective-batching prototype enabled.
+and mapped input provider. **NX** enables verification reuse and the explicit
+selective-batching prototype.
 Each reader receives the same **16 already-pending requests**, with no queue-fill
 wait. Values are medians of five runs on the same real archive.
 
-![Read performance: NUP v1, NX main and NX new](docs/benchmarks/three-way-reader-2026-11-15/pending-batch-comparison.png)
+![Read performance: NUP v1 and NX](docs/benchmarks/three-way-reader-2026-11-15/pending-batch-comparison.png)
 
 **Read time in milliseconds — lower is better.**
 
-| Workload | Cache budget | NUP v1 | NX main | NX new |
-|---|---:|---:|---:|---:|
-| 8 first accesses · 4 KiB | 128 MiB | 86.129 | 0.775 | **0.758** |
-| 512 scattered reads · all files cached | 128 MiB | **0.081** | 1.019 | 0.161 |
-| Sequential 32 MiB · first pass | 32 MiB | 26.989 | 12.321 | **9.418** |
-| Sequential 32 MiB · repeated pass | 32 MiB | 2.663 | 3.991 | **1.788** |
+| Workload | Cache budget | NUP v1 | NX |
+|---|---:|---:|---:|
+| 8 first accesses · 4 KiB | 128 MiB | 86.129 | **0.758** |
+| 512 scattered reads · all files cached | 128 MiB | **0.081** | 0.161 |
+| Sequential 32 MiB · first pass | 32 MiB | 26.989 | **9.418** |
+| Sequential 32 MiB · repeated pass | 32 MiB | 2.663 | **1.788** |
 
-NX new is about **6.3× faster than NX main** on the cached scattered-read trace.
-NUP v1 wins that trace, while NX uses much less memory. The targeted first-access
-case is about **114× faster than NUP v1**; this advantage is already largely
-present in NX main. It includes storage-policy differences: five requested NX
-starting blocks are RAW and three are Zstd, while all eight NUP files are compressed.
+NUP v1 wins the cached scattered-read trace, while NX uses much less memory.
+The targeted first-access case is about **114× faster than NUP v1**. It includes
+storage-policy differences: five requested NX starting blocks are RAW and three
+are Zstd, while all eight NUP files are compressed.
 
-![Memory usage: NUP v1, NX main and NX new](docs/benchmarks/three-way-reader-2026-11-15/pending-batch-memory.png)
+![Memory usage: NUP v1 and NX](docs/benchmarks/three-way-reader-2026-11-15/pending-batch-memory.png)
 
 **Peak resident / private memory in MiB — same workloads, lower is better.**
 
-| Workload | NUP v1 | NX main | NX new |
-|---|---:|---:|---:|
-| 8 first accesses | 222.3 / 134.5 | 33.9 / 17.7 | 33.9 / 17.6 |
-| 512 scattered reads · all files cached | 222.3 / 134.6 | 54.8 / 26.4 | 54.8 / 26.5 |
-| Sequential 32 MiB · first pass | 128.8 / 83.3 | 97.8 / 49.9 | 98.1 / 50.3 |
-| Sequential 32 MiB · repeated pass | 113.2 / 67.6 | 97.8 / 50.0 | 97.9 / 50.0 |
+| Workload | NUP v1 | NX |
+|---|---:|---:|
+| 8 first accesses | 222.3 / 134.5 | 33.9 / 17.6 |
+| 512 scattered reads · all files cached | 222.3 / 134.6 | 54.8 / 26.5 |
+| Sequential 32 MiB · first pass | 128.8 / 83.3 | 98.1 / 50.3 |
+| Sequential 32 MiB · repeated pass | 113.2 / 67.6 | 97.9 / 50.0 |
 
 On the cached scattered-read trace, **NUP v1 uses about 4.1× the resident memory**
-of NX new. NX new keeps memory close to NX main without an extra RAW payload cache.
+of NX. NX retains no additional RAW payload cache.
 
 These are generated access patterns on real content, not recorded gameplay or
 FPS measurements. The OS cache was not flushed. Memory includes common benchmark
@@ -125,6 +124,7 @@ an integration with pending requests; it is not automatically used by every read
 [Full results, direct-read controls, run ranges and method](docs/benchmarks/three-way-reader-2026-11-15/README.md)
 include 1,894 process runs, byte checks, RAW/mixed controls, other cache budgets,
 private/resident memory and NUP temporary-file usage.
+
 
 ## Developer integration
 
