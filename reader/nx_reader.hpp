@@ -2654,18 +2654,18 @@ inline Status Archive::read_immutable_raw(const Block& block, std::size_t offset
     }
     if (!verified) {
         std::size_t good=0;
-        auto checked=verify_slices(block,bytes+begin-origin,first,end-begin,partial?&good:nullptr);
+        auto checked=verify_slices(block,bytes+(begin-origin),first,end-begin,partial?&good:nullptr);
         if (!checked) {
             if (partial && begin+good>offset) {
                 copied=std::min(amount,begin+good-offset);
-                std::memcpy(output,bytes+offset-origin,copied);
+                std::memcpy(output,bytes+(offset-origin),copied);
             }
             return checked;
         }
         remember_raw_verification(block,first,end-begin);
     }
     auto status=check_cancelled(); if (!status) return status;
-    std::memcpy(output,bytes+offset-origin,amount);
+    std::memcpy(output,bytes+(offset-origin),amount);
     copied=amount;
     return ok_status();
 }

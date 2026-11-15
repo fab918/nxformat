@@ -99,7 +99,7 @@ public:
                 const auto& region=regions_[i];
                 if(region && region->offset==base && offset-base<=region->length && length<=region->length-(offset-base)) {
                     referenced_[i]=true;
-                    return {region->data+offset-base,region};
+                    return {region->data+(offset-base),region};
                 }
             }
             auto region=std::make_shared<Region>();
@@ -117,7 +117,7 @@ public:
             }
             regions_[cursor_]=region; referenced_[cursor_]=true;
             cursor_=(cursor_+1)%regions_.size();
-            return {region->data+offset-base,region};
+            return {region->data+(offset-base),region};
         } catch(...) { return {}; } // ordinary read_at remains the fallback
     }
 };
