@@ -2587,7 +2587,7 @@ inline Status Archive::read_immutable_raw(const Block& block, std::size_t offset
         if (verified) {
             auto status=check_cancelled(); if (!status) return status;
             struct Copy { const std::uint8_t* source; std::uint8_t* target; std::size_t length; };
-            Copy copy{view+offset-begin,atomic_output?stored.bytes.get():output,amount};
+            Copy copy{view+(offset-begin),atomic_output?stored.bytes.get():output,amount};
             const auto operation=[](void* context) {
                 const auto& c=*static_cast<const Copy*>(context);
                 std::memcpy(c.target,c.source,c.length);
