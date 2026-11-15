@@ -86,6 +86,8 @@ Peak **resident / private commitment**, MiB, same cases and process peaks.
 
 ![Native pending-batch comparison](pending-batch-comparison.png)
 
+![Memory for the same pending workloads](pending-batch-memory.png)
+
 ## Limits, checks and complete data
 
 The selected first-access case targets eight NUP-compressed files. Of their eight

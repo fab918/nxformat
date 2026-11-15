@@ -76,37 +76,55 @@ integration; format validation alone does not establish game compatibility.
 
 ## Performance: NX vs NUP
 
-[Latest three-way native comparison: NUP v1, NX main and this branch, including resident/private memory](docs/benchmarks/three-way-reader-2026-11-15/README.md). Ordinary calls and explicit selective batching are measured separately.
+NX reads independent blocks and reuses integrity checks for immutable data.
+This keeps small reads fast without caching whole decoded files.
 
-NX reads compressed data in small, independent blocks. A small read can decode
-just the blocks it needs, keeping first accesses fast without caching whole files.
+The comparison below uses **native C++ readers**, the same compiler, Zstd library
+and mapped input provider. **NX main** is `b6a9de8`; **NX new** is `5d4810a` with
+verification reuse and the explicit selective-batching prototype enabled.
+Each reader receives the same **16 already-pending requests**, with no queue-fill
+wait. Values are medians of five runs on the same real archive.
 
-Both readers below are **native C++**, built with the same compiler and Zstd
-library, using the same mapped input adapter. Values are medians of three runs
-on a local real archive. NX enables its [immutable-source verification cache](docs/RAW_CACHE.md).
+![Read performance: NUP v1, NX main and NX new](docs/benchmarks/three-way-reader-2026-11-15/pending-batch-comparison.png)
 
-![Repeated reads and resident memory: NX vs NUP v1](docs/benchmarks/low-memory-reader-cache/readme-repeated-reads.png)
+**Read time in milliseconds — lower is better.**
 
-On the repeated random-read trace, NX uses **59 MiB of resident memory versus
-87 MiB for NUP v1**, with P99 read times of **0.5 / 0.4 microseconds**. Small
-warm-cache reads are fast with both readers; NUP v1 also wins some cases.
+| Workload | Cache budget | NUP v1 | NX main | NX new |
+|---|---:|---:|---:|---:|
+| 8 first accesses · 4 KiB | 128 MiB | 86.129 | 0.775 | **0.758** |
+| 512 scattered reads · all files cached | 128 MiB | **0.081** | 1.019 | 0.161 |
+| Sequential 32 MiB · first pass | 32 MiB | 26.989 | 12.321 | **9.418** |
+| Sequential 32 MiB · repeated pass | 32 MiB | 2.663 | 3.991 | **1.788** |
 
-![Initial and repeated compressed-file reads: NX vs NUP v1](docs/benchmarks/low-memory-reader-cache/readme-first-access.png)
+NX new is about **6.3× faster than NX main** on the cached scattered-read trace.
+NUP v1 wins that trace, while NX uses much less memory. The targeted first-access
+case is about **114× faster than NUP v1**; this advantage is already largely
+present in NX main. It includes storage-policy differences: five requested NX
+starting blocks are RAW and three are Zstd, while all eight NUP files are compressed.
 
-The second test targets the eight largest compressed files, with **128 MiB of
-cache so all eight fit in NUP v1**. Eight initial 4 KiB reads take **82.61 ms with
-NUP v1 and 0.76 ms with NX**, about **109× faster in this specific case**. Once
-files are cached, the gap narrows or NUP v1 wins. This compares block access
-and storage policies: of the eight requested starting blocks, NX stores five RAW
-and three with Zstd. It is not an overall-game speedup.
+![Memory usage: NUP v1, NX main and NX new](docs/benchmarks/three-way-reader-2026-11-15/pending-batch-memory.png)
 
-These are generated access patterns on real content, not recorded gameplay.
-The OS cache was not flushed. Resident memory includes mapped file pages; it
-is not total system RAM. RAW data and other cache budgets can give different
-results. [Full results and method](docs/benchmarks/low-memory-reader-cache/README.md)
-cover seven access patterns, RAW/mixed/real inputs, 0/8/32 MiB budgets and original
-reader controls. [Compressed-file details](docs/benchmarks/low-memory-reader-cache/REAL_COMPRESSED.md)
-include both initial and repeated passes, memory and byte-for-byte checks.
+**Peak resident / private memory in MiB — same workloads, lower is better.**
+
+| Workload | NUP v1 | NX main | NX new |
+|---|---:|---:|---:|
+| 8 first accesses | 222.3 / 134.5 | 33.9 / 17.7 | 33.9 / 17.6 |
+| 512 scattered reads · all files cached | 222.3 / 134.6 | 54.8 / 26.4 | 54.8 / 26.5 |
+| Sequential 32 MiB · first pass | 128.8 / 83.3 | 97.8 / 49.9 | 98.1 / 50.3 |
+| Sequential 32 MiB · repeated pass | 113.2 / 67.6 | 97.8 / 50.0 | 97.9 / 50.0 |
+
+On the cached scattered-read trace, **NUP v1 uses about 4.1× the resident memory**
+of NX new. NX new keeps memory close to NX main without an extra RAW payload cache.
+
+These are generated access patterns on real content, not recorded gameplay or
+FPS measurements. The OS cache was not flushed. Memory includes common benchmark
+output buffers, metadata and decoder scratch; private commitment is not physical
+RAM, and resident memory includes mapped file pages. Selective batching requires
+an integration with pending requests; it is not automatically used by every reader.
+
+[Full results, direct-read controls, run ranges and method](docs/benchmarks/three-way-reader-2026-11-15/README.md)
+include 1,894 process runs, byte checks, RAW/mixed controls, other cache budgets,
+private/resident memory and NUP temporary-file usage.
 
 ## Developer integration
 

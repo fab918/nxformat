@@ -112,7 +112,7 @@ Peak **resident / private commitment**, MiB, same cases and process peaks.
 '''
  for sc,budget,warm in cases:
   md+=f'| {sc} | {budget} | {warm} | '+' | '.join(f"{bg(sc,budget,warm,v)['resident']/2**20:.2f} / {bg(sc,budget,warm,v)['private_commit']/2**20:.2f}" for v in BATCH)+' |\n'
- md+='\n![Native pending-batch comparison](pending-batch-comparison.png)\n\n'
+ md+='\n![Native pending-batch comparison](pending-batch-comparison.png)\n\n![Memory for the same pending workloads](pending-batch-memory.png)\n\n'
  md+='''## Limits, checks and complete data
 
 The selected first-access case targets eight NUP-compressed files. Of their eight
@@ -160,7 +160,22 @@ no emulator source, benchmark binary or game content is vendored in releases.
   vals=[bg(sc,budget,warm,v)['service_ms'] for v in ('nup','main','selective')]
   bars=ax.barh([0,1,2],vals,color=COLORS);ax.set_yticks([0,1,2],['NUP v1','NX main','NX new · selective']);ax.invert_yaxis()
   ax.bar_label(bars,labels=[f'{v:.4f}' if v<1 else f'{v:.2f}' for v in vals],padding=5)
-  ax.set_xlim(0,max(vals)*1.25);ax.set_xlabel('Total read service · ms · lower is better');ax.set_title(title+'  /  '+str(budget)+' MiB cache',fontweight='bold');ax.grid(axis='x',alpha=.2);ax.set_axisbelow(True)
+  ax.set_xlim(0,max(vals)*1.25);ax.set_xlabel('Total read service · ms · lower is better');ratio=max(vals[0],vals[2])/min(vals[0],vals[2]);winner='NX new' if vals[2]<vals[0] else 'NUP v1';other='NUP v1' if vals[2]<vals[0] else 'NX new'
+  gain=f'{ratio:.0f}' if ratio>=100 else f'{ratio:.1f}'
+  ax.set_title(title+'  /  '+str(budget)+' MiB cache'+'\n'+winner+' ~'+gain+'× faster than '+other,fontsize=11,fontweight='bold');ax.grid(axis='x',alpha=.2);ax.set_axisbelow(True)
  fig.suptitle('Native readers with 16 already-pending requests',fontsize=17,fontweight='bold');fig.supxlabel('Median of 5 runs · NX new uses explicit selective batching; other readers use ordinary calls.\nReal content, generated traces. First-access selection includes RAW/Zstd policy differences. Each panel has its own scale.',fontsize=10);fig.savefig(out/'pending-batch-comparison.png',dpi=170);plt.close(fig)
+ fig,axes=plt.subplots(1,2,figsize=(13,6),layout='constrained')
+ memcases=[('first_touch4k',128,False),('random4k',128,True),('sequential64k',32,False),('sequential64k',32,True)]
+ names=['First accesses\n128 MiB cache','Scattered · cached\n128 MiB cache','Sequential · initial\n32 MiB cache','Sequential · cached\n32 MiB cache']
+ for ax,field,title in zip(axes,('resident','private_commit'),('Peak resident memory','Peak private commitment')):
+  for j,(v,label) in enumerate(zip(('nup','main','selective'),('NUP v1','NX main','NX new'))):
+   values=[bg(sc,budget,warm,v)[field]/2**20 for sc,budget,warm in memcases]
+   bars=ax.bar([i+(j-1)*.24 for i in range(4)],values,.24,label=label,color=COLORS[j])
+   ax.bar_label(bars,fmt='%.1f',padding=3,fontsize=8)
+  ax.set_xticks(range(4),names,fontsize=8);ax.set_title(title,fontweight='bold');ax.set_ylabel('MiB · lower is better');ax.grid(axis='y',alpha=.2);ax.set_axisbelow(True);ax.margins(y=.2)
+ axes[0].legend(fontsize=9)
+ fig.suptitle('Memory on the same four read workloads',fontsize=17,fontweight='bold')
+ fig.supxlabel('Median of 5 process peaks · same real archive and common output buffers · NX new uses selective batching.\nResident memory includes mapped file pages. Private commitment is not physical RAM.',fontsize=10)
+ fig.savefig(out/'pending-batch-memory.png',dpi=170);plt.close(fig)
  print('Published',len(rows),'sync and',len(brows),'batch configurations')
 if __name__=='__main__':main()
