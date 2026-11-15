@@ -96,7 +96,17 @@ jobs:
         run: python tests/conformance/check_reproducible.py
       - name: Verify generated reader header
         run: python reader/generate_header.py --check
+      - name: Check out pinned pre-NXEX reader
+        uses: actions/checkout@v4
+        with:
+          ref: 43b1a61aa51933191fc650778f1bb53e7407cbfb
+          path: build/legacy-reader
+          sparse-checkout: dist/nx_reader.hpp
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
       - name: Compile and exercise the C++17 reader
+        env:
+          NX_LEGACY_READER_INCLUDE: ${{ github.workspace }}/build/legacy-reader/dist
         run: python tests/conformance/test_reader.py
       - name: Build the C++17 reader with CMake and run its smoke test
         run: |

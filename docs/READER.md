@@ -63,9 +63,11 @@ The emulator, not NXFormat, selects the **effective executable snapshot** and ch
 
 The optional `0x00010009` extension stores a generic independent tree of extra files inside `.nx`, with no executable-snapshot changes. Older readers ignore the optional extension and still open the same game. Neither an NXDB schema nor a path/layout convention for specific content in this tree is defined here. Reading an extra file does not validate or activate a cheat, mod or third-party patch.
 
+This read compatibility does not imply compatibility with older editing tools. The Rust packer at commit `43b1a61` rejects NXEX archives: its parser incorrectly requires global extensions to use `owner_index=0`, whereas the specification and C++ reader require `0xffffffff`. Inspecting, editing or compacting such an archive with that packer fails; use a packer with NXEX support to preserve the extra tree. Archives without extras keep their existing encoding. NXEX retains the specified global-owner sentinel rather than encoding a workaround for the old parser.
+
 The Rust writer accepts this tree through `ArchiveInput::extra_files`. Repack and compaction preserve it, including when its original application is removed. Combining two extra trees, or adding extras alone through repack, is rejected until an explicit editing/conflict policy exists. No CLI import convention is introduced. Extras share the ordinary file/block limits and the cumulative snapshot traversal budget; archives without extras skip their validation and allocate no extra tree storage. Reads through existing `FileId` handles use the unchanged block-read path.
 
-The reader and sanitizer suites generate valid and malformed extra trees. To test an unmodified older SDK, set `NX_LEGACY_READER_INCLUDE` to its header directory when running `python tests/conformance/test_reader.py`; the compatibility probe uses only the pre-existing public API.
+The reader and sanitizer suites generate valid and malformed extra trees. CI pins the compatibility probe to the unmodified C++ header from commit `43b1a61aa51933191fc650778f1bb53e7407cbfb`. To reproduce this locally, set `NX_LEGACY_READER_INCLUDE` to that header's directory when running `python tests/conformance/test_reader.py`; the compatibility probe uses only the pre-existing public API. Without this variable, the probe checks that public API against the current header only.
 
 ## Persistent session runtime
 
