@@ -107,3 +107,7 @@ Optional `--real-nup FILE --real-nx FILE` uses matching local inputs. The extern
 NUP source revision and SHA-256 values are in `results.json`. The standalone
 adapter links GPL-3.0-or-later emulator code and is GPL-3.0-or-later; that code or
 its benchmark binary is not included in NXConvert release packages.
+
+## Targeted initial access in compressed real files
+
+[Initial versus repeated accesses](REAL_COMPRESSED.md) separately measures the eight largest compressed members with 32 and 128 MiB budgets, including byte checks and NUP-favorable repeat cases.

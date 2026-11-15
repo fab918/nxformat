@@ -108,6 +108,12 @@ resident memory. This demonstrates resistance to whole-file cache misses on this
 trace, not a universal speedup. With zero RAM payload cache, NUP's temporary decoded
 files can instead make repeated compressed reads faster than NX.
 
+A [targeted first-access test](docs/benchmarks/low-memory-reader-cache/REAL_COMPRESSED.md)
+on the eight largest compressed members, with **128 MiB** so NUP can retain all
+of them, takes **82.6 ms for NUP / 0.76 ms for NX** for eight initial 4 KiB reads.
+On repetition both serve those reads in microseconds. This isolates the benefit
+of independent blocks on cache misses; it is not an overall-game speedup.
+
 The [full native benchmark report](docs/benchmarks/low-memory-reader-cache/README.md)
 includes seven access patterns, RAW/mixed/real inputs, 0/8/32 MiB budgets,
 original-reader and input-provider controls, repeated-run ranges, temporary disk

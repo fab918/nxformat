@@ -1,0 +1,1393 @@
+{
+  "method": "Targeted architecture scenario: eight largest Zstd members of real archive A, not an overall-game workload. Same bounded mapped input; resolved handles; OS cache uncontrolled. Three fresh processes per reader/configuration. Initial and repeat trace passes. NUP unchanged; NX verification cache enabled.",
+  "member_sizes": [
+    18328289,
+    16094969,
+    15278640,
+    14953240,
+    14834360,
+    13526702,
+    10487088,
+    9216192
+  ],
+  "fully_compared_reads": 2592,
+  "records": [
+    {
+      "scenario": "first_touch_4k",
+      "budget_mib": 32,
+      "repetition": 0,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 12479300,
+        "spill_bytes": 18328289,
+        "resolved": 1,
+        "peak_working_set": 197677056,
+        "peak_private_commit": 86175744,
+        "sample_checksum": 2499325042593729984,
+        "sampled_reads": 16,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 8,
+          "total_ms": 94.2288,
+          "p50_us": 12553.9,
+          "max_us": 15804.1
+        },
+        {
+          "pass_index": 1,
+          "reads": 8,
+          "total_ms": 63.6174,
+          "p50_us": 8327.05,
+          "max_us": 13050.3
+        }
+      ]
+    },
+    {
+      "scenario": "first_touch_4k",
+      "budget_mib": 32,
+      "repetition": 0,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 589824,
+        "nx_cache_peak": 589824,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 3,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22512300,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 36474880,
+        "peak_private_commit": 18432000,
+        "sample_checksum": 2499325042593729984,
+        "sampled_reads": 16,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 8,
+          "total_ms": 0.7676,
+          "p50_us": 12.95,
+          "max_us": 335.0
+        },
+        {
+          "pass_index": 1,
+          "reads": 8,
+          "total_ms": 0.0024,
+          "p50_us": 0.3,
+          "max_us": 0.5
+        }
+      ]
+    },
+    {
+      "scenario": "first_touch_4k",
+      "budget_mib": 32,
+      "repetition": 1,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 589824,
+        "nx_cache_peak": 589824,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 3,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22151300,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 36462592,
+        "peak_private_commit": 18329600,
+        "sample_checksum": 2499325042593729984,
+        "sampled_reads": 16,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 8,
+          "total_ms": 0.7893,
+          "p50_us": 15.95,
+          "max_us": 334.4
+        },
+        {
+          "pass_index": 1,
+          "reads": 8,
+          "total_ms": 0.0019,
+          "p50_us": 0.2,
+          "max_us": 0.4
+        }
+      ]
+    },
+    {
+      "scenario": "first_touch_4k",
+      "budget_mib": 32,
+      "repetition": 1,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 12560000,
+        "spill_bytes": 18328289,
+        "resolved": 1,
+        "peak_working_set": 197672960,
+        "peak_private_commit": 86142976,
+        "sample_checksum": 2499325042593729984,
+        "sampled_reads": 16,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 8,
+          "total_ms": 92.4081,
+          "p50_us": 12167.7,
+          "max_us": 15657.3
+        },
+        {
+          "pass_index": 1,
+          "reads": 8,
+          "total_ms": 62.5401,
+          "p50_us": 8293.7,
+          "max_us": 12731.1
+        }
+      ]
+    },
+    {
+      "scenario": "first_touch_4k",
+      "budget_mib": 32,
+      "repetition": 2,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 12563100,
+        "spill_bytes": 18328289,
+        "resolved": 1,
+        "peak_working_set": 197632000,
+        "peak_private_commit": 86122496,
+        "sample_checksum": 2499325042593729984,
+        "sampled_reads": 16,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 8,
+          "total_ms": 95.8128,
+          "p50_us": 13080.5,
+          "max_us": 15966.3
+        },
+        {
+          "pass_index": 1,
+          "reads": 8,
+          "total_ms": 64.231,
+          "p50_us": 8369.65,
+          "max_us": 12879.0
+        }
+      ]
+    },
+    {
+      "scenario": "first_touch_4k",
+      "budget_mib": 32,
+      "repetition": 2,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 589824,
+        "nx_cache_peak": 589824,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 3,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 23024600,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 36462592,
+        "peak_private_commit": 18415616,
+        "sample_checksum": 2499325042593729984,
+        "sampled_reads": 16,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 8,
+          "total_ms": 0.7659,
+          "p50_us": 12.45,
+          "max_us": 331.4
+        },
+        {
+          "pass_index": 1,
+          "reads": 8,
+          "total_ms": 0.002,
+          "p50_us": 0.25,
+          "max_us": 0.3
+        }
+      ]
+    },
+    {
+      "scenario": "first_touch_4k",
+      "budget_mib": 128,
+      "repetition": 0,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 12368800,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 233963520,
+        "peak_private_commit": 141021184,
+        "sample_checksum": 2499325042593729984,
+        "sampled_reads": 16,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 8,
+          "total_ms": 82.2138,
+          "p50_us": 9799.35,
+          "max_us": 15014.0
+        },
+        {
+          "pass_index": 1,
+          "reads": 8,
+          "total_ms": 0.0036,
+          "p50_us": 0.4,
+          "max_us": 0.9
+        }
+      ]
+    },
+    {
+      "scenario": "first_touch_4k",
+      "budget_mib": 128,
+      "repetition": 0,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 589824,
+        "nx_cache_peak": 589824,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 3,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22472300,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 36524032,
+        "peak_private_commit": 18423808,
+        "sample_checksum": 2499325042593729984,
+        "sampled_reads": 16,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 8,
+          "total_ms": 0.7568,
+          "p50_us": 12.2,
+          "max_us": 318.3
+        },
+        {
+          "pass_index": 1,
+          "reads": 8,
+          "total_ms": 0.0027,
+          "p50_us": 0.3,
+          "max_us": 0.6
+        }
+      ]
+    },
+    {
+      "scenario": "first_touch_4k",
+      "budget_mib": 128,
+      "repetition": 1,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 589824,
+        "nx_cache_peak": 589824,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 3,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22177500,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 36528128,
+        "peak_private_commit": 18382848,
+        "sample_checksum": 2499325042593729984,
+        "sampled_reads": 16,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 8,
+          "total_ms": 0.7369,
+          "p50_us": 10.0,
+          "max_us": 320.5
+        },
+        {
+          "pass_index": 1,
+          "reads": 8,
+          "total_ms": 0.0019,
+          "p50_us": 0.2,
+          "max_us": 0.4
+        }
+      ]
+    },
+    {
+      "scenario": "first_touch_4k",
+      "budget_mib": 128,
+      "repetition": 1,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 13168700,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 234057728,
+        "peak_private_commit": 141074432,
+        "sample_checksum": 2499325042593729984,
+        "sampled_reads": 16,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 8,
+          "total_ms": 83.2838,
+          "p50_us": 9857.2,
+          "max_us": 15160.4
+        },
+        {
+          "pass_index": 1,
+          "reads": 8,
+          "total_ms": 0.0059,
+          "p50_us": 0.6,
+          "max_us": 1.7
+        }
+      ]
+    },
+    {
+      "scenario": "first_touch_4k",
+      "budget_mib": 128,
+      "repetition": 2,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 12242200,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 234033152,
+        "peak_private_commit": 141070336,
+        "sample_checksum": 2499325042593729984,
+        "sampled_reads": 16,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 8,
+          "total_ms": 82.6139,
+          "p50_us": 10010.45,
+          "max_us": 14941.2
+        },
+        {
+          "pass_index": 1,
+          "reads": 8,
+          "total_ms": 0.0103,
+          "p50_us": 1.6,
+          "max_us": 2.0
+        }
+      ]
+    },
+    {
+      "scenario": "first_touch_4k",
+      "budget_mib": 128,
+      "repetition": 2,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 589824,
+        "nx_cache_peak": 589824,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 3,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22520200,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 36515840,
+        "peak_private_commit": 18567168,
+        "sample_checksum": 2499325042593729984,
+        "sampled_reads": 16,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 8,
+          "total_ms": 0.7622,
+          "p50_us": 13.9,
+          "max_us": 331.7
+        },
+        {
+          "pass_index": 1,
+          "reads": 8,
+          "total_ms": 0.0022,
+          "p50_us": 0.25,
+          "max_us": 0.5
+        }
+      ]
+    },
+    {
+      "scenario": "scatter_4k",
+      "budget_mib": 32,
+      "repetition": 0,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 12907600,
+        "spill_bytes": 18328289,
+        "resolved": 1,
+        "peak_working_set": 197865472,
+        "peak_private_commit": 86360064,
+        "sample_checksum": 3727364725520711728,
+        "sampled_reads": 1024,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 512,
+          "total_ms": 4034.6397,
+          "p50_us": 8919.95,
+          "max_us": 15677.1
+        },
+        {
+          "pass_index": 1,
+          "reads": 512,
+          "total_ms": 4029.4998,
+          "p50_us": 8909.15,
+          "max_us": 15306.4
+        }
+      ]
+    },
+    {
+      "scenario": "scatter_4k",
+      "budget_mib": 32,
+      "repetition": 0,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 8650752,
+        "nx_cache_peak": 8650752,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 129,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22327500,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 58134528,
+        "peak_private_commit": 26865664,
+        "sample_checksum": 3727364725520711728,
+        "sampled_reads": 1024,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 512,
+          "total_ms": 12.1462,
+          "p50_us": 5.8,
+          "max_us": 337.2
+        },
+        {
+          "pass_index": 1,
+          "reads": 512,
+          "total_ms": 0.1628,
+          "p50_us": 0.3,
+          "max_us": 0.7
+        }
+      ]
+    },
+    {
+      "scenario": "scatter_4k",
+      "budget_mib": 32,
+      "repetition": 1,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 8650752,
+        "nx_cache_peak": 8650752,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 129,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22069600,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 58187776,
+        "peak_private_commit": 26927104,
+        "sample_checksum": 3727364725520711728,
+        "sampled_reads": 1024,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 512,
+          "total_ms": 12.0164,
+          "p50_us": 5.45,
+          "max_us": 330.4
+        },
+        {
+          "pass_index": 1,
+          "reads": 512,
+          "total_ms": 0.1196,
+          "p50_us": 0.2,
+          "max_us": 0.5
+        }
+      ]
+    },
+    {
+      "scenario": "scatter_4k",
+      "budget_mib": 32,
+      "repetition": 1,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 12280300,
+        "spill_bytes": 18328289,
+        "resolved": 1,
+        "peak_working_set": 197791744,
+        "peak_private_commit": 86278144,
+        "sample_checksum": 3727364725520711728,
+        "sampled_reads": 1024,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 512,
+          "total_ms": 4046.7074,
+          "p50_us": 8931.8,
+          "max_us": 15840.9
+        },
+        {
+          "pass_index": 1,
+          "reads": 512,
+          "total_ms": 4080.2786,
+          "p50_us": 8923.35,
+          "max_us": 19545.3
+        }
+      ]
+    },
+    {
+      "scenario": "scatter_4k",
+      "budget_mib": 32,
+      "repetition": 2,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 14431800,
+        "spill_bytes": 18328289,
+        "resolved": 1,
+        "peak_working_set": 197861376,
+        "peak_private_commit": 86360064,
+        "sample_checksum": 3727364725520711728,
+        "sampled_reads": 1024,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 512,
+          "total_ms": 4118.8829,
+          "p50_us": 8922.6,
+          "max_us": 17422.0
+        },
+        {
+          "pass_index": 1,
+          "reads": 512,
+          "total_ms": 3997.7465,
+          "p50_us": 8687.5,
+          "max_us": 14114.2
+        }
+      ]
+    },
+    {
+      "scenario": "scatter_4k",
+      "budget_mib": 32,
+      "repetition": 2,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 8650752,
+        "nx_cache_peak": 8650752,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 129,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22481400,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 58216448,
+        "peak_private_commit": 26935296,
+        "sample_checksum": 3727364725520711728,
+        "sampled_reads": 1024,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 512,
+          "total_ms": 12.2726,
+          "p50_us": 5.7,
+          "max_us": 353.7
+        },
+        {
+          "pass_index": 1,
+          "reads": 512,
+          "total_ms": 0.1634,
+          "p50_us": 0.3,
+          "max_us": 0.6
+        }
+      ]
+    },
+    {
+      "scenario": "scatter_4k",
+      "budget_mib": 128,
+      "repetition": 0,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 12114700,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 234184704,
+        "peak_private_commit": 141221888,
+        "sample_checksum": 3727364725520711728,
+        "sampled_reads": 1024,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 512,
+          "total_ms": 83.3308,
+          "p50_us": 0.2,
+          "max_us": 15494.9
+        },
+        {
+          "pass_index": 1,
+          "reads": 512,
+          "total_ms": 0.047,
+          "p50_us": 0.1,
+          "max_us": 0.3
+        }
+      ]
+    },
+    {
+      "scenario": "scatter_4k",
+      "budget_mib": 128,
+      "repetition": 0,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 8650752,
+        "nx_cache_peak": 8650752,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 129,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22341100,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 58183680,
+        "peak_private_commit": 26935296,
+        "sample_checksum": 3727364725520711728,
+        "sampled_reads": 1024,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 512,
+          "total_ms": 12.1806,
+          "p50_us": 5.9,
+          "max_us": 332.2
+        },
+        {
+          "pass_index": 1,
+          "reads": 512,
+          "total_ms": 0.1834,
+          "p50_us": 0.4,
+          "max_us": 0.8
+        }
+      ]
+    },
+    {
+      "scenario": "scatter_4k",
+      "budget_mib": 128,
+      "repetition": 1,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 8650752,
+        "nx_cache_peak": 8650752,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 129,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22105900,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 58253312,
+        "peak_private_commit": 26968064,
+        "sample_checksum": 3727364725520711728,
+        "sampled_reads": 1024,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 512,
+          "total_ms": 11.9167,
+          "p50_us": 5.4,
+          "max_us": 349.8
+        },
+        {
+          "pass_index": 1,
+          "reads": 512,
+          "total_ms": 0.1226,
+          "p50_us": 0.2,
+          "max_us": 0.5
+        }
+      ]
+    },
+    {
+      "scenario": "scatter_4k",
+      "budget_mib": 128,
+      "repetition": 1,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 12955400,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 234180608,
+        "peak_private_commit": 141254656,
+        "sample_checksum": 3727364725520711728,
+        "sampled_reads": 1024,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 512,
+          "total_ms": 82.7576,
+          "p50_us": 0.3,
+          "max_us": 15100.0
+        },
+        {
+          "pass_index": 1,
+          "reads": 512,
+          "total_ms": 0.0487,
+          "p50_us": 0.1,
+          "max_us": 0.5
+        }
+      ]
+    },
+    {
+      "scenario": "scatter_4k",
+      "budget_mib": 128,
+      "repetition": 2,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 12607200,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 234164224,
+        "peak_private_commit": 141242368,
+        "sample_checksum": 3727364725520711728,
+        "sampled_reads": 1024,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 512,
+          "total_ms": 82.7071,
+          "p50_us": 0.3,
+          "max_us": 14995.3
+        },
+        {
+          "pass_index": 1,
+          "reads": 512,
+          "total_ms": 0.0528,
+          "p50_us": 0.1,
+          "max_us": 0.5
+        }
+      ]
+    },
+    {
+      "scenario": "scatter_4k",
+      "budget_mib": 128,
+      "repetition": 2,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 8650752,
+        "nx_cache_peak": 8650752,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 129,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22376300,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 58191872,
+        "peak_private_commit": 26906624,
+        "sample_checksum": 3727364725520711728,
+        "sampled_reads": 1024,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 512,
+          "total_ms": 12.1003,
+          "p50_us": 5.8,
+          "max_us": 331.5
+        },
+        {
+          "pass_index": 1,
+          "reads": 512,
+          "total_ms": 0.1318,
+          "p50_us": 0.3,
+          "max_us": 0.5
+        }
+      ]
+    },
+    {
+      "scenario": "sequential_256k",
+      "budget_mib": 32,
+      "repetition": 0,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 12353200,
+        "spill_bytes": 18328289,
+        "resolved": 1,
+        "peak_working_set": 101756928,
+        "peak_private_commit": 52797440,
+        "sample_checksum": 9289651705777902464,
+        "sampled_reads": 256,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 128,
+          "total_ms": 24.6905,
+          "p50_us": 16.95,
+          "max_us": 14734.5
+        },
+        {
+          "pass_index": 1,
+          "reads": 128,
+          "total_ms": 1.7098,
+          "p50_us": 14.95,
+          "max_us": 30.6
+        }
+      ]
+    },
+    {
+      "scenario": "sequential_256k",
+      "budget_mib": 32,
+      "repetition": 0,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22568800,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 69144576,
+        "peak_private_commit": 18243584,
+        "sample_checksum": 9289651705777902464,
+        "sampled_reads": 256,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 128,
+          "total_ms": 7.3751,
+          "p50_us": 57.1,
+          "max_us": 71.5
+        },
+        {
+          "pass_index": 1,
+          "reads": 128,
+          "total_ms": 0.7402,
+          "p50_us": 5.7,
+          "max_us": 10.5
+        }
+      ]
+    },
+    {
+      "scenario": "sequential_256k",
+      "budget_mib": 32,
+      "repetition": 1,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22367700,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 69132288,
+        "peak_private_commit": 18231296,
+        "sample_checksum": 9289651705777902464,
+        "sampled_reads": 256,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 128,
+          "total_ms": 6.701,
+          "p50_us": 51.7,
+          "max_us": 73.3
+        },
+        {
+          "pass_index": 1,
+          "reads": 128,
+          "total_ms": 0.5798,
+          "p50_us": 4.4,
+          "max_us": 6.4
+        }
+      ]
+    },
+    {
+      "scenario": "sequential_256k",
+      "budget_mib": 32,
+      "repetition": 1,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 12825800,
+        "spill_bytes": 18328289,
+        "resolved": 1,
+        "peak_working_set": 101715968,
+        "peak_private_commit": 52789248,
+        "sample_checksum": 9289651705777902464,
+        "sampled_reads": 256,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 128,
+          "total_ms": 25.1037,
+          "p50_us": 19.55,
+          "max_us": 15141.1
+        },
+        {
+          "pass_index": 1,
+          "reads": 128,
+          "total_ms": 1.6124,
+          "p50_us": 15.5,
+          "max_us": 35.4
+        }
+      ]
+    },
+    {
+      "scenario": "sequential_256k",
+      "budget_mib": 32,
+      "repetition": 2,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 12330500,
+        "spill_bytes": 18328289,
+        "resolved": 1,
+        "peak_working_set": 101797888,
+        "peak_private_commit": 52858880,
+        "sample_checksum": 9289651705777902464,
+        "sampled_reads": 256,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 128,
+          "total_ms": 23.0637,
+          "p50_us": 15.2,
+          "max_us": 13792.0
+        },
+        {
+          "pass_index": 1,
+          "reads": 128,
+          "total_ms": 1.5622,
+          "p50_us": 15.35,
+          "max_us": 32.1
+        }
+      ]
+    },
+    {
+      "scenario": "sequential_256k",
+      "budget_mib": 32,
+      "repetition": 2,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22678300,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 69136384,
+        "peak_private_commit": 18223104,
+        "sample_checksum": 9289651705777902464,
+        "sampled_reads": 256,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 128,
+          "total_ms": 7.2771,
+          "p50_us": 56.4,
+          "max_us": 69.3
+        },
+        {
+          "pass_index": 1,
+          "reads": 128,
+          "total_ms": 0.949,
+          "p50_us": 7.3,
+          "max_us": 19.7
+        }
+      ]
+    },
+    {
+      "scenario": "sequential_256k",
+      "budget_mib": 128,
+      "repetition": 0,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 12222400,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 101154816,
+        "peak_private_commit": 70782976,
+        "sample_checksum": 9289651705777902464,
+        "sampled_reads": 256,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 128,
+          "total_ms": 13.7395,
+          "p50_us": 3.6,
+          "max_us": 7459.3
+        },
+        {
+          "pass_index": 1,
+          "reads": 128,
+          "total_ms": 0.4674,
+          "p50_us": 3.6,
+          "max_us": 5.1
+        }
+      ]
+    },
+    {
+      "scenario": "sequential_256k",
+      "budget_mib": 128,
+      "repetition": 0,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22312300,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 69242880,
+        "peak_private_commit": 18186240,
+        "sample_checksum": 9289651705777902464,
+        "sampled_reads": 256,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 128,
+          "total_ms": 7.3635,
+          "p50_us": 57.2,
+          "max_us": 71.0
+        },
+        {
+          "pass_index": 1,
+          "reads": 128,
+          "total_ms": 0.6835,
+          "p50_us": 5.2,
+          "max_us": 13.8
+        }
+      ]
+    },
+    {
+      "scenario": "sequential_256k",
+      "budget_mib": 128,
+      "repetition": 1,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22187600,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 69206016,
+        "peak_private_commit": 18223104,
+        "sample_checksum": 9289651705777902464,
+        "sampled_reads": 256,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 128,
+          "total_ms": 6.3972,
+          "p50_us": 49.45,
+          "max_us": 63.4
+        },
+        {
+          "pass_index": 1,
+          "reads": 128,
+          "total_ms": 0.6961,
+          "p50_us": 5.3,
+          "max_us": 12.5
+        }
+      ]
+    },
+    {
+      "scenario": "sequential_256k",
+      "budget_mib": 128,
+      "repetition": 1,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 12710800,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 101142528,
+        "peak_private_commit": 70766592,
+        "sample_checksum": 9289651705777902464,
+        "sampled_reads": 256,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 128,
+          "total_ms": 13.8923,
+          "p50_us": 3.5,
+          "max_us": 7449.8
+        },
+        {
+          "pass_index": 1,
+          "reads": 128,
+          "total_ms": 0.4678,
+          "p50_us": 3.6,
+          "max_us": 5.4
+        }
+      ]
+    },
+    {
+      "scenario": "sequential_256k",
+      "budget_mib": 128,
+      "repetition": 2,
+      "reader": "nup",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 0,
+        "chunk_log2": 0,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 13135500,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 101158912,
+        "peak_private_commit": 70746112,
+        "sample_checksum": 9289651705777902464,
+        "sampled_reads": 256,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 128,
+          "total_ms": 14.0865,
+          "p50_us": 3.5,
+          "max_us": 7421.3
+        },
+        {
+          "pass_index": 1,
+          "reads": 128,
+          "total_ms": 0.464,
+          "p50_us": 3.6,
+          "max_us": 4.7
+        }
+      ]
+    },
+    {
+      "scenario": "sequential_256k",
+      "budget_mib": 128,
+      "repetition": 2,
+      "reader": "nx",
+      "metrics": {
+        "nx_cache_bytes": 0,
+        "nx_cache_peak": 0,
+        "verification_bytes": 53976,
+        "chunk_log2": 18,
+        "nx_cache_hits": 0,
+        "nx_raw_reads": 0,
+        "open_mount_ns": 22387600,
+        "spill_bytes": 0,
+        "resolved": 1,
+        "peak_working_set": 69206016,
+        "peak_private_commit": 18231296,
+        "sample_checksum": 9289651705777902464,
+        "sampled_reads": 256,
+        "zstd": 1
+      },
+      "phases": [
+        {
+          "pass_index": 0,
+          "reads": 128,
+          "total_ms": 7.3443,
+          "p50_us": 56.95,
+          "max_us": 72.4
+        },
+        {
+          "pass_index": 1,
+          "reads": 128,
+          "total_ms": 0.7137,
+          "p50_us": 5.5,
+          "max_us": 9.0
+        }
+      ]
+    }
+  ],
+  "provenance": {
+    "repository_commit": "6da821f83f402cb288f6d078b9e3c21955e0b54f",
+    "nup_source_sha256": "8a318a6d178a6a74b14c32530e0a5dd9d9228acb177db4c2664244d6e7fd37e7",
+    "nup_header_sha256": "56dbd19a75ad7680b1543fe5bd0ab7d4cb28bf340b049b4259a06844bcd54e94",
+    "nup_sources_dirty": false,
+    "nx_header_sha256": "06f06e981deabcf330482bf5d4414ab4f52507f00a902b6d53d8d29fea2204f5",
+    "original_reader": false,
+    "compiler": "cl.exe"
+  }
+}
