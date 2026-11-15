@@ -24,12 +24,13 @@ pub use writer::{
     edit_archive_metadata, edit_archive_recipes, extract_exefs, extract_raw_ncas, extract_tree,
     inspect_archive, inspect_restoration, inspect_snapshot_files, inspect_source_resources,
     read_original_icon, read_snapshot_display, read_snapshot_file_range, read_snapshot_nacp,
-    repack_archive, restore_extraction, write_archive, ApplicationSummary, ArchiveSummary,
-    BlockSizing, CancellationToken, CompressionMode, IntegrityPolicy, MetadataEdit,
-    MetadataSourceSelection, NativeAddRequest, NativeAddStats, ProgramSummary, ProgressCounter,
-    RepackPlan, RepackStats, RestorationStats, SnapshotBlockReference, SnapshotDisplay,
-    SnapshotFileReference, SnapshotSummary, SourceFileSummary, VerificationStats, WriterError,
-    WriterErrorKind, WriterOptions, WriterStats, MAX_EMBEDDED_RECIPE_BYTES, RESTORATION_FILE,
+    repack_archive, repack_archive_with_source_removals, restore_extraction, write_archive,
+    ApplicationSummary, ArchiveSummary, BlockSizing, CancellationToken, CompressionMode,
+    IntegrityPolicy, MetadataEdit, MetadataSourceSelection, NativeAddRequest, NativeAddStats,
+    ProgramSummary, ProgressCounter, RepackPlan, RepackStats, RestorationStats,
+    SnapshotBlockReference, SnapshotDisplay, SnapshotFileReference, SnapshotSummary,
+    SourceFileSummary, SourceResourceRemoval, VerificationStats, WriterError, WriterErrorKind,
+    WriterOptions, WriterStats, MAX_EMBEDDED_RECIPE_BYTES, RESTORATION_FILE,
 };
 
 pub mod cli;

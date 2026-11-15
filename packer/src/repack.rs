@@ -82,6 +82,19 @@ pub struct MetadataSourceSelection {
     pub snapshot_identity: [u8; 32],
 }
 
+/// Select an exact file from an application-owned, opaque (kind 0) source
+/// resource. The filename is relative to the flat resource root.
+/// All fields must match exactly once; an absent or ambiguous match aborts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceResourceRemoval {
+    pub platform: Platform,
+    pub application_id: u64,
+    pub kind: u32,
+    pub filename: String,
+    pub size: u64,
+    pub sha256: [u8; 32],
+}
+
 /// One atomic edit. Snapshot identities are exact 32-byte canonical IDs.
 pub struct RepackPlan {
     pub remove_snapshots: Vec<[u8; 32]>,
@@ -444,6 +457,106 @@ struct SourceArchive {
     // Post-parse native additions may borrow flat files from source archive 0.
     // These are capabilities held by this transaction, never serialized indexes.
     inherited_files: HashMap<u32, u32>,
+}
+
+/// Prune only explicitly identified kind-0 source files from the in-memory
+/// source graph. The regular repack then copies only blocks still reachable
+/// from snapshots, surviving resources, or archive-wide extras.
+fn apply_source_resource_removals(
+    archive: &mut SourceArchive,
+    removals: &[SourceResourceRemoval],
+    options: &WriterOptions,
+    budget: &mut MemoryBudget,
+) -> Result<(), WriterError> {
+    if removals.is_empty() {
+        return Ok(());
+    }
+    // Bounded temporary lookup and (root, entry) selection storage. Filenames
+    // are borrowed from the caller; no payloads or duplicate strings are held.
+    let memory = removals.len() as u64 * 256;
+    budget.charge(memory, "source resource removal selectors")?;
+    let mut requested = HashMap::new();
+    requested
+        .try_reserve(removals.len())
+        .map_err(|_| limit_error("cannot allocate source resource removal selectors"))?;
+    for removal in removals {
+        cancelled(options)?;
+        if removal.application_id == 0 || removal.kind != 0 || removal.filename.is_empty() {
+            return Err(invalid(
+                "only exact kind-0 source resource files can be removed",
+            ));
+        }
+        let key = (
+            removal.platform as u8,
+            removal.application_id,
+            removal.kind,
+            removal.filename.as_str(),
+            removal.size,
+            removal.sha256,
+        );
+        if requested.insert(key, None).is_some() {
+            return Err(invalid("duplicate source resource removal selector"));
+        }
+    }
+    for application in &archive.applications {
+        for &(kind, root) in &application.source_resources {
+            if kind != 0 {
+                continue;
+            }
+            for (index, entry) in archive.directories[root as usize].iter().enumerate() {
+                cancelled(options)?;
+                let file = &archive.files[entry.target as usize];
+                let key = (
+                    application.key.0,
+                    application.key.1,
+                    kind,
+                    entry.name.as_str(),
+                    file.size,
+                    file.digest,
+                );
+                if let Some(found) = requested.get_mut(&key) {
+                    if found.replace((root, index)).is_some() {
+                        return Err(invalid("ambiguous source resource removal selector"));
+                    }
+                }
+            }
+        }
+    }
+    let mut selected = Vec::new();
+    selected
+        .try_reserve_exact(removals.len())
+        .map_err(|_| limit_error("cannot allocate source resource removal matches"))?;
+    for match_location in requested.into_values() {
+        selected.push(
+            match_location.ok_or_else(|| invalid("source resource removal selector not found"))?,
+        );
+    }
+    selected.sort_unstable();
+    let mut first = 0;
+    while first < selected.len() {
+        cancelled(options)?;
+        let root = selected[first].0;
+        let mut end = first + 1;
+        while end < selected.len() && selected[end].0 == root {
+            end += 1;
+        }
+        let entries = &mut archive.directories[root as usize];
+        let mut index = 0usize;
+        entries.retain(|_| {
+            let keep = selected[first..end].binary_search(&(root, index)).is_err();
+            index += 1;
+            keep
+        });
+        first = end;
+    }
+    for application in &mut archive.applications {
+        application
+            .source_resources
+            .retain(|&(_, root)| !archive.directories[root as usize].is_empty());
+    }
+    drop(selected);
+    budget.current -= memory;
+    Ok(())
 }
 
 fn bad(message: impl Into<String>) -> WriterError {
@@ -4887,6 +5000,34 @@ pub fn repack_archive(
     .map(|s| s.repack)
 }
 
+/// Atomically remove exact opaque source-resource files and optionally edit
+/// snapshots in the same repack. Unlike adding fields to `RepackPlan`, this
+/// separate API preserves existing callers that construct that public struct.
+/// Works for both separate-output and same-file repacking.
+pub fn repack_archive_with_source_removals(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    plan: RepackPlan,
+    removals: Vec<SourceResourceRemoval>,
+    options: &WriterOptions,
+    policy: IntegrityPolicy,
+) -> Result<RepackStats, WriterError> {
+    repack_inner(
+        source.as_ref(),
+        destination.as_ref(),
+        plan,
+        options,
+        policy,
+        None,
+        false,
+        &CatalogEdit {
+            remove_source_files: removals,
+            ..CatalogEdit::default()
+        },
+    )
+    .map(|s| s.repack)
+}
+
 /// Rewrite an archive as a compact generation-0 file, reclaiming the free
 /// space left by in-place edits. Payloads are copied by default. With
 /// `CompressionMode::RawOnly`, retained Zstandard blocks are decoded and
@@ -5030,6 +5171,12 @@ fn repack_inner(
             verify_source_payloads(&mut source_file, &source_archive, options)?;
         stats.source_payload_bytes_verified = stats.source_verification.stored_bytes_verified;
     }
+    apply_source_resource_removals(
+        &mut source_archive,
+        &recipes.remove_source_files,
+        options,
+        &mut budget,
+    )?;
     let mut native_stats = NativeAddStats::default();
     let mut inherited = Vec::new();
     if let Some((requests, native_options)) = native {
@@ -5091,6 +5238,7 @@ fn repack_inner(
         && recipes.add.is_empty()
         && recipes.remove.is_empty()
         && recipes.metadata.is_empty()
+        && recipes.remove_source_files.is_empty()
         && (plan.metadata_sources.is_empty() || metadata_selection_is_unchanged)
     {
         stats.retained_snapshots = source_archive.snapshots.len() as u32;
@@ -5586,6 +5734,8 @@ pub(crate) struct CatalogEdit<'a> {
     pub remove: Vec<[u8; 32]>,
     /// Display metadata to set.
     pub metadata: Vec<MetadataEdit>,
+    /// Exact application-owned opaque files to remove in this same transaction.
+    pub remove_source_files: Vec<SourceResourceRemoval>,
 }
 
 /// New display metadata for one application. `None` keeps the current value.

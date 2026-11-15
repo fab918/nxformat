@@ -1,9 +1,10 @@
 use nxformat_packer::{
-    compact_archive, inspect_archive, read_snapshot_nacp, repack_archive, write_archive,
-    ApplicationInput, ArchiveInput, DependencyInput, DependencyKind, DirectoryInput, EntryInput,
-    FileInput, IntegrityPolicy, LocalizedMetadata, MetadataSourceSelection, Platform, ProgramInput,
-    ProgramKind, RepackPlan, SnapshotInput, SnapshotMetadata, SnapshotType, WriterErrorKind,
-    WriterOptions,
+    compact_archive, inspect_archive, inspect_source_resources, read_snapshot_nacp, repack_archive,
+    repack_archive_with_source_removals, write_archive, ApplicationInput, ArchiveInput,
+    DependencyInput, DependencyKind, DirectoryInput, EntryInput, FileInput, IntegrityPolicy,
+    LocalizedMetadata, MetadataSourceSelection, Platform, ProgramInput, ProgramKind, RepackPlan,
+    SnapshotInput, SnapshotMetadata, SnapshotType, SourceResourceInput, SourceResourceRemoval,
+    WriterErrorKind, WriterOptions,
 };
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -754,6 +755,336 @@ fn appended_update_metadata_is_selected_by_version_unless_explicitly_pinned() {
         .snapshots
         .iter()
         .any(|s| s.identity == update_identity));
+}
+
+fn source_resource_fixture(duplicates: bool) -> ArchiveInput {
+    let mut input = base_input(vec![0x55; 4096]);
+    input.source_resources.push(SourceResourceInput {
+        platform: Platform::Switch1,
+        application_id: APP,
+        kind: 0,
+        root: tree(vec![
+            EntryInput::file("old.rec", FileInput::from_bytes(vec![0x22; 128])),
+            EntryInput::file("shared.rec", FileInput::from_bytes(vec![0x55; 4096])),
+        ]),
+    });
+    input.source_resources.push(SourceResourceInput {
+        platform: Platform::Switch1,
+        application_id: APP,
+        kind: 0,
+        root: tree(vec![EntryInput::file(
+            if duplicates { "old.rec" } else { "new.rec" },
+            FileInput::from_bytes(if duplicates {
+                vec![0x22; 128]
+            } else {
+                vec![0x44; 128]
+            }),
+        )]),
+    });
+    input
+}
+
+fn resource_selector(path: &Path, filename: &str) -> SourceResourceRemoval {
+    let resources =
+        inspect_source_resources(path, Platform::Switch1, APP, &WriterOptions::default()).unwrap();
+    let file = resources
+        .iter()
+        .flat_map(|(_, files)| files)
+        .find(|file| file.path == filename)
+        .unwrap();
+    SourceResourceRemoval {
+        platform: Platform::Switch1,
+        application_id: APP,
+        kind: 0,
+        filename: filename.to_string(),
+        size: file.size,
+        sha256: file.digest,
+    }
+}
+
+fn remaining_source_names(path: &Path) -> Vec<String> {
+    let mut names: Vec<_> =
+        inspect_source_resources(path, Platform::Switch1, APP, &WriterOptions::default())
+            .unwrap()
+            .into_iter()
+            .flat_map(|(_, files)| files.into_iter().map(|file| file.path))
+            .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn source_resource_removal_is_atomic_with_snapshot_removal_and_keeps_shared_blocks() {
+    let temp = TempDir::new();
+    let base = temp.path().join("base.nx");
+    let source = temp.path().join("with-update.nx");
+    let destination = temp.path().join("result.nx");
+    let options = WriterOptions::default();
+    write_archive(source_resource_fixture(false), &base, &options).unwrap();
+    let base_id = inspect_archive(&base, &options, IntegrityPolicy::Strict)
+        .unwrap()
+        .applications[0]
+        .snapshots[0]
+        .identity;
+    add_only(
+        &base,
+        &source,
+        single_update_input(base_id, 1, vec![9; 256]),
+    );
+    let update_id = inspect_archive(&source, &options, IntegrityPolicy::Fast)
+        .unwrap()
+        .applications[0]
+        .snapshots
+        .iter()
+        .find(|snapshot| snapshot.snapshot_type == SnapshotType::Update)
+        .unwrap()
+        .identity;
+    let old = resource_selector(&source, "old.rec");
+    let mut plan = RepackPlan::new();
+    plan.remove_snapshots.push(update_id);
+    let stats = repack_archive_with_source_removals(
+        &source,
+        &destination,
+        plan,
+        vec![old],
+        &options,
+        IntegrityPolicy::Strict,
+    )
+    .unwrap();
+    assert_eq!(stats.removed_snapshots, 1);
+    assert_eq!(
+        remaining_source_names(&source),
+        vec!["new.rec", "old.rec", "shared.rec"]
+    );
+    assert_eq!(
+        remaining_source_names(&destination),
+        vec!["new.rec", "shared.rec"]
+    );
+    let after = inspect_archive(&destination, &options, IntegrityPolicy::Strict).unwrap();
+    assert_eq!(after.applications[0].snapshots.len(), 1);
+    assert_eq!(after.applications[0].snapshots[0].identity, base_id);
+
+    // Removing the final file of each root also removes its resource descriptor.
+    let new = resource_selector(&destination, "new.rec");
+    let in_place = repack_archive_with_source_removals(
+        &destination,
+        &destination,
+        RepackPlan::new(),
+        vec![new],
+        &options,
+        IntegrityPolicy::Strict,
+    )
+    .unwrap();
+    assert!(!in_place.no_op);
+    assert_eq!(remaining_source_names(&destination), vec!["shared.rec"]);
+    let shared = resource_selector(&destination, "shared.rec");
+    repack_archive_with_source_removals(
+        &destination,
+        &destination,
+        RepackPlan::new(),
+        vec![shared],
+        &options,
+        IntegrityPolicy::Strict,
+    )
+    .unwrap();
+    assert!(remaining_source_names(&destination).is_empty());
+    compact_archive(&destination, &options, IntegrityPolicy::Strict).unwrap();
+    assert_eq!(
+        inspect_archive(&destination, &options, IntegrityPolicy::Strict)
+            .unwrap()
+            .applications[0]
+            .snapshots[0]
+            .identity,
+        base_id
+    );
+}
+
+#[test]
+fn source_resource_removal_rejects_missing_ambiguous_and_duplicate_selectors_without_publishing() {
+    let temp = TempDir::new();
+    let source = temp.path().join("source.nx");
+    let destination = temp.path().join("destination.nx");
+    let options = WriterOptions::default();
+    write_archive(source_resource_fixture(true), &source, &options).unwrap();
+    fs::write(&destination, b"preserve me").unwrap();
+    let selected = resource_selector(&source, "old.rec");
+    let mut invalid = selected.clone();
+    invalid.sha256 = [0; 32];
+    let mut system = selected.clone();
+    system.kind = 1;
+    for removals in [
+        vec![selected.clone()],
+        vec![invalid],
+        vec![selected.clone(), selected],
+        vec![system],
+    ] {
+        let error = repack_archive_with_source_removals(
+            &source,
+            &destination,
+            RepackPlan::new(),
+            removals,
+            &options,
+            IntegrityPolicy::Fast,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), WriterErrorKind::InvalidInput);
+        assert_eq!(fs::read(&destination).unwrap(), b"preserve me");
+    }
+}
+
+#[test]
+fn source_resource_removal_does_not_bypass_snapshot_dependency_validation() {
+    let temp = TempDir::new();
+    let base = temp.path().join("base.nx");
+    let source = temp.path().join("source.nx");
+    let options = WriterOptions::default();
+    write_archive(source_resource_fixture(false), &base, &options).unwrap();
+    let base_id = inspect_archive(&base, &options, IntegrityPolicy::Fast)
+        .unwrap()
+        .applications[0]
+        .snapshots[0]
+        .identity;
+    add_only(
+        &base,
+        &source,
+        single_update_input(base_id, 1, vec![3; 256]),
+    );
+    let original = fs::read(&source).unwrap();
+    let mut plan = RepackPlan::new();
+    plan.remove_snapshots.push(base_id);
+    let error = repack_archive_with_source_removals(
+        &source,
+        &source,
+        plan,
+        vec![resource_selector(&source, "old.rec")],
+        &options,
+        IntegrityPolicy::Strict,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), WriterErrorKind::InvalidInput);
+    assert_eq!(fs::read(&source).unwrap(), original);
+}
+
+#[test]
+fn source_resource_removal_requires_every_selector_field_and_never_partially_publishes() {
+    let temp = TempDir::new();
+    let source = temp.path().join("source.nx");
+    let destination = temp.path().join("destination.nx");
+    let options = WriterOptions::default();
+    write_archive(source_resource_fixture(false), &source, &options).unwrap();
+    let original = fs::read(&source).unwrap();
+    let selected = resource_selector(&source, "old.rec");
+    let mut wrong = Vec::new();
+    let mut item = selected.clone();
+    item.platform = Platform::Switch2;
+    wrong.push(item);
+    let mut item = selected.clone();
+    item.application_id += 1;
+    wrong.push(item);
+    let mut item = selected.clone();
+    item.filename = "missing.rec".into();
+    wrong.push(item);
+    let mut item = selected.clone();
+    item.size += 1;
+    wrong.push(item);
+    let mut item = selected.clone();
+    item.sha256[0] ^= 1;
+    wrong.push(item);
+    for policy in [IntegrityPolicy::Fast, IntegrityPolicy::Strict] {
+        for in_place in [false, true] {
+            for absent in &wrong {
+                fs::write(&destination, b"KEEP").unwrap();
+                let output = if in_place { &source } else { &destination };
+                let error = repack_archive_with_source_removals(
+                    &source,
+                    output,
+                    RepackPlan::new(),
+                    vec![selected.clone(), absent.clone()],
+                    &options,
+                    policy,
+                )
+                .unwrap_err();
+                assert_eq!(error.kind(), WriterErrorKind::InvalidInput);
+                assert_eq!(fs::read(&source).unwrap(), original);
+                assert_eq!(fs::read(&destination).unwrap(), b"KEEP");
+            }
+        }
+    }
+}
+
+#[test]
+fn source_resource_removal_preserves_blocks_referenced_by_games_and_extras() {
+    let temp = TempDir::new();
+    let source = temp.path().join("source.nx");
+    let destination = temp.path().join("destination.nx");
+    let options = WriterOptions::default();
+    let mut input = source_resource_fixture(false);
+    input.extra_files = Some(tree(vec![EntryInput::file(
+        "keep.bin",
+        FileInput::from_bytes(vec![0x22; 128]),
+    )]));
+    write_archive(input, &source, &options).unwrap();
+    assert_eq!(header_u64(&source, 96), 3);
+    let removals = vec![
+        resource_selector(&source, "old.rec"),
+        resource_selector(&source, "shared.rec"),
+    ];
+    repack_archive_with_source_removals(
+        &source,
+        &destination,
+        RepackPlan::new(),
+        removals,
+        &options,
+        IntegrityPolicy::Strict,
+    )
+    .unwrap();
+    assert_eq!(remaining_source_names(&destination), vec!["new.rec"]);
+    // Both removed files share their blocks with surviving trees. Strict
+    // verification hashes all File records, including the retained extra.
+    assert_eq!(header_u64(&destination, 96), 3);
+    inspect_archive(&destination, &options, IntegrityPolicy::Strict).unwrap();
+    compact_archive(&destination, &options, IntegrityPolicy::Strict).unwrap();
+    assert_eq!(header_u64(&destination, 96), 3);
+}
+
+#[test]
+fn empty_source_resource_removals_keep_existing_no_op_and_output_bytes() {
+    let temp = TempDir::new();
+    let source = temp.path().join("source.nx");
+    let plain = temp.path().join("plain.nx");
+    let selected = temp.path().join("selected.nx");
+    let options = WriterOptions::default();
+    write_archive(source_resource_fixture(false), &source, &options).unwrap();
+    let original = fs::read(&source).unwrap();
+    let stats = repack_archive_with_source_removals(
+        &source,
+        &source,
+        RepackPlan::new(),
+        vec![],
+        &options,
+        IntegrityPolicy::Fast,
+    )
+    .unwrap();
+    assert!(stats.no_op);
+    assert_eq!(fs::read(&source).unwrap(), original);
+    repack_archive(
+        &source,
+        &plain,
+        RepackPlan::new(),
+        &options,
+        IntegrityPolicy::Strict,
+    )
+    .unwrap();
+    repack_archive_with_source_removals(
+        &source,
+        &selected,
+        RepackPlan::new(),
+        vec![],
+        &options,
+        IntegrityPolicy::Strict,
+    )
+    .unwrap();
+    assert_eq!(fs::read(&plain).unwrap(), fs::read(&selected).unwrap());
 }
 
 #[test]
