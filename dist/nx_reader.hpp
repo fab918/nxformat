@@ -408,6 +408,16 @@ struct Snapshot {
     }
 };
 
+// Catalog identity for one explicitly selected executable snapshot, not a
+// game-wide identity or a promise that a third-party patch is compatible.
+struct ProgramFingerprint {
+    std::uint8_t platform = 0;
+    std::uint64_t application_id = 0, program_id = 0;
+    std::uint32_t numeric_version = 0;
+    std::array<std::uint8_t, 32> snapshot_identity{};
+    std::optional<std::array<std::uint8_t, 32>> build_id;
+};
+
 struct Dependency {
     std::uint8_t kind = 0;
     std::optional<std::array<std::uint8_t,16>> content_id;
@@ -681,6 +691,26 @@ struct Archive {
     const std::vector<Application>& applications() const noexcept { return applications_; }
     const std::vector<Program>& programs() const noexcept { return programs_; }
     const std::vector<Snapshot>& snapshots() const noexcept { return snapshots_; }
+    bool has_extra_files() const noexcept { return extra_root_ != no_index; }
+    // The caller selects the effective executable snapshot. Display metadata
+    // and DLC rows must never select a patch target implicitly.
+    std::optional<ProgramFingerprint> program_fingerprint(std::uint32_t snapshot_index) const noexcept {
+        if (!mounted_ || snapshot_index >= snapshots_.size()) return std::nullopt;
+        const auto& snapshot = snapshots_[snapshot_index];
+        if ((snapshot.type != 0 && snapshot.type != 1 && snapshot.type != 3) ||
+            snapshot.program_index >= programs_.size()) return std::nullopt;
+        const auto& program = programs_[snapshot.program_index];
+        if (program.application_index >= applications_.size()) return std::nullopt;
+        const auto& application = applications_[program.application_index];
+        ProgramFingerprint result;
+        result.platform = application.platform;
+        result.application_id = application.id;
+        result.program_id = program.id;
+        result.numeric_version = snapshot.numeric_version;
+        result.snapshot_identity = snapshot.identity;
+        if (snapshot.flags & 1) result.build_id = snapshot.build_id;
+        return result;
+    }
     const std::vector<SourceResource>& source_resources() const noexcept { return source_resources_; }
     Result<FileInfo> source_resource_file(std::uint32_t index, std::string_view name) const {
         if (!mounted_) return Result<FileInfo>::failure(ErrorCode::invalid_argument,"mount() must succeed before resource access");
@@ -770,13 +800,31 @@ struct Archive {
         return Result<DirectoryHandle>::success({snapshot_index, snapshots_[snapshot_index].root_directory});
     }
 
+    // Optional archive-wide file tree. The absent snapshot sentinel keeps
+    // extras independent of executable snapshots and their identities.
+    Result<DirectoryHandle> extra_root_directory() const {
+        if (!mounted_) return Result<DirectoryHandle>::failure(ErrorCode::invalid_argument,"mount() must succeed before extra file access");
+        if (extra_root_==no_index) return Result<DirectoryHandle>::failure(ErrorCode::not_found,"archive has no extra files");
+        return Result<DirectoryHandle>::success({no_index,extra_root_});
+    }
+    Result<FileInfo> resolve_extra_file(std::string_view path) const {
+        if (!mounted_) return Result<FileInfo>::failure(ErrorCode::invalid_argument,"mount() must succeed before extra file access");
+        if (extra_root_==no_index) return Result<FileInfo>::failure(ErrorCode::not_found,"archive has no extra files");
+        std::uint32_t file_id=no_index;
+        Status st=find_file_in_directory(extra_root_,path,file_id);
+        if (!st) return Result<FileInfo>::failure(st.error.code,st.error.message);
+        return file_info({file_id});
+    }
+
     // The callback receives string_views into Manifest storage owned by this
     // Archive. Enumeration itself allocates no memory. Return false to stop.
     // All views and handles expire when this Archive is destroyed.
     template<class Visitor>
     Status enumerate(DirectoryHandle directory, Visitor&& visitor) const {
         if (!mounted_) return fail_status(ErrorCode::invalid_argument, "mount() must succeed before directory enumeration");
-        if (directory.snapshot_index >= snapshots_.size() || directory.directory_index >= directories_.size())
+        if ((directory.snapshot_index >= snapshots_.size() &&
+             !(directory.snapshot_index==no_index && extra_root_!=no_index)) ||
+            directory.directory_index >= directories_.size())
             return fail_status(ErrorCode::bounds, "directory handle is out of range");
         const auto& row = directories_[directory.directory_index];
         for (std::uint32_t i = 0; i < row.count; ++i) {
@@ -801,7 +849,9 @@ struct Archive {
     Result<DirectoryEntryView> lookup(DirectoryHandle directory, std::string_view name) const {
         using R = Result<DirectoryEntryView>;
         if (!mounted_) return R::failure(ErrorCode::invalid_argument, "mount() must succeed before directory lookup");
-        if (directory.snapshot_index >= snapshots_.size() || directory.directory_index >= directories_.size())
+        if ((directory.snapshot_index >= snapshots_.size() &&
+             !(directory.snapshot_index==no_index && extra_root_!=no_index)) ||
+            directory.directory_index >= directories_.size())
             return R::failure(ErrorCode::bounds, "directory handle is out of range");
         const auto index = find_entry(directory.directory_index, name);
         if (index == no_index) return R::failure(ErrorCode::not_found, "directory entry was not found");
@@ -913,6 +963,15 @@ struct Archive {
         }
         catch (const std::bad_alloc&) { return failed_read(ErrorCode::resource_limit, "read allocation failed"); }
         return read_file(FileId{file_id}, offset, length, output, output_capacity);
+    }
+    PartialRead read_extra_file(std::string_view path, std::uint64_t offset,
+                                std::size_t length, std::uint8_t* output,
+                                std::size_t capacity) {
+        try {
+            auto file=resolve_extra_file(path);
+            if (!file) return PartialRead(fail_status(file.error.code,file.error.message),0);
+            return read_file(file.value->id,offset,length,output,capacity);
+        } catch (const std::bad_alloc&) { return failed_read(ErrorCode::resource_limit,"extra read allocation failed"); }
     }
 
     // Resolve once with resolve_file(), then use this overload for repeated
@@ -1085,6 +1144,7 @@ private:
     std::vector<Program> programs_;
     std::vector<Snapshot> snapshots_;
     std::vector<SourceResource> source_resources_;
+    std::uint32_t extra_root_ = no_index;
     std::uint16_t format_minor_ = 2;
     std::vector<LocalizedEntry> localized_;
     std::vector<std::uint32_t> snapshot_owner_;
@@ -1168,6 +1228,7 @@ private:
     Status parse_catalog();
     Status mount_impl();
     Status parse_manifest();
+    Status validate_extra_tree(std::uint64_t& nodes, std::uint64_t& paths);
     Status validate_snapshot_identities(std::uint64_t total_nodes, std::uint64_t total_paths);
     Status validate_media();
     Result<std::vector<std::uint8_t>> read_media_impl(std::uint32_t index);
@@ -1186,6 +1247,7 @@ private:
     Status load_block(std::uint32_t id, bool verify, detail::LogicalBytes& logical,
                       const Block* known_record = nullptr, ReadBuffer* stored_scratch = nullptr) const;
     Status find_file(std::uint32_t snapshot_index, std::string_view path, std::uint32_t& file_id) const;
+    Status find_file_in_directory(std::uint32_t directory, std::string_view path, std::uint32_t& file_id) const;
     std::uint32_t find_entry(std::uint32_t directory, std::string_view name) const;
     Status read_file_impl(std::uint32_t file_id, std::uint64_t offset,
                           std::size_t length, std::uint8_t* output);
@@ -1457,6 +1519,15 @@ inline Status Archive::parse_catalog() {
                 if (kind>1 || (j && !(prior<row))) return fail(ErrorCode::format,"invalid or unsorted source resource");
                 source_resources_.push_back({owner_index,kind,root}); prior=row;
             }
+        }
+        if (type==0x00010009) {
+            if (flags || owner!=0 || data_size!=16 ||
+                std::memcmp(catalog_bytes_.data()+data_off,"NXEX",4) ||
+                u16(catalog_bytes_.data()+data_off+4)!=1 ||
+                u16(catalog_bytes_.data()+data_off+6)!=16 ||
+                cat32(data_off+12)!=0 || cat32(data_off+8)==no_index)
+                return fail(ErrorCode::format,"invalid optional extra file tree");
+            extra_root_=cat32(data_off+8);
         }
         if (type==0x00010005) {
             if (owner!=1 || flags!=1 || data_size<16) return fail(ErrorCode::format,"invalid Snapshot Native Metadata descriptor");
@@ -1947,8 +2018,65 @@ inline Status Archive::mount_impl() {
         for (const auto& entry:entries_) if (entry.kind==1 && std::binary_search(roots.begin(),roots.end(),entry.target))
             return fail(ErrorCode::format,"source resource root is a child directory");
     }
+    if (extra_root_!=no_index) { st=validate_extra_tree(resource_nodes,resource_paths); if (!st) return st; }
     st=validate_media(); if (!st) return st;
     return validate_snapshot_identities(resource_nodes,resource_paths);
+}
+
+inline Status Archive::validate_extra_tree(std::uint64_t& nodes, std::uint64_t& paths) {
+    if (extra_root_==no_index) return ok_status();
+    if (extra_root_>=directories_.size() || !directories_[extra_root_].count)
+        return fail(ErrorCode::bounds,"extra file root is missing or empty");
+    for (const auto& snapshot:snapshots_)
+        if (snapshot.root_directory==extra_root_) return fail(ErrorCode::format,"extra file root belongs to a snapshot");
+    for (const auto& source:source_resources_)
+        if (source.root_directory==extra_root_) return fail(ErrorCode::format,"extra file root belongs to source resources");
+    struct Frame { std::uint32_t next,end; std::uint64_t prefix; };
+    std::vector<Frame> stack;
+    std::vector<std::uint8_t> visited(directories_.size(),0), used(files_.size(),0);
+    auto charge=[&](std::uint64_t length)->Status {
+        if (nodes>=options_.max_total_snapshot_nodes || length>options_.max_total_snapshot_path_bytes-paths)
+            return fail(ErrorCode::resource_limit,"extra file traversal budget exceeded");
+        ++nodes; paths+=length; return ok_status();
+    };
+    auto enter=[&](std::uint32_t id,std::uint64_t length)->Status {
+        if (id>=directories_.size() || visited[id]) return fail(ErrorCode::format,"extra file directory is repeated or cyclic");
+        if (stack.size()>max_directory_depth) return fail(ErrorCode::resource_limit,"extra file directory depth exceeded");
+        Status st=charge(length); if (!st) return st;
+        visited[id]=1;
+        const auto& d=directories_[id]; stack.push_back({d.first,d.first+d.count,length});
+        return ok_status();
+    };
+    Status st=enter(extra_root_,0); if (!st) return st;
+    while (!stack.empty()) {
+        st=check_cancelled(); if (!st) return st;
+        auto& frame=stack.back();
+        if (frame.next==frame.end) {stack.pop_back(); continue;}
+        const auto& entry=entries_[frame.next++];
+        const auto length=frame.prefix ? frame.prefix+1+entry.name_length : entry.name_length;
+        if (entry.kind==1) {st=enter(entry.target,length); if (!st) return st;}
+        else {
+            if (entry.target>=files_.size() || used[entry.target]) return fail(ErrorCode::format,"extra file record is repeated");
+            st=charge(length); if (!st) return st;
+            used[entry.target]=1;
+        }
+    }
+    for (const auto& snapshot:snapshots_)
+        if (snapshot.root_directory>=directories_.size() || visited[snapshot.root_directory])
+            return fail(ErrorCode::format,"extra files overlap a snapshot tree or snapshot root is invalid");
+    for (const auto& source:source_resources_)
+        if (visited[source.root_directory]) return fail(ErrorCode::format,"extra files overlap source resources");
+    // A separate root must not be spliced into a game's or another resource's tree.
+    for (std::uint32_t i=0;i<directories_.size();++i) {
+        if (visited[i]) continue;
+        st=check_cancelled(); if (!st) return st;
+        const auto& dir=directories_[i];
+        for (std::uint32_t j=dir.first;j<dir.first+dir.count;++j)
+            if ((entries_[j].kind==1 && visited[entries_[j].target]) ||
+                (entries_[j].kind==2 && used[entries_[j].target]))
+                return fail(ErrorCode::format,"extra file tree is referenced from another tree");
+    }
+    return ok_status();
 }
 
 // Recomputes every snapshot identity (§12) without materializing paths: a
@@ -2106,8 +2234,11 @@ inline std::uint32_t Archive::find_entry(std::uint32_t directory,std::string_vie
 
 inline Status Archive::find_file(std::uint32_t snapshot_index,std::string_view path,std::uint32_t& file_id) const {
     if (snapshot_index>=snapshots_.size()) return fail(ErrorCode::bounds,"snapshot index is out of range");
+    return find_file_in_directory(snapshots_[snapshot_index].root_directory,path,file_id);
+}
+
+inline Status Archive::find_file_in_directory(std::uint32_t directory,std::string_view path,std::uint32_t& file_id) const {
     if (path.empty() || !utf8_valid(reinterpret_cast<const std::uint8_t*>(path.data()),path.size())) return fail(ErrorCode::invalid_argument,"path is empty or invalid UTF-8");
-    std::uint32_t directory=snapshots_[snapshot_index].root_directory;
     std::size_t start=0;
     for (;;) {
         const auto slash=path.find('/',start);

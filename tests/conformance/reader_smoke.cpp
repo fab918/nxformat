@@ -1086,6 +1086,9 @@ int main(int argc,char** argv) {
     }
     if (!opened) { std::cerr << "FAIL open rejected " << path << ": " << opened.error.message << '\n'; return 1; }
     nx::Archive archive=std::move(*opened.value);
+    if (!check(!archive.program_fingerprint(0), "unmounted archive returned a fingerprint")) return 1;
+    if (!check(!archive.extra_root_directory() && !archive.resolve_extra_file("readme.txt"),
+               "extra files were accessible before mount")) return 1;
     const auto file_name=path.substr(path.find_last_of("/\\")==std::string::npos?0:path.find_last_of("/\\")+1);
     if (file_name=="switch2_localized_icons.nx") {
         if (!check(archive.title(0)=="Synthetic Switch 2 Title" && archive.localized_entries().size()==2 &&
@@ -1113,6 +1116,42 @@ int main(int argc,char** argv) {
         std::cout << "PASS mount rejection " << path << '\n'; return 0;
     }
     if (!mounted) { std::cerr << "FAIL mount rejected " << path << ": " << mounted.error.message << '\n'; return 1; }
+    const auto invalid_snapshot=archive.resolve_file(0xffffffffu,"game.bin");
+    if (!check(!invalid_snapshot && invalid_snapshot.error.code==nx::ErrorCode::bounds,
+               "invalid snapshot index acquired extra-file semantics")) return 1;
+    if (!archive.has_extra_files()) {
+        const auto extra=archive.resolve_extra_file("readme.txt");
+        if (!check(!extra && extra.error.code==nx::ErrorCode::not_found && !archive.extra_root_directory(),
+                   "absent extras did not return not_found")) return 1;
+    }
+    test_allocations.store(0, std::memory_order_relaxed);
+    count_test_allocations.store(true, std::memory_order_relaxed);
+    const auto first_fingerprint=archive.program_fingerprint(0);
+    count_test_allocations.store(false, std::memory_order_relaxed);
+    if (!check(test_allocations.load(std::memory_order_relaxed)==0,
+               "program fingerprint allocated memory")) return 1;
+    (void)first_fingerprint;
+    if (!check(!archive.program_fingerprint(static_cast<std::uint32_t>(archive.snapshots().size())),
+               "out-of-range snapshot returned a fingerprint")) return 1;
+    for (std::size_t i=0; i<archive.snapshots().size(); ++i) {
+        const auto& snapshot=archive.snapshots()[i];
+        const auto fingerprint=archive.program_fingerprint(static_cast<std::uint32_t>(i));
+        const bool executable=(snapshot.type==0 || snapshot.type==1 || snapshot.type==3) &&
+                              snapshot.program_index<archive.programs().size();
+        if (!check(static_cast<bool>(fingerprint)==executable,
+                   "invalid executable/DLC fingerprint classification")) return 1;
+        if (!executable) continue;
+        const auto& program=archive.programs()[snapshot.program_index];
+        const auto& application=archive.applications()[program.application_index];
+        if (!check(fingerprint->platform==application.platform &&
+                   fingerprint->application_id==application.id &&
+                   fingerprint->program_id==program.id &&
+                   fingerprint->numeric_version==snapshot.numeric_version &&
+                   fingerprint->snapshot_identity==snapshot.identity &&
+                   fingerprint->build_id.has_value()==bool(snapshot.flags&1) &&
+                   (!fingerprint->build_id || *fingerprint->build_id==snapshot.build_id),
+                   "fingerprint differs from the selected executable snapshot")) return 1;
+    }
     if (expected=="reject_verify") {
         auto verify=archive.verify_all();
         if (verify) { std::cerr << "FAIL fixture unexpectedly passed full verification: " << path << '\n'; return 1; }
@@ -1132,6 +1171,48 @@ int main(int argc,char** argv) {
     }
     if (expected!="accept") { std::cerr << "FAIL unknown expected state\n"; return 2; }
     if (!check(archive.verify_all().ok(),"valid fixture failed full verification")) return 1;
+
+    if (file_name=="extra_files.nx") {
+        if (!check(archive.has_extra_files(),"optional extra tree was not discovered")) return 1;
+        auto extra=archive.extra_root_directory();
+        if (!check(extra.ok(),"optional extra tree root was not available")) return 1;
+        std::size_t entries=0;
+        bool names_ok=true;
+        auto listed=archive.enumerate(*extra.value,[&](const nx::DirectoryEntryView& entry) {
+            ++entries;
+            names_ok = names_ok && (entry.name=="notes" || entry.name=="readme.txt");
+            return true;
+        });
+        if (!check(listed && entries==2 && names_ok,"optional extra tree enumeration failed")) return 1;
+        auto notes=archive.lookup(*extra.value,"notes");
+        if (!check(notes && notes.value->type==nx::EntryType::directory,"extra subdirectory lookup failed")) return 1;
+        auto cheat=archive.lookup(notes.value->directory,"cheat.txt");
+        if (!check(cheat && cheat.value->type==nx::EntryType::file,"nested extra lookup failed")) return 1;
+        auto resolved=archive.resolve_extra_file("notes/cheat.txt");
+        if (!check(resolved && resolved.value->id.value==cheat.value->file.value && resolved.value->size==5,
+                   "extra path and FileId resolution disagree")) return 1;
+        std::array<std::uint8_t,5> output{};
+        auto read=archive.read_extra_file("notes/cheat.txt",0,output.size(),output.data(),output.size());
+        if (!check(read && std::string(output.begin(),output.end())=="CHEAT","extra random read failed")) return 1;
+        auto game=archive.resolve_file(0,"game.bin");
+        if (!check(game && game.value->size==4,"optional extras changed the game snapshot")) return 1;
+        if (!check(!archive.resolve_file(0,"readme.txt") && !archive.resolve_extra_file("game.bin") &&
+                   !archive.resolve_extra_file("../game.bin") && !archive.resolve_extra_file("notes/"),
+                   "extra and snapshot paths were not independent or safe")) return 1;
+        FileSource limited_source(path);
+        nx::OpenOptions limited_options;
+        limited_options.max_total_snapshot_nodes=6; // extras=4, game=2: exact fit.
+        limited_options.max_total_snapshot_path_bytes=38;
+        auto limited=nx::Archive::open(limited_source,limited_options);
+        if (!check(limited && limited.value->mount(),"exact extra traversal budget rejected")) return 1;
+        limited_options.max_total_snapshot_nodes=5;
+        auto over_nodes=nx::Archive::open(limited_source,limited_options);
+        if (!check(over_nodes && !over_nodes.value->mount(),"extras escaped cumulative node budget")) return 1;
+        limited_options.max_total_snapshot_nodes=6;
+        limited_options.max_total_snapshot_path_bytes=37;
+        auto over_paths=nx::Archive::open(limited_source,limited_options);
+        if (!check(over_paths && !over_paths.value->mount(),"extras escaped cumulative path budget")) return 1;
+    }
 
     if (file_name=="raw_only.nx") {
         auto root = archive.root_directory(0);
@@ -1240,6 +1321,9 @@ int main(int argc,char** argv) {
         std::array<std::uint8_t,11> bytes{};
         if (!check(archive.read_file(0,"one.bin",0,bytes.size(),bytes.data(),bytes.size()).ok(),"program snapshot read failed") ||
             !check(std::string(bytes.begin(),bytes.end())=="program one","program file contents differ")) return 1;
+        const auto first=archive.program_fingerprint(0), second=archive.program_fingerprint(1);
+        if (!check(first && second && first->program_id!=second->program_id,
+                   "distinct executable programs produced the same Program ID")) return 1;
     } else if (file_name=="metadata_snapshot_tie.nx") {
         if (!check(archive.applications()[0].metadata_snapshot==1,
                    "equal-version metadata source did not use greatest Catalog snapshot index") ||

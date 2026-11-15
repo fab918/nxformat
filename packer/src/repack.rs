@@ -59,6 +59,7 @@ type ParsedCatalog = (
     Vec<SourceProgram>,
     Vec<SourceSnapshot>,
     Vec<OptionalCatalogExtension>,
+    Option<u32>,
 );
 type SnapshotSortKey = (u32, u8, u32, [u8; 16], [u8; 32]);
 
@@ -438,6 +439,7 @@ struct SourceArchive {
     block_refs: Vec<u32>,
     blocks: Vec<SourceBlock>,
     media: Vec<SourceMedia>,
+    extra_root: Option<u32>,
     optional_global_extensions: Vec<OptionalCatalogExtension>,
     // Post-parse native additions may borrow flat files from source archive 0.
     // These are capabilities held by this transaction, never serialized indexes.
@@ -1857,6 +1859,7 @@ fn parse_catalog(
     // Extensions are parsed after the owning rows exist. Payload bytes are
     // retained only for optional values that can be safely remapped.
     let mut optional_global = Vec::new();
+    let mut extra_root = None;
     let mut app_extras: Vec<Vec<OptionalAppExtension>> = vec![Vec::new(); apps.len()];
     let mut app_recipes: Vec<Vec<Vec<u8>>> = vec![Vec::new(); apps.len()];
     let mut ext_keys = HashSet::new();
@@ -1874,7 +1877,7 @@ fn parse_catalog(
             || payload_size == 0
             || !ext_keys.insert((type_id, owner_kind, owner_index))
             || owner_kind > 2
-            || (owner_kind == 0 && owner_index != 0)
+            || (owner_kind == 0 && owner_index != NO_INDEX)
             || (owner_kind == 1 && owner_index as usize >= apps.len())
             || (owner_kind == 2 && owner_index as u64 >= program_count)
         {
@@ -1966,6 +1969,20 @@ fn parse_catalog(
                     }
                     prior = Some(item);
                     apps[owner_index as usize].source_resources.push(item);
+                }
+            }
+            EXTRA_FILES => {
+                if flags != 0
+                    || owner_kind != 0
+                    || payload.len() != 16
+                    || &payload[..4] != b"NXEX"
+                    || read_u16(payload, 4)? != 1
+                    || read_u16(payload, 6)? != 16
+                    || read_u32(payload, 12)? != 0
+                    || read_u32(payload, 8)? == NO_INDEX
+                    || extra_root.replace(read_u32(payload, 8)?).is_some()
+                {
+                    return Err(bad("invalid optional extra file tree"));
                 }
             }
             RECIPE_EXTENSION => {
@@ -2148,7 +2165,7 @@ fn parse_catalog(
             }
         }
     }
-    Ok((apps, programs, snapshots, optional_global))
+    Ok((apps, programs, snapshots, optional_global, extra_root))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2502,14 +2519,6 @@ fn visit_identity_tree(
 const MAX_TOTAL_SNAPSHOT_NODES: u64 = 16_000_000;
 const MAX_TOTAL_SNAPSHOT_PATH_BYTES: u64 = 512 * 1024 * 1024;
 
-fn validate_snapshot_identities(archive: &SourceArchive) -> Result<(), WriterError> {
-    validate_snapshot_identities_within(
-        archive,
-        MAX_TOTAL_SNAPSHOT_NODES,
-        MAX_TOTAL_SNAPSHOT_PATH_BYTES,
-    )
-}
-
 fn validate_snapshot_identities_within(
     archive: &SourceArchive,
     max_total_nodes: u64,
@@ -2573,6 +2582,113 @@ fn validate_snapshot_identities_within(
     Ok(())
 }
 
+// Extras need topology and traversal limits, not canonical identity paths.
+// Keep validation linear in Manifest size and account its temporary storage.
+fn validate_extra_tree(
+    archive: &SourceArchive,
+    root: u32,
+    budget: &mut MemoryBudget,
+    options: &WriterOptions,
+) -> Result<(u64, u64), WriterError> {
+    let directory = archive
+        .directories
+        .get(root as usize)
+        .ok_or_else(|| bad("extra file root out of range"))?;
+    if directory.is_empty() {
+        return Err(bad("extra file root is empty"));
+    }
+    let storage = (archive.directories.len() + archive.files.len()) as u64;
+    budget.charge(storage, "extra file tree validation")?;
+    let mut directories = vec![0u8; archive.directories.len()];
+    let mut files = vec![0u8; archive.files.len()];
+    #[allow(clippy::too_many_arguments)]
+    fn visit(
+        archive: &SourceArchive,
+        id: u32,
+        prefix: u64,
+        depth: usize,
+        directories: &mut [u8],
+        files: &mut [u8],
+        totals: &mut (u64, u64),
+        options: &WriterOptions,
+    ) -> Result<(), WriterError> {
+        if depth > MAX_DIRECTORY_DEPTH || directories[id as usize] != 0 {
+            return Err(bad("extra directory is repeated, cyclic, or too deep"));
+        }
+        directories[id as usize] = 1;
+        totals.0 += 1;
+        totals.1 += prefix;
+        for entry in &archive.directories[id as usize] {
+            cancelled(options)?;
+            let length = prefix + u64::from(prefix != 0) + entry.name.len() as u64;
+            if totals.0 >= MAX_TOTAL_SNAPSHOT_NODES
+                || length > MAX_TOTAL_SNAPSHOT_PATH_BYTES.saturating_sub(totals.1)
+            {
+                return Err(limit_error("extra file traversal budget exceeded"));
+            }
+            if entry.kind == 1 {
+                visit(
+                    archive,
+                    entry.target,
+                    length,
+                    depth + 1,
+                    directories,
+                    files,
+                    totals,
+                    options,
+                )?;
+            } else {
+                if files[entry.target as usize] != 0 {
+                    return Err(bad("extra file record is repeated"));
+                }
+                files[entry.target as usize] = 1;
+                totals.0 += 1;
+                totals.1 += length;
+            }
+        }
+        Ok(())
+    }
+    let mut totals = (0, 0);
+    visit(
+        archive,
+        root,
+        0,
+        0,
+        &mut directories,
+        &mut files,
+        &mut totals,
+        options,
+    )?;
+    if archive
+        .snapshots
+        .iter()
+        .any(|s| directories.get(s.snapshot.root as usize) == Some(&1))
+        || archive
+            .applications
+            .iter()
+            .flat_map(|a| &a.source_resources)
+            .any(|&(_, r)| directories.get(r as usize) == Some(&1))
+    {
+        return Err(bad("extra files overlap another root"));
+    }
+    for (id, entries) in archive.directories.iter().enumerate() {
+        cancelled(options)?;
+        if directories[id] == 0
+            && entries.iter().any(|e| {
+                if e.kind == 1 {
+                    directories[e.target as usize] != 0
+                } else {
+                    files[e.target as usize] != 0
+                }
+            })
+        {
+            return Err(bad("extra file tree is referenced from another tree"));
+        }
+    }
+    budget.current -= storage;
+    Ok(totals)
+}
+
 fn parse_archive(
     file: &mut impl ArchiveRead,
     archive_id: u8,
@@ -2590,7 +2706,7 @@ fn parse_archive(
         MAX_CATALOG,
         "Catalog",
     )?;
-    let (applications, programs, snapshots, optional_global_extensions) =
+    let (applications, programs, snapshots, optional_global_extensions, extra_root) =
         parse_catalog(&catalog, &media, archive_id, options, budget)?;
     drop(catalog);
     let (directories, files, block_refs) = parse_manifest(file, header, &blocks, options, budget)?;
@@ -2613,6 +2729,7 @@ fn parse_archive(
         block_refs,
         blocks,
         media,
+        extra_root,
         optional_global_extensions,
         inherited_files: HashMap::new(),
     };
@@ -2665,7 +2782,15 @@ fn parse_archive(
             return Err(bad("source resource root is a child directory"));
         }
     }
-    validate_snapshot_identities(&parsed)?;
+    let (extra_nodes, extra_paths) = match parsed.extra_root {
+        Some(root) => validate_extra_tree(&parsed, root, budget, options)?,
+        None => (0, 0),
+    };
+    validate_snapshot_identities_within(
+        &parsed,
+        MAX_TOTAL_SNAPSHOT_NODES.saturating_sub(extra_nodes),
+        MAX_TOTAL_SNAPSHOT_PATH_BYTES.saturating_sub(extra_paths),
+    )?;
     Ok(parsed)
 }
 
@@ -2957,12 +3082,13 @@ fn input_units(input: &ArchiveInput) -> u64 {
             })
             .sum()
     }
-    input
+    let games: u64 = input
         .applications
         .iter()
         .flat_map(|a| &a.snapshots)
         .map(|s| tree(&s.root))
-        .sum()
+        .sum();
+    games.saturating_add(input.extra_files.as_ref().map_or(0, tree))
 }
 
 fn verify_source_payloads(
@@ -4787,6 +4913,12 @@ pub fn compact_archive(
 /// Combine independently validated native selections before staging, while
 /// keeping one canonical Application/Program row per logical identity.
 fn merge_native_input(output: &mut ArchiveInput, input: ArchiveInput) -> Result<(), WriterError> {
+    if input.extra_files.is_some() {
+        if output.extra_files.is_some() {
+            return Err(invalid("cannot combine multiple extra file roots"));
+        }
+        output.extra_files = input.extra_files;
+    }
     output.source_resources.extend(input.source_resources);
     for mut addition in input.applications {
         if let Some(existing) = output.applications.iter_mut().find(|app| {
@@ -4933,6 +5065,13 @@ fn repack_inner(
         }
         plan.additions = additions;
     }
+    // An archive cannot currently be staged with extras alone. Reject that
+    // request explicitly, rather than treating it as a successful no-op.
+    if plan.additions.extra_files.is_some() && plan.additions.applications.is_empty() {
+        return Err(invalid(
+            "adding extra files without an application is not supported by repack",
+        ));
+    }
     let has_additions = !plan.additions.applications.is_empty();
     let mut selected_applications = HashSet::new();
     let metadata_selection_is_unchanged = plan.metadata_sources.iter().all(|selection| {
@@ -5021,6 +5160,15 @@ fn repack_inner(
     if let Some(additional) = scratch_archive {
         archives.push(additional);
     }
+    let extra_sources: Vec<(u8, u32)> = archives
+        .iter()
+        .filter_map(|a| a.extra_root.map(|root| (a.archive, root)))
+        .collect();
+    if extra_sources.len() > 1 {
+        return Err(invalid(
+            "cannot merge two extra file trees without an explicit conflict policy",
+        ));
+    }
     let mut input_files = vec![source_file];
     if let Some(file) = scratch_file {
         input_files.push(file);
@@ -5067,6 +5215,9 @@ fn repack_inner(
                 collect_tree_blocks(&archives[0], root, &mut retained_block_ids, 0)?;
             }
         }
+    }
+    if let Some(root) = archives[0].extra_root {
+        collect_tree_blocks(&archives[0], root, &mut retained_block_ids, 0)?;
     }
     let mut block_encoder = None;
     // HashSet iteration is randomized. Canonical block order is part of
@@ -5173,6 +5324,30 @@ fn repack_inner(
                 .extensions
                 .push(source_resource_extension(owner as u32, &rows));
         }
+    }
+    if let Some(&(source, root)) = extra_sources.first() {
+        let archive = &archives[source as usize];
+        let new_root = append_snapshot_tree(
+            source,
+            root,
+            archive,
+            &mut files,
+            &mut directories,
+            &mut block_refs,
+            &archives,
+            &mut input_files,
+            &mut block_maps,
+            &mut output_blocks,
+            &mut candidates,
+            &mut stats,
+            options,
+            0,
+            &mut block_encoder,
+            &mut encoded_spool,
+            scratch_bytes,
+            &mut budget,
+        )?;
+        combined.extensions.push(extra_files_extension(new_root));
     }
     // Blocks no snapshot or resource uses are not merged.
     options
@@ -5731,6 +5906,271 @@ pub fn edit_archive_recipes(
         },
     )
     .map(|s| s.repack)
+}
+
+#[cfg(test)]
+mod optional_extra_file_tests {
+    use super::*;
+
+    fn file_digests(archive: &SourceArchive) -> Vec<(String, [u8; 32])> {
+        fn visit(
+            archive: &SourceArchive,
+            root: u32,
+            prefix: &str,
+            out: &mut Vec<(String, [u8; 32])>,
+        ) {
+            for entry in &archive.directories[root as usize] {
+                let name = if prefix.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{prefix}/{}", entry.name)
+                };
+                if entry.kind == 1 {
+                    visit(archive, entry.target, &name, out);
+                } else {
+                    out.push((name, archive.files[entry.target as usize].digest));
+                }
+            }
+        }
+        let mut rows = Vec::new();
+        visit(
+            archive,
+            archive.extra_root.expect("extra tree"),
+            "",
+            &mut rows,
+        );
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
+    }
+
+    fn inspect(path: &Path, options: &WriterOptions) -> SourceArchive {
+        let mut file = File::open(path).unwrap();
+        let mut budget = MemoryBudget {
+            current: 0,
+            peak: 0,
+            limit: options.max_memory_bytes,
+        };
+        parse_archive(&mut file, 0, options, &mut budget).unwrap()
+    }
+
+    fn input() -> ArchiveInput {
+        let game_id = 0x0100_0000_0000_0001;
+        let root = DirectoryInput::new(vec![EntryInput::file(
+            "game.bin",
+            FileInput::from_bytes(b"GAME".to_vec()),
+        )]);
+        let mut input = ArchiveInput::new(vec![ApplicationInput {
+            application_id: game_id,
+            platform: Platform::Switch1,
+            programs: vec![ProgramInput {
+                program_id: game_id,
+                kind: ProgramKind::Primary,
+                content_id: None,
+                npdm: None,
+            }],
+            snapshots: vec![SnapshotInput {
+                addon_title_id: None,
+                native: Default::default(),
+                program_id: Some(game_id),
+                snapshot_type: SnapshotType::Base,
+                numeric_version: 0,
+                content_id: None,
+                build_id: None,
+                display_version: None,
+                dependencies: vec![],
+                metadata: None,
+                root,
+            }],
+        }]);
+        input.extra_files = Some(DirectoryInput::new(vec![
+            EntryInput::file("readme.txt", FileInput::from_bytes(b"README".to_vec())),
+            EntryInput::directory(
+                "notes",
+                DirectoryInput::new(vec![EntryInput::file(
+                    "cheat.txt",
+                    FileInput::from_bytes(b"CHEAT".to_vec()),
+                )]),
+            ),
+        ]));
+        input
+    }
+
+    #[test]
+    fn extras_survive_compaction_and_repack_without_changing_game_identity() {
+        let input = input();
+        let (out, original) =
+            unique_temp(&std::env::temp_dir(), OsStr::new("nx-optional-extras")).unwrap();
+        drop(out);
+        let (out, repacked) =
+            unique_temp(&std::env::temp_dir(), OsStr::new("nx-repacked-extras")).unwrap();
+        drop(out);
+        let options = WriterOptions {
+            compression_mode: CompressionMode::RawOnly,
+            ..WriterOptions::default()
+        };
+        write_archive(input, &original.path, &options).unwrap();
+        let original_parsed = inspect(&original.path, &options);
+        let original_identity = original_parsed.snapshots[0].snapshot.identity;
+        let original_files = file_digests(&original_parsed);
+        assert_eq!(original_files.len(), 2);
+        // Only source resources, not optional extras, require NX 0.3.
+        let bytes = std::fs::read(&original.path).unwrap();
+        assert_eq!(read_u16(&bytes, 6).unwrap(), 2);
+
+        compact_archive(&original.path, &options, IntegrityPolicy::Strict).unwrap();
+        let compacted = inspect(&original.path, &options);
+        assert_eq!(compacted.snapshots[0].snapshot.identity, original_identity);
+        assert_eq!(file_digests(&compacted), original_files);
+
+        repack_archive(
+            &original.path,
+            &repacked.path,
+            RepackPlan::new(),
+            &options,
+            IntegrityPolicy::Strict,
+        )
+        .unwrap();
+        let result = inspect(&repacked.path, &options);
+        assert_eq!(result.snapshots[0].snapshot.identity, original_identity);
+        assert_eq!(file_digests(&result), original_files);
+    }
+
+    #[test]
+    fn extras_are_optional_and_independent_of_game_and_source_resources() {
+        let options = WriterOptions::default();
+        let (file, game) = unique_temp(&std::env::temp_dir(), OsStr::new("nx-game")).unwrap();
+        drop(file);
+        let (file, extras) = unique_temp(&std::env::temp_dir(), OsStr::new("nx-extras")).unwrap();
+        drop(file);
+        let mut without = input();
+        without.extra_files = None;
+        write_archive(without, &game.path, &options).unwrap();
+        let baseline = inspect(&game.path, &options);
+        assert!(baseline.extra_root.is_none());
+        let mut with = input();
+        with.source_resources.push(crate::SourceResourceInput {
+            application_id: with.applications[0].application_id,
+            platform: Platform::Switch1,
+            kind: 0,
+            root: DirectoryInput::new(vec![EntryInput::file(
+                "source.bin",
+                FileInput::from_bytes(b"SOURCE".to_vec()),
+            )]),
+        });
+        write_archive(with, &extras.path, &options).unwrap();
+        let mut parsed = inspect(&extras.path, &options);
+        assert_eq!(
+            parsed.snapshots[0].snapshot.identity,
+            baseline.snapshots[0].snapshot.identity
+        );
+        let expected = file_digests(&parsed);
+        compact_archive(&extras.path, &options, IntegrityPolicy::Strict).unwrap();
+        assert_eq!(file_digests(&inspect(&extras.path, &options)), expected);
+        parsed.extra_root = Some(parsed.applications[0].source_resources[0].1);
+        let mut budget = MemoryBudget {
+            current: 0,
+            peak: 0,
+            limit: u64::MAX,
+        };
+        assert!(
+            validate_extra_tree(&parsed, parsed.extra_root.unwrap(), &mut budget, &options)
+                .is_err()
+        );
+        let parsed = inspect(&extras.path, &options);
+        let mut budget = MemoryBudget {
+            current: 0,
+            peak: 0,
+            limit: 0,
+        };
+        assert!(
+            validate_extra_tree(&parsed, parsed.extra_root.unwrap(), &mut budget, &options)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn extras_survive_application_removal_and_conflicts_preserve_destination() {
+        let options = WriterOptions::default();
+        let (file, original) =
+            unique_temp(&std::env::temp_dir(), OsStr::new("nx-extra-edit")).unwrap();
+        drop(file);
+        let (file, edited) =
+            unique_temp(&std::env::temp_dir(), OsStr::new("nx-extra-edited")).unwrap();
+        drop(file);
+        write_archive(input(), &original.path, &options).unwrap();
+        let parsed = inspect(&original.path, &options);
+        let expected = file_digests(&parsed);
+        let mut addition = input();
+        let app = &mut addition.applications[0];
+        app.application_id += 1;
+        app.programs[0].program_id += 1;
+        app.snapshots[0].program_id = Some(app.programs[0].program_id);
+        // Merging trees requires a future explicit conflict policy.
+        let plan = RepackPlan {
+            additions: addition,
+            ..RepackPlan::new()
+        };
+        std::fs::write(&edited.path, b"KEEP").unwrap();
+        assert!(repack_archive(
+            &original.path,
+            &edited.path,
+            plan,
+            &options,
+            IntegrityPolicy::Strict
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&edited.path).unwrap(), b"KEEP");
+        let mut addition = input();
+        addition.extra_files = None;
+        let app = &mut addition.applications[0];
+        app.application_id += 1;
+        app.programs[0].program_id += 1;
+        app.snapshots[0].program_id = Some(app.programs[0].program_id);
+        let plan = RepackPlan {
+            additions: addition,
+            remove_snapshots: vec![parsed.snapshots[0].snapshot.identity],
+            ..RepackPlan::new()
+        };
+        repack_archive(
+            &original.path,
+            &edited.path,
+            plan,
+            &options,
+            IntegrityPolicy::Strict,
+        )
+        .unwrap();
+        let result = inspect(&edited.path, &options);
+        assert_ne!(result.applications[0].key, parsed.applications[0].key);
+        assert_eq!(file_digests(&result), expected);
+        compact_archive(&edited.path, &options, IntegrityPolicy::Strict).unwrap();
+        assert_eq!(file_digests(&inspect(&edited.path, &options)), expected);
+    }
+
+    #[test]
+    fn invalid_extra_input_never_publishes() {
+        let options = WriterOptions::default();
+        let (file, original) =
+            unique_temp(&std::env::temp_dir(), OsStr::new("nx-extra-invalid")).unwrap();
+        drop(file);
+        std::fs::write(&original.path, b"KEEP").unwrap();
+        let mut empty = input();
+        empty.extra_files = Some(DirectoryInput::new(vec![]));
+        assert!(write_archive(empty, &original.path, &options).is_err());
+        assert_eq!(std::fs::read(&original.path).unwrap(), b"KEEP");
+        write_archive(input(), &original.path, &options).unwrap();
+        let before = std::fs::read(&original.path).unwrap();
+        let mut plan = RepackPlan::new();
+        plan.additions.extra_files = input().extra_files;
+        assert!(repack_archive(
+            &original.path,
+            &original.path,
+            plan,
+            &options,
+            IntegrityPolicy::Strict
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&original.path).unwrap(), before);
+    }
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 from compression import zstd  # noqa: F401 - pins the real-frame test runtime
+from extra_file_cases import build_extra_cases
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -64,6 +65,36 @@ def main() -> int:
             if result.returncode:
                 print(result.stdout, file=sys.stderr)
                 return result.returncode
+        extra_cases = build_extra_cases(Path(temp))
+        extra_fixture = extra_cases[0][0]
+        for path, expected in extra_cases:
+            result = subprocess.run([str(executable), str(path), expected], cwd=ROOT,
+                                    text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if result.returncode:
+                print(result.stdout, file=sys.stderr)
+                return result.returncode
+        print(f"PASS {len(extra_cases)} independent optional extra-file cases")
+        compat_source = ROOT / "tests" / "conformance" / "reader_optional_extension_compat.cpp"
+        compat_exe = Path(temp) / ("reader_extra_compat.exe" if is_msvc else "reader_extra_compat")
+        # Set this to an unmodified older SDK to test actual backward compatibility.
+        compat_include = Path(os.environ.get("NX_LEGACY_READER_INCLUDE", ROOT / "dist"))
+        if is_msvc:
+            compat_command = [compiler, "/nologo", "/std:c++17", "/EHsc", "/W4", "/WX", "/O2",
+                              f"/I{compat_include}", str(compat_source), f"/Fo:{Path(temp) / 'compat.obj'}", f"/Fe:{compat_exe}"]
+        else:
+            compat_command = [compiler, "-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror", "-pedantic",
+                              f"-I{compat_include}", str(compat_source), "-o", str(compat_exe)]
+        compat_build = subprocess.run(compat_command, cwd=ROOT, text=True,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if compat_build.returncode:
+            print(compat_build.stdout, file=sys.stderr)
+            return compat_build.returncode
+        compat_result = subprocess.run([str(compat_exe), str(extra_fixture)], cwd=ROOT, text=True,
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if compat_result.returncode:
+            print(compat_result.stdout, file=sys.stderr)
+            return compat_result.returncode
+        print(f"PASS optional-extension public API compatibility using {compat_include}")
         fuzz_names = (
             "minimal_valid.nx", "raw_only.nx", "multiple_programs.nx",
             "localized_metadata_icons.nx", "same_application_id_cross_platform.nx",

@@ -42,6 +42,23 @@ const MAX_ARCHIVE_SIZE: u64 = i64::MAX as u64;
 const ZSTD_CONTEXT_MEMORY_ESTIMATE: u64 = 32 * 1024 * 1024;
 const ZSTD_DECODER_MEMORY_ESTIMATE: u64 = 8 * 1024 * 1024;
 pub(crate) const SOURCE_RESOURCES: u32 = 0x0001_0008;
+pub(crate) const EXTRA_FILES: u32 = 0x0001_0009;
+
+fn extra_files_extension(root: u32) -> CatalogExtension {
+    let mut bytes = Vec::with_capacity(16);
+    bytes.extend_from_slice(b"NXEX");
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(&root.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    CatalogExtension {
+        type_id: EXTRA_FILES,
+        flags: 0, // Optional: old readers safely skip the extension.
+        owner_kind: 0,
+        owner: NO_INDEX,
+        bytes,
+    }
+}
 
 fn source_resource_extension(owner: u32, rows: &[(u32, u32)]) -> CatalogExtension {
     let mut bytes = Vec::with_capacity(16 + rows.len() * 8);
@@ -3268,6 +3285,13 @@ pub fn write_archive(
         }
         count_tree(&mut resource.root, 0, options, &mut resource_counts)?;
     }
+    let mut extras = input.extra_files.take();
+    if let Some(root) = &mut extras {
+        if root.entries.is_empty() {
+            return Err(invalid("extra file tree must not be empty"));
+        }
+        count_tree(root, 0, options, &mut resource_counts)?;
+    }
     budget.charge(resource_counts.estimated, "source resource input metadata")?;
     let resources = std::mem::take(&mut input.source_resources);
     let (mut apps, mut programs, mut work, mut input_counts) =
@@ -3580,6 +3604,37 @@ pub fn write_archive(
             (!rows.is_empty()).then(|| source_resource_extension(owner as u32, rows))
         })
         .collect();
+    let has_source_resources = !resource_extensions.is_empty();
+    let mut extensions = resource_extensions;
+    if let Some(root) = extras {
+        // Keep extras out of snapshot identities, using the ordinary block
+        // writer and deduplication before the Data spool is finalized.
+        let (root_index, _, _) = process_tree(
+            root,
+            0,
+            NO_INDEX,
+            0,
+            0,
+            None,
+            SnapshotType::Unknown as u8,
+            0,
+            [0; 16],
+            &mut directories,
+            &mut files,
+            &mut block_refs,
+            &mut blocks,
+            &mut block_dedup,
+            &mut block_buffer,
+            &mut block_encoder,
+            &mut HashMap::new(),
+            &mut data_spool,
+            options,
+            &mut budget,
+            &mut deduplicated_blocks,
+            &mut timings,
+        )?;
+        extensions.push(extra_files_extension(root_index));
+    }
     data_spool.finish(&mut blocks, options, &mut timings)?;
     let data_spool_len = data_spool.out.position;
     let staged_logical_block_bytes = blocks.iter().try_fold(0u64, |sum, block| {
@@ -3643,13 +3698,7 @@ pub fn write_archive(
             }
         }
     }
-    let catalog = build_catalog(
-        &apps,
-        &programs,
-        &snapshots,
-        &resource_extensions,
-        &mut budget,
-    )?;
+    let catalog = build_catalog(&apps, &programs, &snapshots, &extensions, &mut budget)?;
     let manifest = build_manifest(&directories, &files, &block_refs, options, &mut budget)?;
     let (media_header_records, media_payload_start, media_size) = media_layout(&mut media_stage)?;
     let media_present = !media_stage.records.is_empty();
@@ -3763,7 +3812,7 @@ pub fn write_archive(
             .ok_or_else(|| limit_error("temporary disk estimate overflow"))?,
     );
     let header = encode_header(&HeaderFields {
-        source_resources: !resource_extensions.is_empty(),
+        source_resources: has_source_resources,
         archive_size,
         catalog_offset,
         catalog_size: catalog.len() as u64,

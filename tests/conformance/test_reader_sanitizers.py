@@ -11,6 +11,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from extra_file_cases import build_extra_cases
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -69,6 +71,8 @@ def run_linux_wsl_sanitizers(temp: Path, fixture_dir: Path, index: dict) -> bool
             else:
                 expected = "reject_open"
             run_reader(fixture(item["file"]), expected)
+        for path, expected in build_extra_cases(temp):
+            run_reader(linux_path(path), expected)
         for name in ("minimal_valid.nx", "raw_only.nx", "nested_vfs.nx", "shared_with_orphan_block.nx",
                      "zstd_single.nx", "switch2_localized_icons.nx"):
             run_reader("--fuzz", fixture(name))
@@ -133,7 +137,7 @@ def main() -> int:
         fuzz_object = temp / ("reader_fuzz.obj" if msvc else "reader_fuzz.o")
         if msvc:
             fuzz_command = [compiler, "/nologo", "/std:c++17", "/EHsc", "/W4", "/WX", "/O1", "/Zi", "/fsanitize=address",
-                            f"/I{ROOT / 'dist'}", "/c", str(fuzz_source), f"/Fo:{fuzz_object}"]
+                            f"/I{ROOT / 'dist'}", f"/I{ROOT / 'tests' / 'support'}", "/c", str(fuzz_source), f"/Fo:{fuzz_object}"]
         else:
             fuzz_command = [compiler, "-std=c++17", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-pedantic",
                             "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
@@ -153,6 +157,12 @@ def main() -> int:
             else:
                 expected = "reject_open"
             result = subprocess.run([str(executable), str(fixture_dir / item["file"]), expected], cwd=ROOT,
+                                    text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if result.returncode:
+                print(result.stdout, file=sys.stderr)
+                return result.returncode
+        for path, expected in build_extra_cases(temp):
+            result = subprocess.run([str(executable), str(path), expected], cwd=ROOT,
                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             if result.returncode:
                 print(result.stdout, file=sys.stderr)

@@ -332,6 +332,8 @@ pub struct SourceResourceInput {
 pub struct ArchiveInput {
     pub applications: Vec<ApplicationInput>,
     pub source_resources: Vec<SourceResourceInput>,
+    /// Optional archive-wide files, independent of executable snapshots.
+    pub extra_files: Option<DirectoryInput>,
 }
 
 impl ArchiveInput {
@@ -339,6 +341,7 @@ impl ArchiveInput {
         Self {
             applications,
             source_resources: Vec::new(),
+            extra_files: None,
         }
     }
 }

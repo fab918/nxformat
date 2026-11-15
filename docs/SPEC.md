@@ -312,6 +312,42 @@ compaction. Removing a game version does not remove the application's resources.
 Removing an entire application removes its resources. Rebuild recipes may reference
 resource files by size and digest, as defined in [RECIPE.md](RECIPE.md).
 
+### Optional Extra Files (`0x00010009`, NX 0.2 / 0.3)
+
+An archive MAY contain one independent, archive-wide directory tree for
+non-executable extra files. These are ordinary Manifest directories and files,
+using ordinary Data blocks and integrity checks. They are **not** part of any
+executable snapshot, source resource or snapshot identity. This extension does
+not define NXDB, cheat, mod, patch, save or script formats, nor does it imply
+that any extra file should be executed or installed.
+
+The extension is optional (`flags=0`), global (`owner_kind=0`,
+`owner_index=0xffffffff`), with one exact 16-byte payload:
+
+| Offset | Type | Value |
+|---:|---|---|
+| 0 | `byte[4]` | ASCII `NXEX` |
+| 4 | `u16` | Version 1 |
+| 6 | `u16` | Payload size 16 |
+| 8 | `u32` | Manifest root Directory ID |
+| 12 | `u32` | Reserved, zero |
+
+The root MUST exist, be nonempty and independent of every snapshot and source
+resource tree. Neither directories nor File records in this tree may be
+referenced by another tree, and no directory or File record may appear twice
+within the extra tree. Data blocks may be deduplicated with game and source
+resource blocks. Ordinary name, path, depth, file, block and resource limits
+apply. The extension is absent when the archive has no extra files. No NX
+header minor-version increment or required feature bit is introduced: an older
+reader that does not recognize `0x00010009` MUST ignore the optional Catalog
+extension and can still access the unchanged game snapshots. A reader that
+understands it MUST reject malformed or overlapping extra trees.
+
+An editor or repacker that understands this extension MUST preserve the extra
+tree and its referenced Data blocks through copying, compaction and edits,
+remapping the root Directory ID when necessary. Future conventions for paths
+and the contents of this tree are independent of the NX container specification.
+
 ## 5. Media region
 
 The optional Media region begins with a 32-byte header, then a contiguous record array, then payload bytes. Catalog media indexes must be less than `record_count`. An index referenced as an icon must identify a PNG/JPEG record; a program NPDM index must identify NPDM; an application NACP index must identify NACP; and an opaque-media range must contain only opaque-source records. Icon records may be shared. Each non-icon media record is referenced by exactly one matching Catalog owner.

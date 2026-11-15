@@ -311,6 +311,7 @@ def make_catalog(
     localized: list[dict],
     default_icon: int,
     metadata_history: list[dict] | None = None,
+    extra_root: int | None = None,
 ) -> bytes:
     metadata_history = metadata_history or []
     strings = Strings()
@@ -367,9 +368,10 @@ def make_catalog(
     snapshot_offset = align(catalog_cursor, 8)
     localized_offset = align(snapshot_offset + len(snapshots) * SNAPSHOT.size, 8) if localized else 0
     cursor = localized_offset + len(local_records) * LOCALIZED.size if localized else snapshot_offset + len(snapshots) * SNAPSHOT.size
-    extension_offset = align(cursor, 8) if history_payload else 0
-    if history_payload:
-        cursor = extension_offset + EXTENSION.size
+    extension_count = int(bool(history_payload)) + int(extra_root is not None)
+    extension_offset = align(cursor, 8) if extension_count else 0
+    if extension_count:
+        cursor = extension_offset + extension_count * EXTENSION.size
     cursor = align(cursor, 8)
     string_offset = cursor
     string_size = len(strings.data)
@@ -461,6 +463,13 @@ def make_catalog(
     if history_payload:
         EXTENSION.pack_into(catalog, extension_offset, 0x00010004, 1, 1, 0, 0, history_payload_offset, len(history_payload))
         catalog[history_payload_offset : history_payload_offset + len(history_payload)] = history_payload
+    if extra_root is not None:
+        extra_offset = align(len(catalog), 8)
+        catalog.extend(bytes(extra_offset - len(catalog)))
+        payload = struct.pack("<4sHHII", b"NXEX", 1, 16, extra_root, 0)
+        EXTENSION.pack_into(catalog, extension_offset + (EXTENSION.size if history_payload else 0),
+                            0x00010009, 0, 0, 0, NO_INDEX, extra_offset, len(payload))
+        catalog.extend(payload)
     CATALOG_HEADER.pack_into(
         catalog,
         0,
@@ -474,7 +483,7 @@ def make_catalog(
         len(snapshots),
         len(localized),
         0,
-        1 if history_payload else 0,
+        extension_count,
         0,
         application_offset,
         program_offset,
@@ -542,6 +551,7 @@ def assemble(
     metadata_history: list[dict] | None = None,
     orphan_blocks: list[bytes] | None = None,
     block_codecs: list[int] | None = None,
+    extra_root: int | None = None,
 ) -> bytes:
     if program_ids is None:
         program_ids = [0x0100000000000001]
@@ -605,7 +615,7 @@ def assemble(
         ]
         mapped_history.append(mapped)
     catalog = make_catalog(app_id, platform, title, publisher, programs, snapshots, logical_sizes, identities,
-                           localized, 0 if media_payloads else NO_INDEX, mapped_history)
+                           localized, 0 if media_payloads else NO_INDEX, mapped_history, extra_root)
 
     archive = bytearray(DATA_START)
     data_offset = 0
