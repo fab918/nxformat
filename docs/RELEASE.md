@@ -7,6 +7,12 @@ games reversible with compact restoration recipes. The NX wire versions remain
 
 ## What is new in 1.0.4
 
+- Allow atomically removing exact individual files from opaque (kind 0)
+  source-resource roots during a snapshot repack, with selectors based on
+  platform, application, kind, filename, size, and SHA-256. Reject missing,
+  duplicate, or ambiguous selections, preserve other files and shared blocks,
+  and omit empty roots. Both same-file and separate-output transactions work.
+  Existing `RepackPlan` struct literals remain source compatible.
 - Add opt-in verification-only RAW caching for immutable C++ reader sources,
   with bounded bitmap metadata and no RAW payload copies. Add optional bounded
   Windows file mapping with leased views and SEH-protected CRC/copy operations

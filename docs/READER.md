@@ -69,6 +69,10 @@ The Rust writer accepts this tree through `ArchiveInput::extra_files`. Repack an
 
 The reader and sanitizer suites generate valid and malformed extra trees. CI pins the compatibility probe to the unmodified C++ header from commit `43b1a61aa51933191fc650778f1bb53e7407cbfb`. To reproduce this locally, set `NX_LEGACY_READER_INCLUDE` to that header's directory when running `python tests/conformance/test_reader.py`; the compatibility probe uses only the pre-existing public API. Without this variable, the probe checks that public API against the current header only.
 
+## Editing source-resource files in Rust
+
+The Rust editing API `repack_archive_with_source_removals(source, destination, plan, removals, options, policy)` removes individual opaque (kind 0) source-resource files atomically with the snapshot edits in `RepackPlan`. Build each `SourceResourceRemoval` from the exact platform, application ID, kind, flat filename, logical size and SHA-256 reported by `inspect_source_resources`. Every selector must match exactly once in the source archive; missing, duplicate or ambiguous selectors abort the transaction. System update resources (kind 1) cannot be selected. Empty roots are omitted, while unrelated resources, game snapshots and extras retain any shared blocks they need. Separate-output repacking leaves the source untouched; same-file repacking uses the existing locking and generation/publication rules. The existing `RepackPlan` fields, reader API and wire format are unchanged. This is a Rust API addition, with no new CLI command.
+
 ## Persistent session runtime
 
 `dist/nx_session.hpp` owns one source and one mounted `Archive`. Catalog,
