@@ -111,3 +111,7 @@ its benchmark binary is not included in NXConvert release packages.
 ## Targeted initial access in compressed real files
 
 [Initial versus repeated accesses](REAL_COMPRESSED.md) separately measures the eight largest compressed members with 32 and 128 MiB budgets, including byte checks and NUP-favorable repeat cases.
+
+## Small-read optimization experiments
+
+[Two rejected prototypes and longer A/B measurements](SMALL_READ_EXPERIMENTS.md) document attempts to reduce cached-read overhead without extra payload caching. The production reader is unchanged because no consistent gain without regressions was established.

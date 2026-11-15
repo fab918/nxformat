@@ -629,6 +629,30 @@ static int review_regressions(const std::string& directory) {
     if(!check(compressed.value->read_file(nx::FileId{0},262144,1,&out,1)&&out=='Z'&&compressed.value->cache_stats().decompressions==1,"Zstandard miss"))return 1;
     compressed_source.reset_data_counts();
     if(!check(compressed.value->read_file(nx::FileId{0},262145,1,&out,1)&&out=='Z'&&compressed.value->cache_stats().decompressions==1&&compressed_source.data_bytes()==0,"Zstandard cache hit"))return 1;
+    // A small cached read must retain cancellation, bounds and output guards,
+    // in both partial and atomic modes, without another source read/decode.
+    for (bool atomic:{false,true}) {
+        bool cancelled=false;
+        auto guarded_options=compressed_options; guarded_options.atomic_reads=atomic;
+        guarded_options.is_cancelled=[](void* state){return *static_cast<bool*>(state);};
+        guarded_options.cancellation_context=&cancelled;
+        auto guarded=nx::Archive::open(compressed_source,guarded_options);
+        if(!guarded || !guarded.value->mount())return 1;
+        if(!guarded.value->read_file(nx::FileId{0},262144,1,&out,1))return 1;
+        compressed_source.reset_data_counts();
+        if(!check(guarded.value->read_file(nx::FileId{0},262145,1,&out,1) && out=='Z' &&
+                  compressed_source.data_bytes()==0 && guarded.value->cache_stats().decompressions==1,
+                  "small verified hit reread or decoded payload"))return 1;
+        cancelled=true; out=0xa5;
+        auto stopped=guarded.value->read_file(nx::FileId{0},262145,1,&out,1);
+        if(!check(!stopped && stopped.error.code==nx::ErrorCode::cancelled && out==0xa5,
+                  "small cache hit bypassed cancellation or changed output"))return 1;
+        cancelled=false;
+        if(!check(!guarded.value->read_file(nx::FileId{0},262145,1,&out,0) && out==0xa5 &&
+                  !guarded.value->read_file(nx::FileId{0},~0ull,1,&out,1) && out==0xa5 &&
+                  !guarded.value->read_file(nx::FileId{0xffffffffu},262145,1,&out,1) && out==0xa5,
+                  "small cache hit bypassed buffer/file bounds"))return 1;
+    }
     std::vector<std::uint8_t> shared;
     if (!load_archive_bytes(directory+"/shared_snapshots.nx",shared)) return 2;
     MemorySource shared_source(shared);

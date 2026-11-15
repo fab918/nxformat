@@ -1,0 +1,35 @@
+--- a/reader/nx_reader.hpp
++++ b/reader/nx_reader.hpp
+@@ -881,6 +881,32 @@
+             return failed_read(ErrorCode::resource_limit, "read buffer or configured read limit is too small");
+         std::size_t done = 0;
+         try {
++            // Small verified cache hits need no scratch buffers or descriptor
++            // decoding. Hold the shared lock through this bounded copy so an
++            // eviction cannot recycle the data; other hits remain concurrent.
++            if (block_cache_ && length && length<=4096 && !options_.collect_read_timing && file_id.value<files_.size()) {
++                const auto& file=files_[file_id.value];
++                if (offset<=file.size && length<=file.size-offset &&
++                    (offset>>file.chunk_log2)==((offset+length-1)>>file.chunk_log2)) {
++                    const auto id=block_refs_[file.first+static_cast<std::uint32_t>(offset>>file.chunk_log2)];
++                    if (index_bytes_[std::size_t(id)*24+16]==1) {
++                        auto status=check_cancelled(); if (!status) return PartialRead(std::move(status),0);
++                        auto& cache=*block_cache_;
++                        std::shared_lock<std::shared_mutex> lock(cache.mutex);
++                        const auto hit=cache.entries.find(id);
++                        if (hit!=cache.entries.end()) {
++                            auto& data=*hit->second.bytes;
++                            const auto in_chunk=static_cast<std::size_t>(offset&((1ull<<file.chunk_log2)-1));
++                            if (in_chunk<data.bytes.size() && length<=data.bytes.size()-in_chunk) {
++                                if (!data.referenced.load(std::memory_order_relaxed)) data.referenced.store(true,std::memory_order_relaxed);
++                                std::memcpy(output,data.bytes.data()+in_chunk,length);
++                                BlockCache::add(cache.counter().hits);
++                                return PartialRead(ok_status(),length);
++                            }
++                        }
++                    }
++                }
++            }
+             if (options_.atomic_reads) {
+                 Status st = read_file_impl(file_id.value, offset, length, output);
+                 const bool ok = st.ok();
