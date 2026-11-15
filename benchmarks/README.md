@@ -210,3 +210,7 @@ Strict source verification precedes the creation timer. Small checksum-enabled
 and checksum-free archives were also restored byte for byte. `--verify` enables
 full restoration verification in the benchmark and requires an extra archive's
 worth of temporary disk.
+
+## Three-way rerun
+
+[Fresh NUP v1 / main / feature measurements](../docs/benchmarks/three-way-reader-2026-11-15/README.md) include the synchronous matrix and an explicit pending-batch comparison. `run_native_three_way.py` builds the baseline from the resolved `--main-ref` and the current SDK; `publish_native_three_way.py` publishes both timing and resident/private memory. The current-direct control distinguishes reader changes from the optional grouping policy.

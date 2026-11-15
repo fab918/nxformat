@@ -61,7 +61,7 @@ def summarize(rows, requests, label, budget, repetition):
                     max_us=times[-1], total_ms=sum(times)/1000))
     return summaries
 
-def build_tool(build, output, original=False, original_ref="b6a9de8"):
+def build_tool(build, output, original=False, original_ref="b6a9de8", adapter=None):
     entry = next(x for x in json.loads((build/'compile_commands.json').read_text())
                  if x['file'].replace('\\', '/').endswith('/nup_container.cpp'))
     source = Path(entry['file'])
@@ -76,7 +76,7 @@ def build_tool(build, output, original=False, original_ref="b6a9de8"):
             ['git', 'show', f'{original_ref}:reader/nx_reader.hpp'], cwd=ROOT))
         flags.extend(['-DNX_BENCH_ORIGINAL', f'-I{output}'])
     with (output/'build.log').open('w', encoding='utf-8') as log:
-        for name, path in [('adapter', ROOT/'benchmarks/native_nup_comparison.cpp'), ('nup', source)]:
+        for name, path in [('adapter', adapter or ROOT/'benchmarks/native_nup_comparison.cpp'), ('nup', source)]:
             obj = output/f'{name}.obj'
             run([compiler, *flags, f'-I{ROOT / "dist"}', '-c', path, f'/Fo{obj}', f'/Fd{output / "bench.pdb"}'],
                 cwd=build, stdout=log, stderr=subprocess.STDOUT)
@@ -98,7 +98,7 @@ def build_tool(build, output, original=False, original_ref="b6a9de8"):
                  'nx_header_sha256': digest(output/'original_nx_reader.hpp' if original else ROOT/'dist/nx_reader.hpp'),
                  'original_reader': original, 'compiler': Path(compiler).name,
                  'nx_reference_commit': original_ref if original else None,
-                 'adapter_sha256': digest(ROOT/'benchmarks/native_nup_comparison.cpp'),
+                 'adapter_sha256': digest(adapter or ROOT/'benchmarks/native_nup_comparison.cpp'),
                  'mapped_views_sha256': digest(ROOT/'dist/nx_mapped_views.hpp')}
 
 def main():
@@ -108,7 +108,7 @@ def main():
     parser.add_argument('--reads', type=int, default=1000)
     parser.add_argument('--repetitions', type=int, default=3)
     parser.add_argument('--corpus', type=Path, help='reuse an existing synthetic corpus for controlled comparisons')
-    parser.add_argument('--original-reader', action='store_true', help='compile the reader from Git HEAD as a control')
+    parser.add_argument('--original-reader', action='store_true', help='compile the pinned 1.0.4 reader as a control')
     parser.add_argument('--reader-mode', choices=('both', 'nx', 'nup'), default='both',
                         help='use separate nx/nup processes when measuring each reader memory')
     args = parser.parse_args()
@@ -147,7 +147,7 @@ def main():
                                        output=result.stdout.strip(),
                                        metrics={k:int(v) for k,v in re.findall(r'(\w+)=(\d+)',result.stdout)}))
                 print(label, budget, repetition, result.stdout.strip(), flush=True)
-    provenance['adapter_sha256'] = digest(ROOT/'benchmarks/native_nup_comparison.cpp')
+    provenance['adapter_sha256'] = digest(adapter or ROOT/'benchmarks/native_nup_comparison.cpp')
     provenance['raw_verification'] = (not args.original_reader and args.reader_mode != 'nup' and
                                       'NX_BENCH_RAW_VERIFY' in os.environ)
     provenance['reader_mode'] = args.reader_mode

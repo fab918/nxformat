@@ -76,6 +76,8 @@ integration; format validation alone does not establish game compatibility.
 
 ## Performance: NX vs NUP
 
+[Latest three-way native comparison: NUP v1, NX main and this branch, including resident/private memory](docs/benchmarks/three-way-reader-2026-11-15/README.md). Ordinary calls and explicit selective batching are measured separately.
+
 NX reads compressed data in small, independent blocks. A small read can decode
 just the blocks it needs, keeping first accesses fast without caching whole files.
 
