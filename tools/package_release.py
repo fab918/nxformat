@@ -15,6 +15,7 @@ Layout of nxformat-<version>-<platform>.zip|.tar.gz:
 """
 import argparse
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -273,10 +274,54 @@ def main() -> int:
                     info.uname = info.gname = ''
                     with open(f, 'rb') as data:
                         t.addfile(info, data)
+    if a.app:
+        user_download(stage, a.app, system, a.platform, a.version, a.out)
     shutil.rmtree(stage)
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     print(f'{digest}  {archive.name}')
     return 0
+
+
+def user_download(stage: Path, app: Path, system: str, platform: str, version: str, out: Path) -> None:
+    """The file end users download: a DMG on macOS, the .exe on Windows.
+    The nxformat-* archive above stays the developer package."""
+    if system == 'windows':
+        shutil.copy(app, out / f'NXConvert-{version}-{platform}.exe')
+    elif system == 'linux':
+        tool = os.environ.get('APPIMAGETOOL')
+        if not tool:
+            print('APPIMAGETOOL not set: no AppImage', file=sys.stderr)
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            appdir = Path(tmp) / 'NXConvert.AppDir'
+            (appdir / 'usr/bin').mkdir(parents=True)
+            shutil.copy(app, appdir / 'usr/bin/nxconvert')
+            shutil.copy(ASSETS / 'nxconvert.png', appdir / 'nxconvert.png')
+            (appdir / 'nxconvert.desktop').write_text(DESKTOP_ENTRY, newline='\n')
+            run = appdir / 'AppRun'
+            run.write_text('#!/bin/sh\nexec "$(dirname "$(readlink -f "$0")")/usr/bin/nxconvert" "$@"\n', newline='\n')
+            run.chmod(0o755)
+            arch = 'aarch64' if platform.endswith('arm64') else 'x86_64'
+            target = out / f'NXConvert-{version}-{platform}.AppImage'
+            subprocess.run([tool, '--appimage-extract-and-run', appdir, target], check=True,
+                           env={**os.environ, 'ARCH': arch})
+    elif system == 'macos':
+        bundle = stage / 'bin/NXConvert.app'
+        # Ad-hoc signature: without one, Apple Silicon refuses to start the app.
+        subprocess.run(['codesign', '--force', '--deep', '--sign', '-', bundle], check=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'NXConvert'
+            root.mkdir()
+            shutil.copytree(bundle, root / 'NXConvert.app', symlinks=True)
+            (root / 'Applications').symlink_to('/Applications')
+            (root / 'Command line.txt').write_text(
+                'The app is also the command-line tool:\n\n'
+                '  /Applications/NXConvert.app/Contents/MacOS/nxconvert --help\n\n'
+                'To call it as nxconvert:\n\n'
+                '  sudo ln -s /Applications/NXConvert.app/Contents/MacOS/nxconvert /usr/local/bin/nxconvert\n',
+                newline='\n')
+            subprocess.run(['hdiutil', 'create', '-volname', 'NXConvert', '-srcfolder', root, '-ov',
+                            '-format', 'UDZO', out / f'NXConvert-{version}-macos.dmg'], check=True)
 
 
 if __name__ == '__main__':

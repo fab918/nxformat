@@ -26,8 +26,14 @@ already decrypted from games you own. It contains no keys and no game data.
 
 ## Download
 
-Get NXConvert from the [releases page](https://github.com/fab918/nxformat/releases)
-(Windows, Linux, macOS). Android archives contain the libraries only.
+From the [releases page](https://github.com/fab918/nxformat/releases):
+
+- macOS: `NXConvert-<version>-macos.dmg`, drag the app to Applications. The app
+  is not notarized: the first time, right-click it and choose Open.
+- Windows: `NXConvert-<version>-windows-x64.exe`.
+- Linux: `NXConvert-<version>-linux-x64.AppImage` (or arm64), `chmod +x` then run.
+
+The `nxformat-*` archives are the developer packages (libraries and headers).
 
 To build it yourself (Rust 1.95 or newer):
 
