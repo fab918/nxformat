@@ -1,12 +1,11 @@
-"""Multi-Program full native views, exact native reuse, and independent readers."""
+"""Switch 1 multi-Program tests."""
 import sys
 import subprocess
 import tempfile
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0,str(ROOT/"benchmarks"))
-import run_native_add as b
+import native_add_steps as b
 
 def main():
     subprocess.run(["cargo","build","--release","--locked","--manifest-path",str(ROOT/"packer/Cargo.toml"),"--example","native_add","--example","switch1_review"],cwd=ROOT,check=True)

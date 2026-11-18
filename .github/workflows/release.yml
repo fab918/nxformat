@@ -1,9 +1,7 @@
 name: Release
 
-# Builds the C API libraries and the NXConvert app for every platform,
-# publishes them with a populated xmake repository as release attachments.
-# No release step commits to main. Push a tag VX.Y.Z, or run it by hand.
-# A push to a release/** branch only builds and tests, publishing nothing.
+# Push a tag VX.Y.Z to build and publish a release.
+# A push to release/** only builds and tests.
 on:
   push:
     tags: ["V*"]
@@ -91,7 +89,7 @@ jobs:
           python-version: "3.14"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          # llvm-tools: llvm-ar makes the static library without Zstandard.
+          # llvm-ar builds the static library without zstd.
           components: llvm-tools
           targets: ${{ matrix.target }}${{ matrix.target2 && format(',{0}', matrix.target2) || '' }}
       - name: Version
@@ -191,7 +189,7 @@ jobs:
             exit 1
           fi
           gh release create "V$version" nxformat-* SHA256SUMS --title "nxformat $version" \
-            --notes-file ../docs/RELEASE.md \
+            --generate-notes \
             --target "${{ github.sha }}"
 
   xmake:

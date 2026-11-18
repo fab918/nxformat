@@ -1,4 +1,4 @@
-"""Build the fixed, synthetic NX conformance corpus (not a general packer)."""
+"""Build the synthetic test fixtures in tests/fixtures."""
 
 from __future__ import annotations
 

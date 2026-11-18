@@ -1,8 +1,6 @@
-name: NXFormat tests and conformance
+name: CI
 
 on:
-  # PR branches are covered by pull_request; avoid scheduling the same
-  # matrix twice and exhausting the hosted macOS runner pool.
   push:
     branches: [main]
   pull_request:
@@ -17,13 +15,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Hosted arm64 capacity has cancelled this job before runner startup.
-        # Other jobs keep macos-latest (arm64); full conformance also covers Intel.
         os: [ubuntu-latest, windows-latest, macos-latest]
-    # Preserve the required check name while using an available Intel pool.
+    # macos-latest (arm64) runners are often unavailable for this job.
     runs-on: ${{ matrix.os == 'macos-latest' && 'macos-15-intel' || matrix.os }}
     env:
-      # On Windows the conformance scripts build with MSVC, not MinGW.
       CXX: ${{ matrix.os == 'windows-latest' && 'cl' || '' }}
     steps:
       - uses: actions/checkout@v4
@@ -35,45 +30,45 @@ jobs:
           components: rustfmt, clippy
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
-      - name: Install real Zstandard decoder runtime
+      - name: Install zstd
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libzstd1
-      - name: Install macOS Zstandard decoder runtime
+      - name: Install zstd
         if: runner.os == 'macOS'
         run: brew list zstd || brew install zstd
-      - name: Check Rust formatting
+      - name: cargo fmt
         run: cargo fmt --manifest-path packer/Cargo.toml -- --check
-      - name: Run Rust library tests
+      - name: cargo test
         run: cargo test --locked --manifest-path packer/Cargo.toml
-      - name: Run dependency-free portable SHA tests
+      - name: cargo test (portable SHA)
         run: cargo test --locked --no-default-features --manifest-path packer/Cargo.toml
-      - name: Run Rust static checks
+      - name: cargo clippy
         run: cargo clippy --all-targets --locked --manifest-path packer/Cargo.toml -- -D warnings
-      - name: Independently validate Rust writer output in Python and C++17
+      - name: Writer conformance
         run: python tests/conformance/test_rust_writer.py
-      - name: Validate source resources and exact reconstruction
+      - name: Source resources
         run: python tests/conformance/test_source_resources.py
-      - name: Independently validate native conversion and original content
+      - name: Native conversion
         run: python tests/conformance/test_native_conversion.py
-      - name: Independently validate native additions from existing NX
+      - name: Native add
         run: python tests/conformance/test_native_add.py
-      - name: Independently validate complete Switch 1 multi-Program views
+      - name: Switch 1 multi-Program
         run: python tests/conformance/test_switch1_review.py
-      - name: Independently validate Switch 2 Edition and multi-Program NUP imports
+      - name: Switch 2 NUP
         run: python tests/conformance/test_switch2_nup.py
-      - name: Validate extracted-tree conversion and CLI workflows
+      - name: Extracted trees
         run: |
           python tests/conformance/test_extracted_tree.py
           python tests/conformance/test_tree_cli.py
-      - name: Independently validate transactional repack output in Python and C++17
+      - name: Repack
         run: python tests/conformance/test_rust_repack.py
-      - name: Validate persistent runtime reader, shared LRU and asynchronous prefetch
+      - name: Session reader
         run: python tests/conformance/test_session.py
-      - name: Validate native and portable block SHA-256
+      - name: SHA-256
         run: python tests/conformance/test_native_sha.py
-      - name: Validate immutable mapped-source leases and eviction
+      - name: Mapped source
         run: python tests/conformance/test_mapped_source.py
-      - name: Validate persistent runtime under address/undefined sanitizers
+      - name: Session reader (ASan/UBSan)
         if: runner.os == 'Linux'
         run: python tests/conformance/test_session.py --sanitize address,undefined
 
@@ -84,19 +79,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - name: Install real Zstandard decoder runtime
+      - name: Install zstd
         run: sudo apt-get update && sudo apt-get install -y libzstd1
-      - name: Regenerate deterministic fixtures
+      - name: Build fixtures
         run: python tests/conformance/build_fixtures.py
-      - name: Validate documentation paths and fixture index
-        run: python tests/conformance/check_phase0.py
-      - name: Validate fixture layouts and contents
+      - name: Validate fixtures
         run: python tests/conformance/validate_fixtures.py
-      - name: Verify binary fixture reproducibility
+      - name: Fixtures are reproducible
         run: python tests/conformance/check_reproducible.py
-      - name: Verify generated reader header
+      - name: dist/ headers are current
         run: python reader/generate_header.py --check
-      - name: Check out pinned pre-NXEX reader
+      - name: Check out old reader (43b1a61)
         uses: actions/checkout@v4
         with:
           ref: 43b1a61aa51933191fc650778f1bb53e7407cbfb
@@ -104,25 +97,25 @@ jobs:
           sparse-checkout: dist/nx_reader.hpp
           sparse-checkout-cone-mode: false
           persist-credentials: false
-      - name: Compile and exercise the C++17 reader
+      - name: C++ reader
         env:
           NX_LEGACY_READER_INCLUDE: ${{ github.workspace }}/build/legacy-reader/dist
         run: python tests/conformance/test_reader.py
-      - name: Build the C++17 reader with CMake and run its smoke test
+      - name: CMake smoke test
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
           cmake --build build --config Release --target nx_reader_cxx17_smoke
           ctest --test-dir build -C Release --output-on-failure
-      - name: Exercise the reader under AddressSanitizer and UndefinedBehaviorSanitizer
+      - name: C++ reader (ASan/UBSan)
         run: python tests/conformance/test_reader_sanitizers.py
-      - name: Ensure generated fixtures are committed
+      - name: Fixtures are committed
         shell: bash
         run: |
           for file in tests/fixtures/*.nx tests/fixtures/fixture_index.json; do
             git ls-files --error-unmatch "$file" >/dev/null
           done
           git diff --exit-code -- tests/fixtures
-      - name: Check patch whitespace
+      - name: Whitespace
         run: git diff --check
 
   rust-msrv:
@@ -134,9 +127,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.80.0
-      - name: Check all targets with minimum supported Rust
+      - name: cargo check
         run: cargo check --locked --all-targets --manifest-path packer/Cargo.toml
-      - name: Test both SHA backends with minimum supported Rust
+      - name: cargo test
         run: |
           cargo test --locked --manifest-path packer/Cargo.toml
           cargo test --locked --no-default-features --manifest-path packer/Cargo.toml
@@ -154,23 +147,23 @@ jobs:
           python-version: "3.14"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          # llvm-tools: llvm-ar makes the static library without Zstandard.
+          # llvm-ar builds the static library without zstd.
           components: rustfmt, clippy, llvm-tools
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
-      - name: Check formatting
+      - name: cargo fmt
         run: cargo fmt --manifest-path ffi/Cargo.toml -- --check
-      - name: Static checks
+      - name: cargo clippy
         run: cargo clippy --all-targets --locked --manifest-path ffi/Cargo.toml -- -D warnings
-      - name: Test the C entry points
+      - name: cargo test
         run: cargo test --locked --manifest-path ffi/Cargo.toml
-      - name: Build the libraries
+      - name: cargo build
         run: cargo build --release --locked --manifest-path ffi/Cargo.toml
-      - name: Link a C program against the shared and the static library
+      - name: Link a C program
         run: |
           python tools/test_c_api.py
           python tools/test_c_api.py --static
-      - name: Build and test a packaged CMake consumer
+      - name: Package and CMake consumer
         shell: bash
         run: |
           version=$(python -c 'import tomllib; print(tomllib.load(open("ffi/Cargo.toml", "rb"))["package"]["version"])')
@@ -194,20 +187,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Check formatting
+      - name: cargo fmt
         run: cargo fmt --manifest-path app/Cargo.toml -- --check
-      - name: Static checks
+      - name: cargo clippy
         run: cargo clippy --all-targets --locked --manifest-path app/Cargo.toml -- -D warnings
-      - name: Build NXConvert
+      - name: cargo build
         run: cargo build --release --locked --manifest-path app/Cargo.toml
-      - name: Test artwork handling
+      - name: cargo test
         run: cargo test --locked --manifest-path app/Cargo.toml
-      - name: Run it headless
+      - name: Smoke test
         shell: bash
         run: |
           app/target/release/nxconvert --version
           app/target/release/nxconvert contents tests/fixtures/dlc_only_application.nx | grep -q '^@SIZE'
-      - name: Upload NXConvert for PR testing
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: nxconvert-${{ matrix.os }}
@@ -221,9 +214,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build coverage-guided sanitizer fuzzer
+      - name: Build fuzzer
         run: clang++ -std=c++17 -g -O1 -fsanitize=fuzzer,address,undefined -Idist -Itests/support tests/fuzz/nx_reader_fuzz.cpp -ldl -o /tmp/nx_reader_fuzz
-      - name: Fuzz copied fixture seeds for one minute
+      - name: Fuzz for one minute
         run: |
           mkdir -p /tmp/nx-corpus
           cp tests/fixtures/*.nx tests/fuzz/seeds/*.nx /tmp/nx-corpus/

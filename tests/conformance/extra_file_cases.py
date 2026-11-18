@@ -1,4 +1,4 @@
-"""Independent optional-tree corpus, shared by ordinary and sanitizer runs."""
+"""Archives with an extra-file tree, used by the reader tests."""
 
 from __future__ import annotations
 

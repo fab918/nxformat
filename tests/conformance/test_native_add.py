@@ -1,12 +1,11 @@
-"""Synthetic existing-NX additions with two independent readers, no game data."""
+"""Tests for adding native content to an existing NX."""
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 
 ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0,str(ROOT/"benchmarks"))
-import run_native_add as additions
+import native_add_steps as additions
 
 def main():
     subprocess.run(["cargo","build","--release","--locked","--manifest-path",str(ROOT/"packer/Cargo.toml"),"--example","native_add"],cwd=ROOT,check=True)

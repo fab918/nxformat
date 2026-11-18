@@ -358,8 +358,7 @@ fn nca(content_type: u8, program_id: u64, sections: Vec<Section>, encrypted: boo
     let size = out.len() as u64;
     put_u64(&mut out, 0x208, size);
     put_u64(&mut out, 0x210, program_id);
-    // Native-loader fixtures need the u32 SDK add-on version as well as the
-    // separate key-generation byte. Inventory fixtures previously omitted it.
+    // SDK add-on version (u32).
     put_u32(&mut out, 0x21C, 0x000B_0000);
     out[0x220] = 0x0B;
     out

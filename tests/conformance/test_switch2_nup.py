@@ -1,4 +1,4 @@
-"""Validate Switch 2 Editions and multi-Program imports with unchanged readers."""
+"""Switch 2 Edition and multi-Program NUP import tests."""
 from pathlib import Path
 import subprocess
 import tempfile

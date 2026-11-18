@@ -26,8 +26,8 @@ public:
     static Result<std::shared_ptr<DiskSource>> open(const std::filesystem::path& path) {
         return open_impl(path,false);
     }
-    // Usually slower than open() (cold loads, first touch, games over 1 GiB); see
-    // docs/READER.md, "Recommended source settings for emulators".
+    // Windows only. Slower than open() except when a small set of data is
+    // read again and again in the same process.
     static Result<std::shared_ptr<DiskSource>> open_mapped(const std::filesystem::path& path) {
         return open_impl(path,true);
     }

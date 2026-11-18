@@ -1,4 +1,4 @@
-"""Independently parse and validate the generated NX 0.2 fixture corpus."""
+"""Parse and check every fixture in tests/fixtures."""
 
 from __future__ import annotations
 

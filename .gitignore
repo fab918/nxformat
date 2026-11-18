@@ -8,5 +8,4 @@ CMakeUserPresets.json
 /ffi/target/
 /app/target/
 /dist-release/
-/benchmarks/results/
 /results/

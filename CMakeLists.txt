@@ -2,8 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 project(NXFormat VERSION 1.0.4 LANGUAGES CXX)
 
 include(CTest)
-# Optional single-header C++17 reader target; no writer or conversion core is
-# introduced into emulator read builds.
+# Header-only C++17 reader.
 add_library(nxcore_reader INTERFACE)
 target_include_directories(nxcore_reader INTERFACE
   "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/reader>"

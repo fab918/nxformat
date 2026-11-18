@@ -1,4 +1,4 @@
-"""Create a repacked archive and validate it independently in Python and C++17."""
+"""Repack tests, checked in Python and C++."""
 
 from __future__ import annotations
 

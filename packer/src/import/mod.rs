@@ -31,7 +31,7 @@ pub use tree::{
     audit_executables, discover, inspect_tree, ExecutableAudit, SourceFile, TreeCandidate, TreeView,
 };
 
-/// Independent declaration sidecar written by full filesystem extraction.
+/// extracted.nximport, written by a full extraction.
 pub const EXTRACTION_MANIFEST: &str = "extracted.nximport";
 
 /// Read explicit associations without requiring a restoration recipe. The

@@ -1,4 +1,4 @@
-"""Regenerate fixtures twice and compare every archive byte-for-byte."""
+"""Build the fixtures twice and check both runs give the same bytes."""
 
 from __future__ import annotations
 

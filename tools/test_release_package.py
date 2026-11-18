@@ -1,4 +1,4 @@
-"""Build and run C/C++ consumers against one generated desktop release archive."""
+"""Build C/C++ programs against a release archive and run them."""
 from __future__ import annotations
 
 import argparse

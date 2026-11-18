@@ -1,4 +1,4 @@
-"""Build Rust writer outputs, independently validate them, and read them in C++17."""
+"""Writer tests, checked in Python and C++."""
 
 from __future__ import annotations
 

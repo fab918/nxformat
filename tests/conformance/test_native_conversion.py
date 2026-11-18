@@ -1,4 +1,4 @@
-"""Independent synthetic native conversion and original-byte conformance."""
+"""Native DNSP/DXCI conversion tests (synthetic content)."""
 from __future__ import annotations
 import os
 from pathlib import Path

@@ -2,7 +2,7 @@
 
 **Release:** 1.0.4. **Binary header versions:** `(0,2)` and `(0,3)`. **Extension:** `.nx`. **Magic:** ASCII `NXAR`. This document defines both wire versions. Integers are little-endian. Offsets and byte counts are unsigned unless stated otherwise. Indexes are zero-based. No on-disk C/C++ structure may be read by casting a pointer to it; implementations decode each field from bytes with explicit bounds and endian conversion.
 
-Source container formats, including decrypted DNSP/DXCI/DNCA, are not NX wire types. Import-to-snapshot mapping is described in [CLI.md](CLI.md#source-import-contract); the byte layout and reader requirements here remain source-independent.
+Source container formats (DNSP, DXCI, DNCA, NUP) are not NX wire types; this document does not depend on them.
 
 The fixed field tables in this document are the only authoritative wire definitions. All reserved bytes and bits are zero and MUST be rejected if nonzero.
 
@@ -29,7 +29,7 @@ Top-level and block-data offsets are absolute from archive byte zero. `NxMediaRe
 
 A full rewrite (new archive, compaction) MUST build and validate a complete temporary archive, flush it, and atomically replace the original on the same filesystem. Synchronize the destination directory after replacement on platforms that support directory synchronization. An in-place edit follows the append protocol of §8: it never overwrites a byte referenced by any generation still present in a header slot, and it only rewrites the header slot that is not selected.
 
-An implementation MUST use checked arithmetic for every range and count. The maximum archive size is `INT64_MAX`. Normative object count and payload limits are in [SECURITY.md](SECURITY.md).
+An implementation MUST use checked arithmetic for every range and count. The maximum archive size is `INT64_MAX`. Object count and payload limits are in §13.
 
 ## 2. Primitive encodings
 
@@ -143,7 +143,7 @@ Tables appear in the order application, program, snapshot, localized entry, depe
 | 68 | 4 | `u32` | `metadata_snapshot_index` | Exact snapshot carrying displayed metadata; `0xffffffff` when none is available |
 | 72 | 8 | `byte[8]` | `reserved1` | All zero |
 
-Application flags must agree with the application's snapshots. `HAS_BASE` means at least one snapshot has type base; `HAS_DLC` means at least one snapshot has type DLC. Application program and snapshot ranges partition their respective tables in application order. The snapshot range includes executable snapshots and DLC content. A zero-length program range uses `first_program_index=0xffffffff`; nonempty program ranges partition the Program table. `metadata_snapshot_index` is absent only when no reliable display metadata is present; otherwise it MUST identify a non-DLC snapshot in this application. The displayed strings, localized entries, NACP record and icons MUST all be associated with that exact snapshot. Native values originate from its metadata; explicit caller-supplied display fallbacks or edits may supply title, publisher or icons without modifying native NACP bytes. Display fields alone are not evidence of native origin or execution compatibility (see [CLI.md](CLI.md#display-title-and-artwork)). The packer selects the eligible snapshot with authoritative metadata and the highest numeric content version; when versions tie, it selects the greatest Catalog snapshot index. Localized-entry ranges partition the Localized Entry table in application order. Opaque-media ranges are disjoint, in bounds, and contain only opaque-source metadata records. Applications are strictly ascending by `(platform, application_id)`; the same numeric ID may occur on distinct platforms. Native display metadata for other snapshots with reliable values is preserved by the Snapshot Metadata History extension.
+Application flags must agree with the application's snapshots. `HAS_BASE` means at least one snapshot has type base; `HAS_DLC` means at least one snapshot has type DLC. Application program and snapshot ranges partition their respective tables in application order. The snapshot range includes executable snapshots and DLC content. A zero-length program range uses `first_program_index=0xffffffff`; nonempty program ranges partition the Program table. `metadata_snapshot_index` is absent only when no reliable display metadata is present; otherwise it MUST identify a non-DLC snapshot in this application. The displayed strings, localized entries, NACP record and icons MUST all be associated with that exact snapshot. Native values originate from its metadata; explicit caller-supplied display fallbacks or edits may supply title, publisher or icons without modifying native NACP bytes. Display fields alone are not evidence of native origin or execution compatibility. The packer selects the eligible snapshot with authoritative metadata and the highest numeric content version; when versions tie, it selects the greatest Catalog snapshot index. Localized-entry ranges partition the Localized Entry table in application order. Opaque-media ranges are disjoint, in bounds, and contain only opaque-source metadata records. Applications are strictly ascending by `(platform, application_id)`; the same numeric ID may occur on distinct platforms. Native display metadata for other snapshots with reliable values is preserved by the Snapshot Metadata History extension.
 
 A non-absent `metadata_snapshot_index` requires at least one metadata reference (title, publisher, icon, NACP, localized entry, or opaque media). If any such reference exists, `metadata_snapshot_index` MUST be present. Opaque media alone is sufficient to require an exact source association.
 
@@ -228,7 +228,7 @@ For a partial source update, a required-base dependency must name the exact targ
 | 16 | 8 | `u64` | `data_offset` | Catalog-relative extension payload range |
 | 24 | 8 | `u64` | `data_size` | Payload byte size |
 
-Defined optional extension payloads: `0x00010001` required firmware is one little-endian `u32`, application owner; `0x00010002` supported languages is `u16 count` followed by `count` repetitions of `u8 length` and lowercase ASCII BCP 47 bytes, application owner, count 1..64; `0x00010003` regions is `u16 count` followed by `count` two-byte uppercase ISO 3166-1 alpha-2 codes, application owner, count 1..249. Entries in a list are bytewise sorted and unique. Values are emitted only when reliably known. `0x00010001` through `0x00010003` describe only the exact application `metadata_snapshot_index`, which MUST be present when these extensions exist; they are discovery facts, never defaults for other versions. An editor must remove/rederive them when that selected source changes. Native NACP/opaque metadata for other versions remains in their snapshot history or complete native tree. Per-snapshot launch firmware uses `0x00010005`. `0x00010004` is the required Snapshot Metadata History extension defined below; `0x00010005` is the required Snapshot Native Metadata extension. `0x00010006` is the optional Rebuild Recipes extension (flags 0, application owner): a 16-byte header (`NXRC`, `u16` version 1, `u16` header size 16, `u32` count 1..4096, `u32` zero), then for each recipe a `u64` length, the recipe bytes as defined in [RECIPE](RECIPE.md) and zero padding to 8 bytes. Recipes are strictly ascending by their trailing SHA-256 (the recipe checksum), each checksum must match, and the payload ends at the last padding byte. The reference writer limits the combined encoded recipe payloads to 8 MiB, within the 16 MiB Catalog limit. A reader may skip the extension; a writer keeps a recipe only while every file it names is present. Unknown optional extension payloads are skipped after range validation; unknown required types reject the archive. A `(type_id, owner_kind, owner_index)` tuple is unique.
+Defined optional extension payloads: `0x00010001` required firmware is one little-endian `u32`, application owner; `0x00010002` supported languages is `u16 count` followed by `count` repetitions of `u8 length` and lowercase ASCII BCP 47 bytes, application owner, count 1..64; `0x00010003` regions is `u16 count` followed by `count` two-byte uppercase ISO 3166-1 alpha-2 codes, application owner, count 1..249. Entries in a list are bytewise sorted and unique. Values are emitted only when reliably known. `0x00010001` through `0x00010003` describe only the exact application `metadata_snapshot_index`, which MUST be present when these extensions exist; they are discovery facts, never defaults for other versions. An editor must remove/rederive them when that selected source changes. Native NACP/opaque metadata for other versions remains in their snapshot history or complete native tree. Per-snapshot launch firmware uses `0x00010005`. `0x00010004` is the required Snapshot Metadata History extension defined below; `0x00010005` is the required Snapshot Native Metadata extension. `0x00010006` is the optional Rebuild Recipes extension (flags 0, application owner): a 16-byte header (`NXRC`, `u16` version 1, `u16` header size 16, `u32` count 1..4096, `u32` zero), then for each recipe a `u64` length, the recipe bytes as defined in §14 and zero padding to 8 bytes. Recipes are strictly ascending by their trailing SHA-256 (the recipe checksum), each checksum must match, and the payload ends at the last padding byte. The reference writer limits the combined encoded recipe payloads to 8 MiB, within the 16 MiB Catalog limit. A reader may skip the extension; a writer keeps a recipe only while every file it names is present. Unknown optional extension payloads are skipped after range validation; unknown required types reject the archive. A `(type_id, owner_kind, owner_index)` tuple is unique.
 
 #### Snapshot Metadata History (`0x00010004`)
 
@@ -310,7 +310,7 @@ An editor MUST preserve every resource of a retained application, remap its root
 and file/block references, and include those blocks in live-data accounting and
 compaction. Removing a game version does not remove the application's resources.
 Removing an entire application removes its resources. Rebuild recipes may reference
-resource files by size and digest, as defined in [RECIPE.md](RECIPE.md).
+resource files by size and digest (§14).
 
 ### Optional Extra Files (`0x00010009`, NX 0.2 / 0.3)
 
@@ -519,7 +519,7 @@ with Strict source/output verification and atomic replacement, preserving shared
 block references and retained metadata/recipes. Recipe literal compression is a
 separate encoding and is not changed by this operation.
 
-Independent Zstandard frames allow decoding one containing block rather than scanning/decompressing a whole file or archive. Smaller frames bound extra decompression work for small reads, while larger frames can improve ratio and reduce per-block metadata. The size choice remains a benchmark decision; 256 KiB is not claimed optimal. The current packer uses Zstandard level 3 by default, allows levels 1 through 13, constrains the frame window to the configured block size and emits no dictionary. It keeps a frame only when it saves at least 25 % of the block (`min_compression_savings_bp`, default 2500): below that, the I/O saved on a SATA SSD no longer pays for the ~150-200 µs decode, and on NVMe or a warm cache any frame costs latency. Cheap probes skip the full compression attempt on blocks that cannot reach the threshold. A file whose first chunk keeps Zstandard can be written with smaller chunks (`compressed_chunk_bytes`, 64 KiB by default, 0 = off); other files keep their chunk size. On a measured Switch 1 archive (about half the bytes compress), 64 KiB chunks cut the median 4 KiB read from 167 to 40 µs and p99 from 319 to 86 µs for a 1.3 % larger archive; on a mostly RAW archive they cost 3.9 % size for the same median read. Levels were measured on real data with 64 KiB blocks: decode time stays flat up to level 13 (about 24 µs per kept block) and rises about 15 % from level 15, where more blocks also cross the threshold; level 13 saves only about 0.03 %, so 3 (default), 9 and 13 are the useful presets. These are packer defaults, not wire requirements; deterministic bytes are scoped to identical inputs, options, and the same pinned codec build.
+Reference packer defaults (not wire requirements): Zstandard level 3 (1 to 13 allowed), no dictionary, window limited to the block size. A frame is kept only when it saves at least 25 % of the block; otherwise the block is RAW. Files whose first chunk compresses use 64 KiB chunks, other files 256 KiB.
 
 ## 10. Catalog and path string rules
 
@@ -571,10 +571,48 @@ Display-version text, Build ID, dependency list, title, publisher, icon, other c
 
 The reference reader reads fields from byte spans with explicit little-endian helpers. It must not cast mapped bytes to a compiler structure, assume host alignment, or use host pointers as file offsets. The reference reader captures the hot block index and integrity table under a configurable memory budget and verifies their combined hash before use. It never re-trusts uncaptured descriptors/digests from a mutable source. Other implementations may use an equivalently protected paged design. Bytes referenced by the mounted generation MUST remain immutable for the Archive lifetime, especially when decoded blocks are cached; the in-place edit protocol guarantees this. A random file read maps file offset to a reference index arithmetically, resolves one `NxBlock`, reads the covering RAW slices or decompresses the block, and copies the requested in-block range.
 
-The standalone distributable is `dist/nx_reader.hpp`, generated from the sole C++17 reader implementation `reader/nx_reader.hpp`. An optional `nxcore::reader` CMake target exposes that same implementation; no aggregate C++20 core or CXX bridge is part of the reader. Its API, ownership/thread contract, resource budgets, and validation boundary are documented in [READER.md](READER.md). Zstandard and optional accelerated SHA-256 are supplied through caller callbacks; the wire format does not require Rust, Cargo, NXEmu, a global runtime, or a linked crypto library.
+The reference reader is `reader/nx_reader.hpp` (copied to `dist/`). Zstandard decoding is supplied by the caller through a callback.
 
-## 14. Reference material
+### Limits
 
-- [NUP specification](https://github.com/a55uka/nup/blob/meow/SPEC.md), [packer](https://github.com/a55uka/nup/blob/meow/tools/nup/nup/pack.py), [reader](https://github.com/a55uka/nup/blob/meow/tools/nup/nup/read.py), and [format structures](https://github.com/a55uka/nup/blob/meow/tools/nup/nup/format.py).
-- [Zstandard frame format](https://github.com/meta/zstd/blob/dev/doc/zstd_compression_format.md), [seekable-format overview](https://github.com/meta/zstd/blob/dev/contrib/seekable_format/README.md), and [seekable-format specification](https://github.com/meta/zstd/blob/dev/contrib/seekable_format/zstd_seekable_compression_format.md).
-- [EROFS design](https://erofs.docs.kernel.org/en/latest/design.html), [on-disk overview](https://erofs.docs.kernel.org/en/latest/ondisk/index.html), [chunk layout](https://erofs.docs.kernel.org/en/latest/ondisk/chunked_format.html), and [performance FAQ](https://erofs.docs.kernel.org/en/latest/faq.html).
+Readers reject archives above these values. Implementations may use lower limits.
+
+| Resource | Maximum |
+|---|---:|
+| Archive size | `INT64_MAX` bytes |
+| Catalog | 16 MiB |
+| Applications / programs / snapshots | 4,096 / 16,384 / 65,536 |
+| Localized entries / dependencies / extensions | 16,384 / 32,768 / 4,096 |
+| Media records / one media payload / Media region | 65,535 / 64 MiB / 4 GiB |
+| Manifest | 4 GiB |
+| Directories / files / entries | 16,777,216 / 33,554,432 / 50,331,648 |
+| Path component / path pool | 4,096 bytes / 2 GiB |
+| Blocks | `2^32` |
+| Block references of one file | `2^32-1` |
+| Directory depth | 256 |
+| Zstandard window / decoded block | 1 MiB |
+| Source Resources | 4,096 |
+
+NX has no signature. Hashes detect damage, not tampering.
+
+## 14. Rebuild recipe format
+
+A rebuild recipe (extension `0x00010006`, or a standalone `.nxrecipe` file) rebuilds an original DNSP/DXCI from files stored in the NX. Version 1, little-endian:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `NXRECIPE` |
+| 8 | 2 | version, 1 |
+| 10 | 2 | reserved, 0 |
+| 12 | 4 | segment count, 1 to 2^20 |
+| 16 | 8 | original size, sum of the segment lengths |
+| 24 | 32 | SHA-256 of the original |
+| 56 | 8 | literal bytes, sum of the literal segment lengths |
+| 64 | 4 | name length, at most 4096 |
+| 68 | 4 | reserved, 0 |
+| 72 | n | original file name, UTF-8 |
+| | 48 x count | segments |
+| | rest | one Zstd frame with the literal bytes |
+| end - 32 | 32 | SHA-256 of every byte before it |
+
+A segment row is: kind `u8`, fill byte `u8` (zero unless kind 1), 6 zero bytes, length `u64` (nonzero), then 32 bytes (file SHA-256 for kind 2, else zero). Segments cover the original in order: kind 0 takes the next bytes of the literal frame, kind 1 repeats the fill byte, kind 2 is a whole file of the NX (or of a Source Resource) found by size and SHA-256. A rebuild checks every segment and the final SHA-256 before publishing the file.

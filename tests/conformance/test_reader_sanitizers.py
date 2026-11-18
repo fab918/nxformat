@@ -1,4 +1,4 @@
-"""Run the deterministic reader corpus under available address/UB sanitizers."""
+"""Run the C++ reader tests with ASan/UBSan."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Reuse the native writer's independent C++17 byte/selection conformance tool."""
+"""Extracted-tree import tests."""
 import argparse
 from pathlib import Path
 import subprocess

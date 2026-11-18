@@ -1553,7 +1553,7 @@ fn extract_all(
         })();
         if let Err(error) = result {
             partial.push(format!(
-                "Independent import manifest not created: {error}. Extracted files were kept."
+                "extracted.nximport not created: {error}. Extracted files were kept."
             ));
         }
     }

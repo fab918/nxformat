@@ -1,4 +1,4 @@
-"""Compile the portable reader and exercise it against the conformance corpus."""
+"""Build the C++ reader and run it on every fixture."""
 
 from __future__ import annotations
 

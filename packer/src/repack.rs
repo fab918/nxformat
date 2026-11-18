@@ -2608,7 +2608,7 @@ fn visit_identity_tree(
                 .files
                 .get(entry.target as usize)
                 .ok_or_else(|| bad("tree references missing File record"))?;
-            // A File record may appear at one path per snapshot (SECURITY.md).
+            // A File record may appear at one path per snapshot.
             if !seen.insert((2, entry.target)) {
                 return Err(bad("File record repeated within one snapshot"));
             }

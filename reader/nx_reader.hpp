@@ -297,9 +297,7 @@ using ZstdDecoder = bool (*)(void* context, const std::uint8_t* frame,
                              std::size_t output_capacity, std::size_t* written,
                              std::size_t* consumed);
 
-// Optional caller-owned SHA-256 implementation. NX 0.2 verifies blocks with
-// per-slice CRC-32C, so the reader no longer calls it; the field is kept for
-// source compatibility with 0.1 callers.
+// Unused: blocks are checked with CRC-32C. Kept so old callers still compile.
 using BlockSha256 = bool (*)(void* context, const std::uint8_t* bytes,
                              std::size_t size, std::uint8_t output[32]);
 
@@ -1038,7 +1036,7 @@ struct Archive {
 
 private:
     static constexpr std::uint32_t no_index = 0xffffffffu;
-    // Normative NX limit (SECURITY.md): deeper snapshot trees reject.
+    // NX limit (SPEC §13): deeper snapshot trees reject.
     static constexpr std::size_t max_directory_depth = 256;
     struct File { std::uint64_t size = 0; std::uint32_t first = 0, count = 0; std::uint8_t chunk_log2 = 16; std::array<std::uint8_t, 32> digest{}; };
     struct Directory { std::uint32_t first = 0, count = 0; };

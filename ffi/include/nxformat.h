@@ -3,7 +3,7 @@
  * Every command and option of `nxconvert` is available: pass the same
  * arguments, without the program name. Each output line goes to the line
  * callback instead of stdout/stderr. Add "--frontend" to get the
- * machine-readable `@` lines (see docs/CLI.md).
+ * machine-readable `@` lines (see nxconvert --help).
  *
  * Strings are UTF-8 and NUL-terminated. Paths are UTF-8 on every platform.
  * Calls on different threads run independently; one run blocks its thread

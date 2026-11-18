@@ -27,7 +27,7 @@ struct SessionOptions {
     // the start.
     bool split_reads = true;
     // Background decode threads for split reads and prefetch. 0 picks
-    // min(4, hardware threads / 2), at least 1. 1 is the 1.0.0 behaviour.
+    // min(4, hardware threads / 2), at least 1.
     unsigned decode_workers = 0;
 };
 
@@ -111,7 +111,7 @@ public:
         return demand(file,offset,length,output,capacity,cursor);
     }
 
-    // Independent verification deliberately bypasses the verified block cache.
+    // Full verification does not use the block cache.
     Status verify_all() {
         Admission admitted(*this,false);
         return admitted ? archive_.verify_all() : Status::failure(ErrorCode::cancelled,"persistent reader stopped");

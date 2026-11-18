@@ -1,4 +1,4 @@
-"""Compile and exercise the optional bounded Windows disk mapping adapter."""
+"""Tests for the Windows mapped disk source."""
 from pathlib import Path
 import subprocess
 import tempfile

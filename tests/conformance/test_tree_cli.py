@@ -1,4 +1,4 @@
-"""Exercise the minimal CLI using existing artificial fixtures and C++ reader."""
+"""CLI tests on extracted trees."""
 from pathlib import Path
 import subprocess
 import tempfile

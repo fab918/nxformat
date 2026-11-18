@@ -1,4 +1,4 @@
-"""Independent Python/C++ checks for block-backed source preservation."""
+"""Source Resource tests."""
 
 import hashlib
 import json

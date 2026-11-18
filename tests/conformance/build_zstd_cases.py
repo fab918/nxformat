@@ -1,4 +1,4 @@
-"""Write deterministic real-frame Zstandard decoder cases to a temporary folder."""
+"""Write Zstd decoder test cases to a folder."""
 
 from __future__ import annotations
 

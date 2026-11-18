@@ -1,4 +1,4 @@
-"""Validate native and forced-portable block SHA-256 independently."""
+"""Check native and portable SHA-256 give the same result."""
 import os
 from pathlib import Path
 import shlex

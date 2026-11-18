@@ -19,8 +19,7 @@ pub struct ReceiptSnapshot {
     pub module_build_ids: BTreeMap<String, Option<[u8; 32]>>,
     pub module_hash_checks: BTreeMap<String, u8>,
 }
-/// Independent audit artifact, deliberately not SnapshotMetadata.opaque and not
-/// a new wire extension. Keep it with the NX to retain declared provenance.
+/// Import receipt written next to the NX (not stored inside it).
 #[derive(Clone, Debug)]
 pub struct ImportReceipt {
     pub manifest: DeclarationManifest,

@@ -1,4 +1,4 @@
-"""Synchronize the portable reader and optional runtime companion headers."""
+"""Copy the reader headers to dist/."""
 
 from __future__ import annotations
 

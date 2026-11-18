@@ -1,4 +1,4 @@
-"""Reproducible persistent-reader tests; synthetic content only."""
+"""Tests for nx::Session (synthetic content)."""
 from __future__ import annotations
 
 import argparse

@@ -2224,7 +2224,6 @@ pub(crate) fn identical_planned_files(
 }
 
 /// Verified native NACP order -> NX BCP-47 language identifiers.
-/// Sources and unsupported newer NACP layouts: docs/CLI.md.
 pub const NACP_LANGUAGE_MAP: [(&str, &str); 16] = [
     ("AmericanEnglish", "en-us"),
     ("BritishEnglish", "en-gb"),
