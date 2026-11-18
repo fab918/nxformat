@@ -141,6 +141,15 @@ jobs:
         run: |
           python tools/test_c_api.py --lib-dir ${{ env.LIB_DIR }}
           python tools/test_c_api.py --lib-dir ${{ env.LIB_DIR }} --static
+      - name: Get appimagetool
+        if: runner.os == 'Linux' && matrix.app
+        shell: bash
+        run: |
+          arch=$([ "$(uname -m)" = aarch64 ] && echo aarch64 || echo x86_64)
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" "https://github.com/AppImage/appimagetool/releases/download/1.9.0/appimagetool-$arch.AppImage"
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          sudo apt-get update && sudo apt-get install -y desktop-file-utils
+          echo "APPIMAGETOOL=$RUNNER_TEMP/appimagetool" >> "$GITHUB_ENV"
       - name: Pack
         shell: bash
         run: |
@@ -153,7 +162,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: nxformat-${{ matrix.platform }}
-          path: dist-release/nxformat-*
+          path: |
+            dist-release/nxformat-*
+            dist-release/NXConvert-*
           if-no-files-found: error
 
   publish:
@@ -175,21 +186,21 @@ jobs:
         run: |
           version="${VERSION#[vV]}"
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          sha256sum dist-release/nxformat-* | sed 's|dist-release/||' > dist-release/SHA256SUMS
+          sha256sum dist-release/nxformat-* dist-release/NXConvert-* | sed 's|dist-release/||' > dist-release/SHA256SUMS
           python tools/xmake_recipe.py --add "$version" dist-release/SHA256SUMS
           mkdir -p build/xmake-repository
           cp -R packages build/xmake-repository/
           cp LICENSE build/xmake-repository/
           python -c 'import shutil,sys; shutil.make_archive("dist-release/nxformat-xmake-" + sys.argv[1], "zip", "build/xmake-repository")' "$version"
           cd dist-release
-          sha256sum nxformat-* > SHA256SUMS
+          sha256sum nxformat-* NXConvert-* > SHA256SUMS
           cat SHA256SUMS
           if gh release view "V$version" >/dev/null 2>&1; then
             echo "Release V$version already exists; use a new version instead of replacing published binaries."
             exit 1
           fi
-          gh release create "V$version" nxformat-* SHA256SUMS --title "nxformat $version" \
-            --generate-notes \
+          gh release create "V$version" NXConvert-* nxformat-* SHA256SUMS --title "nxformat $version" \
+            --notes-file ../.github/release-notes.md --generate-notes \
             --target "${{ github.sha }}"
 
   xmake:
