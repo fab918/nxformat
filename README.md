@@ -24,29 +24,26 @@ and edits these files; a header-only C++17 reader lets emulators load them.
 NXConvert does not decrypt anything. It only repacks game files you have
 already decrypted from games you own. It contains no keys and no game data.
 
-## Download
+## Standalone app
 
-From the [releases page](https://github.com/fab918/nxformat/releases):
+Download NXConvert, open it, and drag and drop your dumps or games onto the window.
 
-- macOS: `NXConvert-<version>-macos.dmg`, drag the app to Applications. The app
-  is not notarized: the first time, right-click it and choose Open.
-- Windows: `NXConvert-<version>-windows-x64.exe`.
-- Linux: `NXConvert-<version>-linux-x64.AppImage` (or arm64), `chmod +x` then run.
+| System | Download |
+|---|---|
+| Windows | [NXConvert-1.0.4-windows-x64.exe](https://github.com/fab918/nxformat/releases/download/V1.0.4/NXConvert-1.0.4-windows-x64.exe) |
+| macOS | [NXConvert-1.0.4-macos.dmg](https://github.com/fab918/nxformat/releases/download/V1.0.4/NXConvert-1.0.4-macos.dmg) (first launch: right-click, Open) |
+| Linux | [x64 AppImage](https://github.com/fab918/nxformat/releases/download/V1.0.4/NXConvert-1.0.4-linux-x64.AppImage) · [arm64 AppImage](https://github.com/fab918/nxformat/releases/download/V1.0.4/NXConvert-1.0.4-linux-arm64.AppImage) (`chmod +x`, then run) |
 
-The `nxformat-*` archives are the developer packages (libraries and headers).
+<p align="center">
+  <img src="docs/nxconvert.png" alt="NXConvert" width="700">
+</p>
 
-To build it yourself (Rust 1.95 or newer):
+Other versions and the developer packages are on the [releases page](https://github.com/fab918/nxformat/releases).
 
-```bash
-cargo build --release --locked --manifest-path app/Cargo.toml
-```
+To build it yourself (Rust 1.95 or newer): `cargo build --release --locked --manifest-path app/Cargo.toml`.
 
-The binary is `app/target/release/nxconvert`.
+## Command line
 
-## Usage
-
-### 
-### CLI
 Run `nxconvert` with no arguments to open the window, or use the command line:
 
 ```bash
