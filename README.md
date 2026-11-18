@@ -39,6 +39,8 @@ The binary is `app/target/release/nxconvert`.
 
 ## Usage
 
+### 
+### CLI
 Run `nxconvert` with no arguments to open the window, or use the command line:
 
 ```bash
@@ -59,9 +61,9 @@ unchanged, `nxconvert pack-tree folder/ game.nx` gives back the exact original N
 
 ## Performance
 
-Native C++ readers, same compiler, same Zstd library, same real archive. NUP
-uses [Eglantine's reader](https://github.com/fab918/Eglantine/blob/6da821f83f402cb288f6d078b9e3c21955e0b54f/src/core/file_sys/nup_container.cpp)
-unmodified. Median of five runs, 16 pending requests, OS cache not flushed.
+**Don't expect higher average FPS from switching to NX**. Its main benefits are lower memory usage and faster access to uncached data, which may reduce loading delays and I/O-related stutters, especially on memory-constrained devices.
+
+The benchmarks below compare NX and NUP ([Eglantine's reader](https://github.com/fab918/Eglantine/blob/6da821f83f402cb288f6d078b9e3c21955e0b54f/src/core/file_sys/nup_container.cpp)) under identical conditions.
 
 ![Read time: NUP v1 and NX](docs/benchmarks/native-read-performance.png)
 
@@ -82,63 +84,6 @@ unmodified. Median of five runs, 16 pending requests, OS cache not flushed.
 | Sequential 32 MiB, second pass | 113.2 / 67.6 | 97.9 / 50.0 |
 
 These are synthetic access patterns on real content, not gameplay.
-
-## Using it in an emulator
-
-Reading: copy the headers from [dist/](dist/). They need C++17 and a Zstd
-decode callback, nothing else.
-
-```cpp
-#include "nx_session.hpp"
-#include "nx_disk_source.hpp"
-
-auto source = *nx::DiskSource::open("game.nx").value;   // check errors in real code
-nx::SessionOptions options;
-options.reader.zstd = my_zstd_decode;                    // see nx::ZstdDecoder
-options.reader.cache_raw_verification = source->immutable_reads();
-auto session = *nx::Session::open(source, options).value;
-auto& archive = session->archive();                      // applications(), snapshots(), title()...
-auto file = *archive.resolve_file(snapshot, "romfs/data.bin").value;
-session->read(file.id, offset, length, buffer, capacity);
-```
-
-Every read is verified before bytes reach the buffer. The archive file must not
-change while it is open.
-
-Writing and editing: link the C API from the release archives.
-[nxformat.h](ffi/include/nxformat.h) runs any `nxconvert` command in process,
-with an output callback and a cancel handle:
-
-```c
-const char* args[] = {"contents", "game.nx", "--frontend"};
-nxformat_run(args, 3, on_line, user, cancel, error, sizeof error);
-```
-
-An emulator that decrypts games itself can pass the plaintext through a read
-callback instead of writing it to disk:
-
-```c
-nxformat_source* game = nxformat_source_new("game.nsp", size, read_plaintext, ctx);
-const char* args[] = {"pack", nxformat_source_path(game), "game.nx", "--frontend"};
-nxformat_run(args, 4, on_line, user, cancel, error, sizeof error);
-nxformat_source_free(game);
-```
-
-Each release archive has `include/`, `lib/` (shared and static) and `bin/`.
-
-CMake: point `nxformat_DIR` at `lib/cmake/nxformat` of an extracted archive.
-
-```cmake
-find_package(nxformat 1.0 REQUIRED CONFIG)
-target_link_libraries(app PRIVATE nxformat::nxformat) # or nxformat::static, nxformat::static_nozstd
-```
-
-xmake: extract `nxformat-xmake-<version>.zip` from the release.
-
-```lua
-add_repositories("nxformat /path/to/nxformat-xmake")
-add_requires("nxformat")
-```
 
 ## Repository
 
