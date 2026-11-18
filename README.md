@@ -62,7 +62,7 @@ nxconvert extract game.nx folder/           # export the game files
 `extract` also writes `.nxrestore.zst` in the folder. As long as the files are
 unchanged, `nxconvert pack-tree folder/ game.nx` gives back the exact original NX.
 
-## Performance
+## Performance against NUP V1
 
 **Don't expect higher average FPS from switching to NX**. Its main benefits are lower memory usage and faster access to uncached data, which may reduce loading delays and I/O-related stutters, especially on memory-constrained devices.
 
